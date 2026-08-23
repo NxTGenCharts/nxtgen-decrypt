@@ -44,10 +44,37 @@ function persist(){
   try{
     localStorage.setItem(LS_KEY, JSON.stringify({
       exchangeCreds: state.exchangeCreds,
+      exchangeMode: state.exchangeMode,
       balances: state.balances,
       autotrade: { ...state.autotrade, timer: null },
     }));
   }catch(e){ /* storage unavailable — non-fatal, autotrade just won't survive a reload */ }
+}
+
+// A cred/balance slot from an older version of this app could be `null` or a
+// flat object/number instead of today's { live, testnet } shape. Coerce
+// anything unexpected back into a safe shape rather than letting a stale
+// localStorage value throw when we later index into .live/.testnet.
+function coerceCredSlot(saved){
+  if(saved && typeof saved === 'object' && ('live' in saved || 'testnet' in saved)){
+    return { live: saved.live || null, testnet: saved.testnet || null };
+  }
+  if(saved && typeof saved === 'object' && saved.apiKey){
+    // Old flat "{ apiKey, connectedAt }" shape — treat it as a live-network connection.
+    return { live: saved, testnet: null };
+  }
+  return { live: null, testnet: null };
+}
+
+function coerceBalanceSlot(saved, supportsTestnet){
+  if(saved && typeof saved === 'object' && ('live' in saved || 'testnet' in saved)){
+    return supportsTestnet ? { live: saved.live ?? null, testnet: saved.testnet ?? null } : { live: saved.live ?? null };
+  }
+  if(typeof saved === 'number'){
+    // Old flat number shape — treat it as the live-network balance.
+    return supportsTestnet ? { live: saved, testnet: null } : { live: saved };
+  }
+  return supportsTestnet ? { live: null, testnet: null } : { live: null };
 }
 
 function restore(){
@@ -55,10 +82,26 @@ function restore(){
     const raw = localStorage.getItem(LS_KEY);
     if(!raw) return;
     const saved = JSON.parse(raw);
-    if(saved.exchangeCreds) Object.assign(state.exchangeCreds, saved.exchangeCreds);
-    if(saved.balances) Object.assign(state.balances, saved.balances);
+    if(saved.exchangeCreds){
+      for(const key of Object.keys(EXCHANGES)){
+        state.exchangeCreds[key] = coerceCredSlot(saved.exchangeCreds[key]);
+      }
+    }
+    if(saved.exchangeMode){
+      for(const key of Object.keys(EXCHANGES)){
+        const m = saved.exchangeMode[key];
+        state.exchangeMode[key] = (m === 'testnet' && EXCHANGES[key].testnetSupported) ? 'testnet' : 'live';
+      }
+    }
+    if(saved.balances){
+      for(const key of Object.keys(EXCHANGES)){
+        state.balances[key] = coerceBalanceSlot(saved.balances[key], EXCHANGES[key].testnetSupported);
+      }
+    }
     if(saved.autotrade) Object.assign(state.autotrade, saved.autotrade, { timer:null, running:false });
-  }catch(e){ /* ignore corrupt/blocked storage */ }
+    if(!EXCHANGES[state.autotrade.exchange]) state.autotrade.exchange = 'bitget';
+    if(state.autotrade.mode !== 'testnet') state.autotrade.mode = 'live';
+  }catch(e){ /* ignore corrupt/blocked storage — safe defaults from state.js are already in place */ }
 }
 
 function showAtMessage(html, type){
@@ -71,8 +114,8 @@ function renderConnectRows(){
   els.connectRows.innerHTML = Object.keys(EXCHANGES).map(key => {
     const label = EXCHANGES[key].label;
     const supportsTestnet = EXCHANGES[key].testnetSupported;
-    const mode = state.exchangeMode[key];
-    const cred = state.exchangeCreds[key][mode];
+    const mode = supportsTestnet ? (state.exchangeMode[key] || 'live') : 'live';
+    const cred = (state.exchangeCreds[key] || {})[mode] || null;
     const connected = !!cred;
     const modeToggle = supportsTestnet ? `
       <div class="mode-toggle" role="group" aria-label="${label} network">
@@ -141,8 +184,8 @@ els.connectRows.addEventListener('click', (e) => {
 function renderBalances(){
   els.balanceRows.innerHTML = Object.keys(EXCHANGES).map(key => {
     const label = EXCHANGES[key].label;
-    const mode = state.exchangeMode[key];
-    const bal = state.balances[key][mode];
+    const mode = EXCHANGES[key].testnetSupported ? (state.exchangeMode[key] || 'live') : 'live';
+    const bal = (state.balances[key] || {})[mode];
     const isAtExchange = state.autotrade.exchange === key && state.autotrade.mode === mode;
     const modeTag = mode === 'testnet' ? ' <span class="pill" style="color:var(--amber);border-color:var(--amber-dim);">TESTNET</span>' : '';
     return `<div class="balance-row" data-exchange="${key}">
@@ -382,27 +425,39 @@ els.atExchange.addEventListener('change', () => {
 });
 
 export function initAutotrade(){
-  restore();
-  renderExchangeOptions();
-  renderConnectRows();
-  renderBalances();
-  ensureDay();
-  const modeForStart = EXCHANGES[state.autotrade.exchange].testnetSupported ? state.autotrade.mode : 'live';
-  const savedBal = state.balances[state.autotrade.exchange][modeForStart];
-  if(savedBal != null && !els.atStartBalance.value){
-    els.atStartBalance.value = state.autotrade.startingBalance || savedBal || '';
-  }
-  renderAutotradeStatus();
-  // If Autotrade was left ON from a previous session (page refresh), resume it.
-  if(state.autotrade.enabled && !state.autotrade.targetReached){
-    const intervalMs = Math.max(5, parseFloat(els.atInterval.value) || 15) * 1000;
-    state.autotrade.running = true;
-    els.atExchange.disabled = true;
-    els.atStartBalance.disabled = true;
-    els.atAnchor.disabled = true;
-    els.atModeLive.disabled = true;
-    els.atModeTestnet.disabled = true;
-    tick();
-    state.autotrade.timer = setInterval(tick, intervalMs);
+  try{
+    restore();
+    renderExchangeOptions();
+    renderConnectRows();
+    renderBalances();
+    ensureDay();
+    const modeForStart = EXCHANGES[state.autotrade.exchange].testnetSupported ? state.autotrade.mode : 'live';
+    const savedBal = state.balances[state.autotrade.exchange][modeForStart];
+    if(savedBal != null && !els.atStartBalance.value){
+      els.atStartBalance.value = state.autotrade.startingBalance || savedBal || '';
+    }
+    renderAutotradeStatus();
+    // If Autotrade was left ON from a previous session (page refresh), resume it.
+    if(state.autotrade.enabled && !state.autotrade.targetReached){
+      const intervalMs = Math.max(5, parseFloat(els.atInterval.value) || 15) * 1000;
+      state.autotrade.running = true;
+      els.atExchange.disabled = true;
+      els.atStartBalance.disabled = true;
+      els.atAnchor.disabled = true;
+      els.atModeLive.disabled = true;
+      els.atModeTestnet.disabled = true;
+      tick();
+      state.autotrade.timer = setInterval(tick, intervalMs);
+    }
+  }catch(err){
+    // Never let a bad stored value blank the whole panel silently — clear the
+    // corrupt local data, fall back to defaults, and still render the panel.
+    console.error('initAutotrade failed, resetting local Autotrade data:', err);
+    try{ localStorage.removeItem(LS_KEY); }catch(e){}
+    renderExchangeOptions();
+    renderConnectRows();
+    renderBalances();
+    renderAutotradeStatus();
+    showAtMessage('Saved Autotrade/Balances data from an older version could not be read, so it was reset to defaults. Please reconnect exchanges and re-enter balances.', 'error');
   }
 }
