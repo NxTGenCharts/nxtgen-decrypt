@@ -145,3 +145,16 @@
   .xasset{ font-size:15px; }
   .xprofit{ font-size:17px; }
 }
+
+/* -------------------- Autotrade & Balances: responsive -------------------- */
+@media (max-width:768px){
+  .connect-row, .balance-row{ grid-template-columns:1fr; align-items:stretch; gap:8px; }
+  .balance-shown{ text-align:left; }
+  .cycle-log-row{ grid-template-columns:1fr 1fr; grid-template-areas:"n pct" "path path" "amt bal" "time time"; }
+  .cycle-log-n{ grid-area:n; }
+  .cycle-log-pct{ grid-area:pct; text-align:right; }
+  .cycle-log-path{ grid-area:path; }
+  .cycle-log-amt{ grid-area:amt; }
+  .cycle-log-bal{ grid-area:bal; text-align:right; }
+  .cycle-log-time{ grid-area:time; text-align:left; }
+}

@@ -54,6 +54,29 @@ export const els = {
   badgeBitget: document.getElementById('badgeBitget'),
   badgeBinance: document.getElementById('badgeBinance'),
   badgeBybit: document.getElementById('badgeBybit'),
+  // --- Autotrade & Balances tab ---
+  tabAutoBtn: document.getElementById('tabAutoBtn'),
+  panelAuto: document.getElementById('panelAuto'),
+  connectRows: document.getElementById('connectRows'),
+  balanceRows: document.getElementById('balanceRows'),
+  atExchange: document.getElementById('atExchange'),
+  atAnchor: document.getElementById('atAnchor'),
+  atFee: document.getElementById('atFee'),
+  atMinVolume: document.getElementById('atMinVolume'),
+  atMinProfit: document.getElementById('atMinProfit'),
+  atDailyTarget: document.getElementById('atDailyTarget'),
+  atInterval: document.getElementById('atInterval'),
+  atStartBalance: document.getElementById('atStartBalance'),
+  atToggleBtn: document.getElementById('atToggleBtn'),
+  atMessages: document.getElementById('atMessages'),
+  atStatDay: document.getElementById('atStatDay'),
+  atStatBalance: document.getElementById('atStatBalance'),
+  atStatProfitPct: document.getElementById('atStatProfitPct'),
+  atStatProfitAmt: document.getElementById('atStatProfitAmt'),
+  atStatCycles: document.getElementById('atStatCycles'),
+  atProgressBar: document.getElementById('atProgressBar'),
+  atProgressLabel: document.getElementById('atProgressLabel'),
+  atCycleLog: document.getElementById('atCycleLog'),
 };
 
 // Single mutable state object. Every other module imports `state` and
@@ -83,6 +106,30 @@ export const state = {
 
   // ---- Window: how long each gap has been visible across scans (client-side, this session) ----
   xFirstSeen: new Map(), // "base|quote|buyExch|sellExch" -> timestamp first observed
+
+  // ---- Exchange "connections" — labels/status only. Keys are kept in the
+  // browser's localStorage for this session's convenience and are never
+  // sent anywhere by this app; nothing here places real orders. See
+  // autotrade.js for the full explanation shown in the UI. ----
+  exchangeCreds: { bitget:null, binance:null, bybit:null }, // { apiKey, connectedAt } — secret is stored but never rendered back
+
+  // ---- Manually-entered balances, per exchange (spot only) ----
+  balances: { bitget:null, binance:null, bybit:null },
+
+  // ---- Autotrade (Triangular-only) simulation state ----
+  autotrade: {
+    enabled: false,
+    running: false,
+    exchange: 'bitget',
+    dateKey: null,          // local date string; a new day resets the counters below
+    startingBalance: 0,
+    currentBalance: 0,
+    dayProfitPct: 0,
+    dayProfitAmt: 0,
+    targetReached: false,
+    cycles: [],             // executed cycles today: {path, profitPct, profitAmt, balanceAfter, time}
+    timer: null,
+  },
 };
 
 export const EXCHANGE_BADGE_IDS = { bitget:'badgeBitget', binance:'badgeBinance', bybit:'badgeBybit' };

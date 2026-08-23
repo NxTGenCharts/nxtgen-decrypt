@@ -1,0 +1,354 @@
+// =============================================================
+// autotrade.js — "Connect Exchanges", per-exchange Balances, and
+// the Autotrade engine for the Triangular tab only.
+//
+// IMPORTANT — what this actually does:
+// This module does NOT place real orders on any exchange. It cannot:
+// browser JS has no safe way to sign authenticated exchange requests
+// without exposing your secret key to anyone who opens devtools, so
+// wiring a secret key straight to live order placement from a static
+// front-end would be a security problem, not just a feature. Real
+// auto-execution belongs behind a server you control that holds the
+// keys and signs requests — this file is the decision engine you'd
+// point at that server.
+//
+// What it DOES do:
+// - Lets you "connect" an exchange (API key + secret stored only in
+//   this browser's localStorage, never transmitted anywhere).
+// - Lets you record today's balance per exchange (manual entry, since
+//   reading a real balance also requires an authenticated/signed call).
+// - Watches the selected exchange's live order books for triangular
+//   cycles, same math as the Triangular tab, and — when Autotrade is
+//   ON — paper-trades (simulates) the single highest-profit cycle that
+//   clears your profit floor, compounding a running "today" balance
+//   until your daily target is hit, then stops and shows the summary.
+// =============================================================
+import { els, state } from './state.js';
+import { EXCHANGES, filterTriPairs } from './exchanges.js';
+import { buildGraph, findCycles } from './triangular.js';
+import { fmtPct, coinIconHtml } from './utils.js';
+
+const LS_KEY = 'nxtgen_autotrade_v1';
+const MIN_PROFIT_FLOOR = 0.8; // hard floor — autotrade never fires below this, regardless of the field value
+
+function todayKey(){
+  return new Date().toDateString();
+}
+
+function money(n){
+  return '$' + (n < 0 ? '-' : '') + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits:2, maximumFractionDigits:2 });
+}
+
+// ---------------- persistence (localStorage only — nothing leaves the browser) ----------------
+function persist(){
+  try{
+    localStorage.setItem(LS_KEY, JSON.stringify({
+      exchangeCreds: state.exchangeCreds,
+      balances: state.balances,
+      autotrade: { ...state.autotrade, timer: null },
+    }));
+  }catch(e){ /* storage unavailable — non-fatal, autotrade just won't survive a reload */ }
+}
+
+function restore(){
+  try{
+    const raw = localStorage.getItem(LS_KEY);
+    if(!raw) return;
+    const saved = JSON.parse(raw);
+    if(saved.exchangeCreds) Object.assign(state.exchangeCreds, saved.exchangeCreds);
+    if(saved.balances) Object.assign(state.balances, saved.balances);
+    if(saved.autotrade) Object.assign(state.autotrade, saved.autotrade, { timer:null, running:false });
+  }catch(e){ /* ignore corrupt/blocked storage */ }
+}
+
+function showAtMessage(html, type){
+  if(!els.atMessages) return;
+  els.atMessages.innerHTML = html ? `<div class="msg ${type||'info'}">${html}</div>` : '';
+}
+
+// ---------------- Connect Exchanges ----------------
+function renderConnectRows(){
+  els.connectRows.innerHTML = Object.keys(EXCHANGES).map(key => {
+    const label = EXCHANGES[key].label;
+    const cred = state.exchangeCreds[key];
+    const connected = !!cred;
+    return `<div class="connect-row" data-exchange="${key}">
+      <div class="connect-label">${label}</div>
+      <input class="ck-key" type="text" placeholder="Enter API key" value="${connected ? maskKey(cred.apiKey) : ''}" ${connected ? 'disabled' : ''}>
+      <input class="ck-secret" type="password" placeholder="Enter secret key" value="${connected ? '••••••••••••' : ''}" ${connected ? 'disabled' : ''}>
+      <button class="primary ${connected ? 'ghost' : ''} connect-btn" data-action="${connected ? 'disconnect' : 'connect'}">
+        ${connected ? 'Disconnect' : 'Connect'}
+      </button>
+      <span class="xbadge" data-state="${connected ? 'up' : 'idle'}"><span class="xbadge-dot"></span>${connected ? 'CONNECTED' : 'NOT CONNECTED'}</span>
+    </div>`;
+  }).join('');
+}
+
+function maskKey(k){
+  if(!k) return '';
+  if(k.length <= 8) return '•'.repeat(k.length);
+  return k.slice(0,4) + '…' + k.slice(-4);
+}
+
+els.connectRows.addEventListener('click', (e) => {
+  const btn = e.target.closest('.connect-btn');
+  if(!btn) return;
+  const row = e.target.closest('.connect-row');
+  const key = row.dataset.exchange;
+  const action = btn.dataset.action;
+  if(action === 'connect'){
+    const apiKey = row.querySelector('.ck-key').value.trim();
+    const secretKey = row.querySelector('.ck-secret').value.trim();
+    if(!apiKey || !secretKey){
+      showAtMessage('Enter both an API key and a secret key before connecting.', 'error');
+      return;
+    }
+    // Stored locally only, never sent anywhere — see the notice under Connect Exchanges.
+    state.exchangeCreds[key] = { apiKey, secretKeyMasked: true, connectedAt: new Date().toLocaleString() };
+    showAtMessage(`${EXCHANGES[key].label} connected. Keys are stored only in this browser (localStorage) and are not used to place any trade — Autotrade below runs as a simulation against ${EXCHANGES[key].label}'s public order book.`, 'info');
+  } else {
+    state.exchangeCreds[key] = null;
+    showAtMessage(`${EXCHANGES[key].label} disconnected.`, 'info');
+  }
+  persist();
+  renderConnectRows();
+  renderBalances();
+  renderExchangeOptions();
+});
+
+// ---------------- Balances ----------------
+function renderBalances(){
+  els.balanceRows.innerHTML = Object.keys(EXCHANGES).map(key => {
+    const label = EXCHANGES[key].label;
+    const bal = state.balances[key];
+    const isAtExchange = state.autotrade.exchange === key;
+    return `<div class="balance-row" data-exchange="${key}">
+      <div class="connect-label">${label}${isAtExchange ? ' <span class="pill tr-yes" style="margin-left:6px;">AUTOTRADE</span>' : ''}</div>
+      <input class="bal-input" type="number" min="0" step="0.01" placeholder="Enter balance (USDT)" value="${bal !== null && bal !== undefined ? bal : ''}">
+      <button class="primary ghost bal-save-btn">Save Balance</button>
+      <div class="balance-shown">${bal !== null && bal !== undefined ? money(bal) : '—'}</div>
+    </div>`;
+  }).join('');
+}
+
+els.balanceRows.addEventListener('click', (e) => {
+  const btn = e.target.closest('.bal-save-btn');
+  if(!btn) return;
+  const row = e.target.closest('.balance-row');
+  const key = row.dataset.exchange;
+  const val = parseFloat(row.querySelector('.bal-input').value);
+  if(!isFinite(val) || val < 0){
+    showAtMessage('Enter a valid balance amount first.', 'error');
+    return;
+  }
+  state.balances[key] = val;
+  persist();
+  renderBalances();
+  showAtMessage(`${EXCHANGES[key].label} balance saved: ${money(val)}. This is a manual entry — reading a live balance requires an authenticated call this front-end intentionally does not make.`, 'info');
+});
+
+// ---------------- Autotrade config UI ----------------
+function renderExchangeOptions(){
+  if(els.atExchange.options.length === 0 || els.atExchange.dataset.built !== '1'){
+    els.atExchange.innerHTML = Object.keys(EXCHANGES).map(k => `<option value="${k}">${EXCHANGES[k].label}</option>`).join('');
+    els.atExchange.dataset.built = '1';
+  }
+  els.atExchange.value = state.autotrade.exchange;
+}
+
+function ensureDay(){
+  const today = todayKey();
+  if(state.autotrade.dateKey !== today){
+    // New day: roll current balance into the new starting balance, reset counters.
+    const rollFrom = state.autotrade.currentBalance || state.autotrade.startingBalance || parseFloat(els.atStartBalance.value) || 0;
+    state.autotrade.dateKey = today;
+    state.autotrade.startingBalance = rollFrom;
+    state.autotrade.currentBalance = rollFrom;
+    state.autotrade.dayProfitPct = 0;
+    state.autotrade.dayProfitAmt = 0;
+    state.autotrade.targetReached = false;
+    state.autotrade.cycles = [];
+    persist();
+  }
+}
+
+function renderAutotradeStatus(){
+  const at = state.autotrade;
+  els.atStatDay.textContent = at.dateKey || '—';
+  els.atStatBalance.textContent = money(at.currentBalance || 0);
+  els.atStatProfitPct.textContent = fmtPct(at.dayProfitPct || 0);
+  els.atStatProfitAmt.textContent = money(at.dayProfitAmt || 0);
+  els.atStatCycles.textContent = String(at.cycles.length);
+
+  const target = parseFloat(els.atDailyTarget.value) || 11;
+  const pct = Math.max(0, Math.min(100, (at.dayProfitPct / target) * 100));
+  els.atProgressBar.style.width = pct.toFixed(1) + '%';
+  els.atProgressBar.classList.toggle('done', at.targetReached);
+  els.atProgressLabel.textContent = `${fmtPct(at.dayProfitPct || 0)} of ${target}% daily target${at.targetReached ? ' — reached' : ''}`;
+
+  els.atToggleBtn.classList.toggle('on', at.enabled && at.running);
+  els.atToggleBtn.querySelector('.btn-label').textContent = at.enabled
+    ? (at.targetReached ? 'Target Reached — Stopped' : 'Stop Autotrade')
+    : (at.targetReached ? 'Start Autotrade (new day)' : 'Start Autotrade');
+
+  renderCycleLog();
+  renderBalances(); // keep the AUTOTRADE badge on the right exchange row
+}
+
+function renderCycleLog(){
+  const cycles = state.autotrade.cycles;
+  if(cycles.length === 0){
+    els.atCycleLog.innerHTML = `<div class="empty">No cycles executed yet today. Autotrade fires on the single highest-profit triangular cycle above your floor, each time it scans.</div>`;
+    return;
+  }
+  els.atCycleLog.innerHTML = cycles.slice().reverse().map((c, idx) => {
+    const n = cycles.length - idx;
+    const [A,B,C] = c.path;
+    return `<div class="cycle-log-row">
+      <div class="cycle-log-n">#${n}</div>
+      <div class="cycle-log-path">${coinIconHtml(A,14)}${A} → ${coinIconHtml(B,14)}${B} → ${coinIconHtml(C,14)}${C} → ${A}</div>
+      <div class="cycle-log-pct">${fmtPct(c.profitPct)}</div>
+      <div class="cycle-log-amt">${money(c.profitAmt)}</div>
+      <div class="cycle-log-bal">${money(c.balanceAfter)}</div>
+      <div class="cycle-log-time">${c.time}</div>
+    </div>`;
+  }).join('');
+}
+
+// ---------------- The engine ----------------
+async function tick(){
+  const at = state.autotrade;
+  if(!at.enabled || at.targetReached) return;
+  ensureDay();
+
+  const key = at.exchange;
+  const anchor = els.atAnchor.value;
+  const feePct = parseFloat(els.atFee.value) || 0;
+  const minVolume = parseFloat(els.atMinVolume.value) || 0;
+  const configuredFloor = parseFloat(els.atMinProfit.value);
+  const minProfitPct = Math.max(MIN_PROFIT_FLOOR, isFinite(configuredFloor) ? configuredFloor : MIN_PROFIT_FLOOR);
+  const dailyTarget = parseFloat(els.atDailyTarget.value) || 11;
+
+  try{
+    const rawPairs = await EXCHANGES[key].load();
+    state.pairsCache[key] = rawPairs;
+    const pairs = filterTriPairs(rawPairs, minVolume);
+    const adj = buildGraph(pairs, false); // realistic bid/ask + fee — never the theoretical mode for real decisions
+    const { results } = findCycles(adj, anchor, feePct, key);
+    const ranked = results.filter(r => isFinite(r.profitPct)).sort((a,b) => b.profitPct - a.profitPct);
+    const best = ranked[0];
+
+    if(best && best.profitPct >= minProfitPct){
+      executeCycle(best, dailyTarget);
+    } else {
+      showAtMessage(best
+        ? `Watching ${EXCHANGES[key].label}… best cycle right now is ${fmtPct(best.profitPct)}, below your ${minProfitPct.toFixed(2)}% floor. No trade this pass.`
+        : `Watching ${EXCHANGES[key].label}… no complete cycle found this pass.`, 'info');
+    }
+  }catch(err){
+    console.error(err);
+    showAtMessage(`Couldn't reach ${EXCHANGES[key].label} this pass (${err.message}). Will retry on the next interval.`, 'error');
+  }
+  renderAutotradeStatus();
+  persist();
+}
+
+function executeCycle(cycle, dailyTarget){
+  const at = state.autotrade;
+  const bal = at.currentBalance;
+  const profitAmt = bal * (cycle.profitPct / 100);
+  const balanceAfter = bal + profitAmt;
+  at.currentBalance = balanceAfter;
+  at.dayProfitAmt = balanceAfter - at.startingBalance;
+  at.dayProfitPct = at.startingBalance > 0 ? (at.dayProfitAmt / at.startingBalance) * 100 : 0;
+  at.cycles.push({
+    path: cycle.path,
+    profitPct: cycle.profitPct,
+    profitAmt,
+    balanceAfter,
+    time: new Date().toLocaleTimeString(),
+  });
+
+  if(at.dayProfitPct >= dailyTarget){
+    at.targetReached = true;
+    stopAutotrade();
+    showAtMessage(`🎯 Daily target of ${dailyTarget}% reached after ${at.cycles.length} cycle${at.cycles.length===1?'':'s'} — Autotrade stopped for the day. Started at ${money(at.startingBalance)}, ended at ${money(at.currentBalance)} (+${fmtPct(at.dayProfitPct)}). See the cycle summary below.`, 'info');
+  } else {
+    showAtMessage(`Executed cycle #${at.cycles.length}: ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(cycle.profitPct)} (${money(profitAmt)}). Running total: ${fmtPct(at.dayProfitPct)} of ${dailyTarget}% target.`, 'info');
+  }
+}
+
+function startAutotrade(){
+  const at = state.autotrade;
+  const key = els.atExchange.value;
+  const startBal = parseFloat(els.atStartBalance.value);
+  if(!isFinite(startBal) || startBal <= 0){
+    showAtMessage('Enter a starting balance for the day before starting Autotrade.', 'error');
+    return;
+  }
+  at.exchange = key;
+  at.dateKey = todayKey();
+  at.startingBalance = startBal;
+  at.currentBalance = startBal;
+  at.dayProfitPct = 0;
+  at.dayProfitAmt = 0;
+  at.targetReached = false;
+  at.cycles = [];
+  at.enabled = true;
+  at.running = true;
+
+  const intervalMs = Math.max(5, parseFloat(els.atInterval.value) || 15) * 1000;
+  tick();
+  at.timer = setInterval(tick, intervalMs);
+
+  els.atExchange.disabled = true;
+  els.atStartBalance.disabled = true;
+  els.atAnchor.disabled = true;
+
+  showAtMessage(`Autotrade started on ${EXCHANGES[key].label} — Triangular only, Spot only. Will only act on cycles ≥ ${Math.max(MIN_PROFIT_FLOOR, parseFloat(els.atMinProfit.value)||MIN_PROFIT_FLOOR).toFixed(2)}%, and stops automatically at +${els.atDailyTarget.value}% for the day.`, 'info');
+  persist();
+  renderAutotradeStatus();
+}
+
+function stopAutotrade(){
+  const at = state.autotrade;
+  at.enabled = false;
+  at.running = false;
+  if(at.timer){ clearInterval(at.timer); at.timer = null; }
+  els.atExchange.disabled = false;
+  els.atStartBalance.disabled = false;
+  els.atAnchor.disabled = false;
+  persist();
+  renderAutotradeStatus();
+}
+
+els.atToggleBtn.addEventListener('click', () => {
+  state.autotrade.enabled ? stopAutotrade() : startAutotrade();
+});
+
+els.atExchange.addEventListener('change', () => {
+  state.autotrade.exchange = els.atExchange.value;
+  renderBalances();
+});
+
+export function initAutotrade(){
+  restore();
+  renderExchangeOptions();
+  renderConnectRows();
+  renderBalances();
+  ensureDay();
+  if(state.balances[state.autotrade.exchange] != null && !els.atStartBalance.value){
+    els.atStartBalance.value = state.autotrade.startingBalance || state.balances[state.autotrade.exchange] || '';
+  }
+  renderAutotradeStatus();
+  // If Autotrade was left ON from a previous session (page refresh), resume it.
+  if(state.autotrade.enabled && !state.autotrade.targetReached){
+    const intervalMs = Math.max(5, parseFloat(els.atInterval.value) || 15) * 1000;
+    state.autotrade.running = true;
+    els.atExchange.disabled = true;
+    els.atStartBalance.disabled = true;
+    els.atAnchor.disabled = true;
+    tick();
+    state.autotrade.timer = setInterval(tick, intervalMs);
+  }
+}

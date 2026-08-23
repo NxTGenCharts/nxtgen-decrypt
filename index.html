@@ -40,6 +40,7 @@
     <button class="navtab active" id="tabOverviewBtn" role="tab" aria-selected="true"><span class="ic">&#9635;</span>Overview</button>
     <button class="navtab" id="tabTriBtn" role="tab" aria-selected="false"><span class="ic">&#9651;</span>Triangular Arbitrage</button>
     <button class="navtab" id="tabXBtn" role="tab" aria-selected="false"><span class="ic">&#8645;</span>Cross-Exchange</button>
+    <button class="navtab" id="tabAutoBtn" role="tab" aria-selected="false"><span class="ic">&#9889;</span>Autotrade &amp; Balances</button>
   </nav>
 
   <!-- ============ OVERVIEW ============ -->
@@ -191,6 +192,94 @@
       <b>How this works —</b> for every asset traded on 2+ of the selected exchanges, this finds the lowest ask (buy side) and the highest bid (sell side) and computes the spread after two taker fees. It requires the buy and sell exchange to be different — a gap on one exchange against itself isn't arbitrage.<br>
       <b>Window, Liquidity, Transfer —</b> Window is how long this session's scanner has continuously seen the gap ("just opened" under ~90s). Liquidity compares top-of-book depth and 24h volume on both sides against your trade amount. Transfer is anchored to Bitget's public coin/network status: if Bitget is one leg and has withdrawals or deposits disabled for that coin, it's flagged "Not transferable." Binance and Bybit don't expose network status without an authenticated account, so pairs between just those two show "Unverified" rather than a guess.<br>
       <b>Read before trading —</b> a live spread here is not automatically capturable — see the banner above. Transfer time, withdrawal fees/limits, and the spread closing before you move funds are the main reasons a real gap this size rarely survives long enough to execute risk-free. This is not financial advice.
+    </footer>
+  </div>
+
+  <!-- ============ AUTOTRADE & BALANCES ============ -->
+  <div class="panel" id="panelAuto">
+
+    <div class="ov-block" style="margin-bottom:18px;">
+      <div class="ov-block-title">Connect Exchanges</div>
+      <div id="connectRows" class="connect-list"></div>
+      <div class="warn-banner" style="margin:14px 0 0;">
+        <b>Your keys never leave this browser.</b> API/secret keys are stored only in this device's local storage, purely so this app can show a connected/disconnected badge per exchange. This app never sends them anywhere and does not place live orders — Autotrade below is a paper-trading simulation against each exchange's public order book. Use read-only keys if you connect real ones.
+      </div>
+    </div>
+
+    <div class="ov-block" style="margin-bottom:18px;">
+      <div class="ov-block-title">Balances (Spot)</div>
+      <div id="balanceRows" class="balance-list"></div>
+    </div>
+
+    <div class="controls">
+      <div class="field">
+        <label for="atExchange">Autotrade exchange</label>
+        <select id="atExchange" title="Autotrade watches this exchange only"></select>
+      </div>
+      <div class="field">
+        <label for="atAnchor">Start / anchor currency</label>
+        <select id="atAnchor" title="The currency each cycle starts and ends in">
+          <option selected value="USDT">USDT</option>
+          <option value="USDC">USDC</option>
+          <option value="BTC">BTC</option>
+          <option value="ETH">ETH</option>
+          <option value="BNB">BNB</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="atFee">Taker fee / leg (%)</label>
+        <input id="atFee" type="number" min="0" max="1" step="0.01" value="0.10">
+      </div>
+      <div class="field">
+        <label for="atMinVolume">Min 24h volume (quote ccy)</label>
+        <input id="atMinVolume" type="number" min="0" step="1000" value="10000">
+      </div>
+      <div class="field">
+        <label for="atMinProfit" title="Autotrade never fires below 0.8% regardless of this value">Min profit to autotrade (%)</label>
+        <input id="atMinProfit" type="number" min="0.8" max="10" step="0.05" value="0.8">
+      </div>
+      <div class="field">
+        <label for="atDailyTarget">Daily profit target (%)</label>
+        <input id="atDailyTarget" type="number" min="0.5" max="100" step="0.5" value="11">
+      </div>
+      <div class="field">
+        <label for="atInterval">Scan interval (s)</label>
+        <input id="atInterval" type="number" min="5" max="300" step="1" value="15">
+      </div>
+      <div class="field">
+        <label for="atStartBalance">Today's starting balance (USDT)</label>
+        <input id="atStartBalance" type="number" min="0" step="1" placeholder="e.g. 1000">
+      </div>
+      <div class="btn-row">
+        <button class="primary live-toggle" id="atToggleBtn"><span class="dot"></span><span class="btn-label">Start Autotrade</span></button>
+      </div>
+    </div>
+
+    <div id="atMessages"></div>
+
+    <div class="ov-grid" style="grid-template-columns:repeat(5, 1fr); margin-bottom:14px;">
+      <div class="ov-card"><span class="ov-label">Trading Day</span><span class="ov-value" id="atStatDay" style="font-size:15px;">—</span></div>
+      <div class="ov-card"><span class="ov-label">Current Balance</span><span class="ov-value" id="atStatBalance">—</span></div>
+      <div class="ov-card ov-highlight"><span class="ov-label">Profit Today</span><span class="ov-value" id="atStatProfitPct">—</span></div>
+      <div class="ov-card"><span class="ov-label">Profit Today ($)</span><span class="ov-value" id="atStatProfitAmt">—</span></div>
+      <div class="ov-card"><span class="ov-label">Cycles Executed</span><span class="ov-value" id="atStatCycles">0</span></div>
+    </div>
+
+    <div class="progress-wrap">
+      <div class="progress-track"><div class="progress-bar" id="atProgressBar" style="width:0%;"></div></div>
+      <div class="progress-label" id="atProgressLabel">0% of 11% daily target</div>
+    </div>
+
+    <div class="ov-block" style="margin-top:18px;">
+      <div class="ov-block-title">Today's Cycle Summary</div>
+      <div id="atCycleLog" class="cycle-log"></div>
+    </div>
+
+    <footer>
+      <b>Scope —</b> Autotrade only trades <b>Triangular Arbitrage</b>, only on <b>Spot</b> markets, and only on the single exchange selected above. Cross-Exchange scanning and futures are not included; futures may come in a future update.<br>
+      <b>How it decides —</b> each pass, it ranks every triangular cycle on the selected exchange and, if the single most profitable one clears both your min-profit field and the hard 0.8% floor, it "executes" it — this compounds a running day-balance rather than placing a real order (see the notice above).<br>
+      <b>Daily target —</b> once today's simulated balance is up 11% (or your configured target) from the starting balance you entered, Autotrade stops itself automatically for the day, however many cycles it took to get there, and the summary above is the full record.<br>
+      This is not financial advice, and simulated results will not exactly match a real fill — depth, slippage, and timing between the three legs all affect a real execution.
     </footer>
   </div>
 

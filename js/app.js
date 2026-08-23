@@ -8,14 +8,16 @@ import { els, state } from './state.js';
 import { switchTabAll } from './ui.js';
 import { runScan, startLiveScan, stopLiveScan } from './triangular.js';
 import { runXScan } from './cross-exchange.js';
+import { initAutotrade } from './autotrade.js';
 
 els.tabOverviewBtn.addEventListener('click', () => switchTabAll('overview'));
 els.ovRunBtn.addEventListener('click', () => { runScan(); runXScan(); });
 
-// Route the tri/x tab buttons through the 3-way switch too, so clicking
-// them also deactivates Overview correctly.
+// Route the tri/x/auto tab buttons through the 4-way switch too, so clicking
+// them also deactivates the other panels correctly.
 els.tabTriBtn.addEventListener('click', () => switchTabAll('tri'));
 els.tabXBtn.addEventListener('click', () => switchTabAll('x'));
+els.tabAutoBtn.addEventListener('click', () => switchTabAll('auto'));
 
 els.liveBtn.addEventListener('click', () => { state.isLive ? stopLiveScan() : startLiveScan(); });
 
@@ -23,3 +25,4 @@ els.scanBtn.addEventListener('click', runScan);
 els.xScanBtn.addEventListener('click', runXScan);
 
 window.addEventListener('load', runScan);
+initAutotrade();

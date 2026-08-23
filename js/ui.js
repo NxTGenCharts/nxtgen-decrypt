@@ -66,10 +66,13 @@ export function switchTabAll(which){
   els.tabOverviewBtn.classList.toggle('active', which === 'overview');
   els.tabTriBtn.classList.toggle('active', which === 'tri');
   els.tabXBtn.classList.toggle('active', which === 'x');
+  els.tabAutoBtn.classList.toggle('active', which === 'auto');
   els.panelOverview.classList.toggle('active', which === 'overview');
   els.panelTri.classList.toggle('active', which === 'tri');
   els.panelX.classList.toggle('active', which === 'x');
+  els.panelAuto.classList.toggle('active', which === 'auto');
   els.tabOverviewBtn.setAttribute('aria-selected', which === 'overview');
   els.tabTriBtn.setAttribute('aria-selected', which === 'tri');
   els.tabXBtn.setAttribute('aria-selected', which === 'x');
+  els.tabAutoBtn.setAttribute('aria-selected', which === 'auto');
 }
