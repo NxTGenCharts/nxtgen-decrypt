@@ -151,6 +151,13 @@ select, input[type=number]{
 }
 select:hover, input[type=number]:hover{ border-color:#33443a; }
 select:focus, input:focus{ outline:1px solid var(--amber); border-color:var(--amber); }
+.toggle-check{
+  display:flex; align-items:center; gap:6px; background:var(--panel2); border:1px solid var(--line);
+  border-radius:var(--r-sm); padding:8px 10px; font-size:11px; color:var(--dim); cursor:pointer; white-space:nowrap;
+}
+.toggle-check:hover{ border-color:#33443a; }
+.toggle-check input{ accent-color:var(--amber); cursor:pointer; }
+.toggle-check:has(input:checked){ color:var(--amber); border-color:var(--amber-dim); background:rgba(240,180,41,.08); }
 button.primary{
   background:var(--amber); color:var(--amber-ink); border:none; border-radius:var(--r-sm); padding:10px 20px;
   font-family:var(--disp); font-weight:700; font-size:13px; cursor:pointer; letter-spacing:.02em;
@@ -162,6 +169,10 @@ button.primary.ghost{
   background:transparent; color:var(--amber); border:1px solid var(--amber-dim);
 }
 button.primary.ghost:hover{ background:rgba(240,180,41,.08); }
+button.primary.live-toggle.on{ background:var(--green-soft); color:var(--green); border-color:var(--green-line); }
+button.primary.live-toggle.on:hover{ background:rgba(61,220,151,.16); }
+button.primary.live-toggle .dot{ width:6px; height:6px; }
+button.primary.live-toggle.on .dot{ background:var(--green); box-shadow:0 0 0 3px var(--green-soft); animation:pulseDot 2.2s infinite; }
 .btn-spinner{
   width:12px;height:12px;border-radius:50%; border:2px solid rgba(26,19,5,.35); border-top-color:var(--amber-ink);
   display:none; animation:spin .7s linear infinite;
@@ -208,7 +219,7 @@ button.primary.is-scanning .btn-spinner{ display:inline-block; }
 .grid{ display:flex; flex-direction:column; gap:10px; }
 .row{
   background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg); padding:16px 18px;
-  display:grid; grid-template-columns:38px 1fr auto; gap:16px; align-items:center;
+  display:grid; grid-template-columns:44px 1fr auto; gap:16px; align-items:center;
   transition:border-color .15s, background .15s; cursor:pointer; position:relative;
 }
 .row:hover{ border-color:#33443a; background:var(--panel-hi); }
@@ -245,6 +256,19 @@ button.primary.is-scanning .btn-spinner{ display:inline-block; }
 .exch.bitget{ border-color:#2f5b46; color:#8fd6ab; }
 .exch.binance{ border-color:#5a4a1a; color:#f0c14b; }
 .exch.bybit{ border-color:#5a1a2a; color:#f5a3b8; }
+
+/* -- live-tracking badges (NEW / OPEN) + closed-cycle strip -- */
+.trackbadge{ font-size:8.5px; font-weight:700; letter-spacing:.07em; padding:2px 7px; border-radius:9px; text-transform:uppercase; white-space:nowrap; }
+.trackbadge.new{ color:var(--amber-ink); background:var(--amber); }
+.trackbadge.open{ color:var(--dim); background:var(--panel2); border:1px solid var(--line); }
+.rank-wrap{ display:flex; flex-direction:column; align-items:center; gap:6px; }
+.first-seen{ font-size:8.5px; color:var(--dim2); white-space:nowrap; }
+.closed-strip{ display:flex; flex-direction:column; gap:6px; margin-bottom:14px; }
+.closed-item{
+  font-size:11px; color:var(--dim2); padding:8px 12px; border:1px dashed var(--line);
+  border-radius:var(--r-sm); background:var(--panel); animation:panelIn .2s ease;
+}
+.closed-item b{ color:var(--red); font-family:var(--disp); }
 
 /* =========================================================
    13. STATES (empty / error / footers)
@@ -371,7 +395,7 @@ footer b{ color:#a9bfae; }
 @media (max-width:720px){
   .row{ grid-template-columns:1fr; text-align:left; }
   .result{ text-align:left; }
-  .rank{ display:none; }
+  .rank-wrap{ display:none; }
   .ov-grid{ grid-template-columns:1fr 1fr; }
   .term-header{ flex-direction:column; }
   .status-cluster{ align-items:flex-start; width:100%; }
@@ -468,10 +492,30 @@ footer b{ color:#a9bfae; }
         <input id="fee" type="number" min="0" max="1" step="0.01" value="0.10" title="Taker fee charged per leg by your exchange tier">
       </div>
       <div class="field">
+        <label for="cliMode" title="Reproduces the CLI scanner's math exactly: one last-traded price used for both buy and sell (no bid/ask spread), and no fee subtracted. This is why that script shows bigger positive numbers — it isn't a more realistic scan, it's ignoring two real costs. Off (default), the app uses live bid/ask plus your fee assumption above, which is the realistic read.">
+          Theoretical (CLI-style)
+        </label>
+        <label class="toggle-check">
+          <input id="cliMode" type="checkbox" checked>
+          <span>last price, no fee</span>
+        </label>
+      </div>
+      <div class="field">
         <label for="minProfit">Min profit filter (%)</label>
         <input id="minProfit" type="number" min="-5" max="5" step="0.01" value="0.05" title="Only show cycles at or above this net profit">
       </div>
+      <div class="field">
+        <label for="minVolume">Min 24h volume (quote ccy)</label>
+        <input id="minVolume" type="number" min="0" step="1000" value="10000" title="Filters out any leg whose 24h quote-currency volume is below this. Thin markets can show a spread that looks profitable on paper but can't really be filled — same filter the CLI scanner uses.">
+      </div>
+      <div class="field">
+        <label for="scanInterval">Live interval (s)</label>
+        <input id="scanInterval" type="number" min="5" max="300" step="1" value="20" title="How often Live Scan re-scans while running">
+      </div>
       <button class="primary" id="scanBtn"><span class="btn-spinner"></span><span class="btn-label">Scan Markets</span></button>
+      <button class="primary ghost live-toggle" id="liveBtn" title="Continuously re-scan and track which cycles are newly opened, still open, or have closed since the last pass — same NEW/OPEN/CLOSED tracking as the CLI scanner">
+        <span class="dot"></span><span class="btn-label">Start Live Scan</span>
+      </button>
       <div class="spacer"></div>
       <div class="stat"><span class="n" id="statPairs">—</span><span class="l">Pairs loaded</span></div>
       <div class="stat"><span class="n" id="statCycles">—</span><span class="l">Cycles checked</span></div>
@@ -479,6 +523,7 @@ footer b{ color:#a9bfae; }
     </div>
 
     <div id="messages"></div>
+    <div class="closed-strip" id="closedStrip"></div>
     <div class="grid" id="results">
       <div class="skeleton-row"></div>
       <div class="skeleton-row"></div>
@@ -486,7 +531,9 @@ footer b{ color:#a9bfae; }
     </div>
 
     <footer>
-      <b>How this works —</b> every leg multiplies your balance by the best bid (selling) or 1/ask (buying) available on that exchange's public order book, minus your taker fee. A positive % means the round trip A→B→C→A returns more than you started with, before slippage. All three legs of one cycle always execute on the <b>same</b> exchange — arbitrage never mixes order books mid-cycle.<br>
+      <b>How this works —</b> every leg multiplies your balance by the best bid (selling) or 1/ask (buying) available on that exchange's public order book, minus your taker fee. A positive % means the round trip A→B→C→A returns more than you started with, before slippage. All three legs of one cycle always execute on the <b>same</b> exchange — arbitrage never mixes order books mid-cycle. Fiat on/off-ramp pairs (USDT/TRY, USDC/IDR, etc.) and any leg under your min 24h volume are excluded before the graph is even built, the same two filters the CLI scanner applies — this is what keeps the results to cycles you could plausibly fill instead of noise from thin or non-tradeable pairs.<br>
+      <b>Theoretical (CLI-style) toggle —</b> checking this reproduces the bundled CLI scanner's math exactly: one last-traded price for both the buy and sell leg (no bid/ask spread) and no fee subtracted. It exists so you can compare the two side by side — it is <b>not</b> a more accurate mode, it's the CLI's shortcut that makes its numbers look better than a real fill would be. Leave it off for a realistic read.<br>
+      <b>Live Scan —</b> re-scans on the interval you set and tags each row <b>NEW</b> the first time it's seen and <b>OPEN</b> on every pass after that, with a first-seen timestamp — mirroring the CLI scanner's continuous-tracking output. Cycles that stop clearing the filter are logged to a closed strip above the results with how long they stayed open, then drop off.<br>
       <b>Read before trading —</b> this is an informational scan of top-of-book prices, not a guarantee, and it does not manufacture profit that isn't really there. Real fills depend on order book depth, execution speed, and simultaneous availability of all three legs — thin books and latency routinely erase small or negative edges either way. This is not financial advice.
     </footer>
   </div>
@@ -566,10 +613,15 @@ const els = {
   exchange: document.getElementById('exchange'),
   anchor: document.getElementById('anchor'),
   fee: document.getElementById('fee'),
+  cliMode: document.getElementById('cliMode'),
   minProfit: document.getElementById('minProfit'),
+  minVolume: document.getElementById('minVolume'),
+  scanInterval: document.getElementById('scanInterval'),
   scanBtn: document.getElementById('scanBtn'),
+  liveBtn: document.getElementById('liveBtn'),
   results: document.getElementById('results'),
   messages: document.getElementById('messages'),
+  closedStrip: document.getElementById('closedStrip'),
   statusDot: document.getElementById('statusDot'),
   statusText: document.getElementById('statusText'),
   lastUpdate: document.getElementById('lastUpdate'),
@@ -609,6 +661,51 @@ const els = {
 // Cache of the last successful per-exchange pairs fetch, so switching tabs
 // (or re-scanning cross-exchange) doesn't force a redundant round-trip.
 let pairsCache = {}; // { bitget: [...], binance: [...], bybit: [...] }
+
+// ---- Live Scan state: mirrors main.py's `tracked` dict + NEW/OPEN/CLOSED lifecycle ----
+let trackedCycles = new Map(); // canonicalKey -> { number, firstSeen }
+let opportunityCounter = 0;
+let isLive = false;
+let liveTimer = null;
+let scanInFlight = false;
+
+// Tags each currently-visible cycle NEW (first time its canonicalKey has
+// been seen this Live Scan session) or OPEN (seen on a previous pass too),
+// and returns the cycles that were tracked last pass but didn't show up
+// this pass — i.e. closed. Identical semantics to main.py's tracked-signature
+// diffing, just keyed on canonicalKey instead of the rotated currency tuple.
+function updateTracking(results){
+  const currentKeys = new Set();
+  for(const r of results){
+    currentKeys.add(r.canonicalKey);
+    const existing = trackedCycles.get(r.canonicalKey);
+    if(existing){
+      r.trackStatus = 'OPEN';
+      r.firstSeen = existing.firstSeen;
+    } else {
+      opportunityCounter++;
+      const firstSeen = new Date().toLocaleTimeString();
+      trackedCycles.set(r.canonicalKey, { number: opportunityCounter, firstSeen });
+      r.trackStatus = 'NEW';
+      r.firstSeen = firstSeen;
+    }
+  }
+  const closedKeys = [];
+  for(const key of trackedCycles.keys()){
+    if(!currentKeys.has(key)) closedKeys.push(key);
+  }
+  const closed = closedKeys.map(key => {
+    const info = trackedCycles.get(key);
+    trackedCycles.delete(key);
+    return { ...info, key };
+  });
+  return closed;
+}
+function resetTracking(){
+  trackedCycles = new Map();
+  opportunityCounter = 0;
+  els.closedStrip.innerHTML = '';
+}
 
 // Tab switching is wired up below via switchTabAll(), once the Overview
 // panel's elements are also available — see "PRESENTATION LAYER" section.
@@ -650,8 +747,11 @@ async function loadBitget(){
     const ask = parseFloat(t.askPr);
     if(!bid || !ask) continue;
     // bidSz/askSz = size resting at the top of book; quoteVolume = 24h turnover in quote currency
+    // close = last traded price — captured only so "Theoretical mode" can reproduce
+    // the CLI scanner's last-price/no-spread math for side-by-side comparison.
     pairs.push({
       symbol:s.symbol, base:s.baseCoin, quote:s.quoteCoin, bid, ask,
+      last: parseFloat(t.close) || (bid + ask) / 2,
       bidQty: parseFloat(t.bidSz) || 0, askQty: parseFloat(t.askSz) || 0,
       quoteVolume24h: parseFloat(t.quoteVolume) || 0,
     });
@@ -694,6 +794,7 @@ async function loadBinance(){
     if(!bid || !ask) continue;
     pairs.push({
       symbol:s.symbol, base:s.baseAsset, quote:s.quoteAsset, bid, ask,
+      last: parseFloat(t.lastPrice) || (bid + ask) / 2,
       bidQty: parseFloat(t.bidQty) || 0, askQty: parseFloat(t.askQty) || 0,
       quoteVolume24h: parseFloat(t.quoteVolume) || 0,
     });
@@ -722,6 +823,7 @@ async function loadBybit(){
     if(!bid || !ask) continue;
     pairs.push({
       symbol:s.symbol, base:s.baseCoin, quote:s.quoteCoin, bid, ask,
+      last: parseFloat(t.lastPrice) || (bid + ask) / 2,
       bidQty: parseFloat(t.bid1Size) || 0, askQty: parseFloat(t.ask1Size) || 0,
       quoteVolume24h: parseFloat(t.turnover24h) || 0,
     });
@@ -735,11 +837,41 @@ const EXCHANGES = {
   bybit:   { label:'Bybit',   load:loadBybit },
 };
 
+// National fiat currency codes. Exchanges sometimes list fiat on/off-ramp
+// markets (e.g. USDT/TRY, USDC/IDR) as regular spot pairs, but these are
+// frequently thin, region-restricted, or otherwise not really tradeable the
+// way normal crypto-crypto pairs are — which produces cycles that look
+// profitable on paper but aren't actually executable. Excluded from the
+// routable graph entirely, same as the CLI scanner's FIAT_CURRENCIES set.
+const FIAT_CURRENCIES = new Set([
+  "USD","EUR","GBP","JPY","AUD","CAD","CHF","CNY","HKD","NZD",
+  "SEK","KRW","SGD","NOK","MXN","INR","RUB","ZAR","TRY","BRL",
+  "TWD","DKK","PLN","THB","IDR","HUF","CZK","ILS","CLP","PHP",
+  "AED","COP","SAR","MYR","RON","BGN","ARS","VND","UAH","EGP",
+  "PKR","BDT","NGN","KES","GHS","QAR","KWD","BHD","OMR","JOD",
+  "LKR","MAD","TND","DZD","XOF","XAF","PEN","UYU","PYG","BOB",
+  "CRC","GTQ","HNL","NIO","DOP","JMD","TTD","BBD","BSD","BZD",
+  "KZT","UZS","AZN","GEL","AMD","MDL","RSD","MKD","ALL","ISK",
+  "HRK","BAM","LBP",
+]);
+
+// Mirrors detector.py's get_last_prices(): drop fiat on/off-ramp pairs and
+// anything whose 24h quote-currency volume can't support a real fill. Runs
+// before the graph is built, so a thin/misleading market never produces a
+// cycle in the first place — the exact filtering order the CLI scanner uses.
+function filterTriPairs(pairs, minQuoteVolume){
+  return pairs.filter(p => {
+    if(FIAT_CURRENCIES.has(p.base) || FIAT_CURRENCIES.has(p.quote)) return false;
+    if(minQuoteVolume > 0 && (p.quoteVolume24h || 0) < minQuoteVolume) return false;
+    return true;
+  });
+}
+
 // Coin/network directory cache, keyed by exchange. Only Bitget exposes this
 // without authentication, so transfer-status detection is Bitget-anchored.
 let coinNetworkCache = {};
 
-function buildGraph(pairs){
+function buildGraph(pairs, useLastPriceNoSpread){
   // adj[currency] = [{to, rate, symbol, side}]
   const adj = new Map();
   const add = (from, to, rate, symbol, side) => {
@@ -747,10 +879,20 @@ function buildGraph(pairs){
     adj.get(from).push({ to, rate, symbol, side });
   };
   for(const p of pairs){
-    // sell base -> quote, using bid
-    add(p.base, p.quote, p.bid, p.symbol, 'SELL');
-    // buy base with quote, using ask (1 quote -> 1/ask base)
-    add(p.quote, p.base, 1/p.ask, p.symbol, 'BUY');
+    if(useLastPriceNoSpread){
+      // Theoretical mode: reproduces the CLI scanner's math exactly — one
+      // last-traded price used for both directions (no bid/ask spread).
+      // Inflates results, since it assumes you can buy and sell at the same
+      // price. Comparison-only; not a realistic fill.
+      const last = p.last || (p.bid + p.ask) / 2;
+      add(p.base, p.quote, last, p.symbol, 'SELL');
+      add(p.quote, p.base, 1/last, p.symbol, 'BUY');
+    } else {
+      // sell base -> quote, using bid
+      add(p.base, p.quote, p.bid, p.symbol, 'SELL');
+      // buy base with quote, using ask (1 quote -> 1/ask base)
+      add(p.quote, p.base, 1/p.ask, p.symbol, 'BUY');
+    }
   }
   return adj;
 }
@@ -796,6 +938,11 @@ function findCycles(adj, anchor, feePct, exchangeKey){
             legs:[e1,e2,e3],
             profitPct,
             mult,
+            // Identity of this loop across scans, independent of which node
+            // it happened to be discovered from — same loop + same direction
+            // = same key even if anchor/discovery order shifts between
+            // scans. Used only for Live Scan's NEW/OPEN/CLOSED tracking.
+            canonicalKey: exchangeKey + '|' + canonical,
           });
         }
       }
@@ -858,8 +1005,12 @@ function render(cycles){
       <ol>${stepsHtml}</ol>
     </div>`;
 
+    const trackHtml = c.trackStatus
+      ? `<span class="trackbadge ${c.trackStatus.toLowerCase()}" title="First seen ${c.firstSeen}">${c.trackStatus}</span>`
+      : '';
+
     return `<div class="row" tabindex="0" role="button" aria-expanded="false">
-      <div class="rank ${i===0?'top1':''}">#${i+1}</div>
+      <div class="rank-wrap"><div class="rank ${i===0?'top1':''}">#${i+1}</div>${trackHtml}</div>
       <div class="loop">${loopHtml}<span class="exch ${c.exchange}">${exLabel}</span></div>
       <div class="result">
         <div class="${profitClass}">${fmtPct(c.profitPct)}</div>
@@ -955,7 +1106,27 @@ function switchTabAll(which){
 els.tabTriBtn.addEventListener('click', () => switchTabAll('tri'));
 els.tabXBtn.addEventListener('click', () => switchTabAll('x'));
 
+function renderClosedStrip(closed){
+  if(!closed.length) return;
+  const now = new Date().toLocaleTimeString();
+  const items = closed.map(c => `<div class="closed-item">#${c.number} <b>CLOSED</b> — opened ${c.firstSeen}, closed ${now}</div>`).join('');
+  // Prepend so the newest closures sit on top; cap the strip so it can't grow forever across a long Live Scan session.
+  els.closedStrip.innerHTML = items + els.closedStrip.innerHTML;
+  const nodes = els.closedStrip.querySelectorAll('.closed-item');
+  if(nodes.length > 8) for(let i = 8; i < nodes.length; i++) nodes[i].remove();
+}
+
+els.fee.disabled = els.cliMode.checked; // reflect the checkbox's initial (checked-by-default) state on load
+els.cliMode.addEventListener('change', () => {
+  els.fee.disabled = els.cliMode.checked;
+  showMessage(els.cliMode.checked
+    ? `Theoretical mode is on — this uses one last-traded price for both the buy and sell leg (no bid/ask spread) and applies no fee, exactly like the CLI scanner. Real fills always cost more than this suggests; treat any positive % here as a ceiling, not a plan.`
+    : '', els.cliMode.checked ? 'info' : '');
+});
+
 async function runScan(){
+  if(scanInFlight) return; // a manual click landed mid-tick of an active Live Scan — skip rather than overlap
+  scanInFlight = true;
   els.scanBtn.disabled = true;
   els.scanBtn.classList.add('is-scanning');
   els.scanBtn.querySelector('.btn-label').textContent = 'Scanning Markets…';
@@ -966,8 +1137,10 @@ async function runScan(){
     const exchangeSel = els.exchange.value;
     const keys = exchangeSel === 'ALL' ? Object.keys(EXCHANGES) : [exchangeSel];
     const anchor = els.anchor.value;
-    const feePct = parseFloat(els.fee.value) || 0;
+    const cliMode = els.cliMode.checked;
+    const feePct = cliMode ? 0 : (parseFloat(els.fee.value) || 0);
     const minProfit = parseFloat(els.minProfit.value);
+    const minVolume = parseFloat(els.minVolume.value) || 0;
 
     let totalPairs = 0, totalChecked = 0;
     let allResults = [];
@@ -975,11 +1148,14 @@ async function runScan(){
 
     for(const key of keys){
       try{
-        const pairs = await EXCHANGES[key].load();
-        pairsCache[key] = pairs;
+        const rawPairs = await EXCHANGES[key].load();
+        pairsCache[key] = rawPairs; // full, unfiltered — used by Overview's market count and the Cross-Exchange tab
         updateExchangeBadge(key, 'up');
+        // Fiat on/off-ramp pairs and anything under the volume floor are dropped
+        // before the graph is built — same order as the CLI scanner's filtering.
+        const pairs = filterTriPairs(rawPairs, minVolume);
         totalPairs += pairs.length;
-        const adj = buildGraph(pairs);
+        const adj = buildGraph(pairs, cliMode);
         const { results, checked } = findCycles(adj, anchor, feePct, key);
         totalChecked += checked;
         allResults = allResults.concat(results);
@@ -994,7 +1170,7 @@ async function runScan(){
     els.statCycles.textContent = totalChecked.toLocaleString();
 
     if(totalPairs === 0){
-      throw new Error(failed.length ? `all selected exchanges failed (${failed.join(', ')})` : 'no data returned');
+      throw new Error(failed.length ? `all selected exchanges failed (${failed.join(', ')})` : 'no markets cleared the fiat/volume filter — try lowering min 24h volume');
     }
     setStatus('live', failed.length ? `connected (${failed.join(', ')} failed)` : 'connected');
 
@@ -1003,6 +1179,19 @@ async function runScan(){
       .sort((a,b) => b.profitPct - a.profitPct);
 
     const filtered = ranked.filter(r => r.profitPct >= minProfit);
+
+    // Live Scan tracks whichever set is actually being displayed, so a
+    // NEW badge always lines up with the row a person is looking at —
+    // filtered opportunities when any clear the bar, otherwise the
+    // closest-cycles fallback list.
+    const shown = filtered.length > 0 ? filtered : ranked;
+    if(isLive){
+      const closed = updateTracking(shown);
+      renderClosedStrip(closed);
+    } else {
+      for(const r of shown) r.trackStatus = null;
+    }
+
     els.statHits.textContent = filtered.length;
     els.lastUpdate.textContent = 'Last update — ' + new Date().toLocaleTimeString();
 
@@ -1016,28 +1205,62 @@ async function runScan(){
     };
     renderOverview();
 
+    const cliNotice = cliMode
+      ? `Theoretical mode is on — matching the CLI scanner's math (one last-traded price for both legs, no fee). Real fills always cost more than this suggests. `
+      : '';
+
     if(filtered.length > 0){
       render(filtered);
-      showMessage(failed.length ? `${failed.join(', ')} couldn't be reached this scan — results below are from the exchange(s) that responded.` : '', failed.length ? 'info' : '');
+      const extra = failed.length ? `${failed.join(', ')} couldn't be reached this scan — results below are from the exchange(s) that responded.` : '';
+      showMessage((cliNotice + extra).trim(), (cliNotice || extra) ? 'info' : '');
     } else if(ranked.length > 0){
       // Nothing cleared the bar — never leave the screen blank, show the closest cycles instead.
       render(ranked);
-      showMessage(`No cycle cleared your ${minProfit.toFixed(2)}% filter after a ${(feePct*3).toFixed(2)}% round-trip fee across ${keys.length > 1 ? 'all three books' : EXCHANGES[keys[0]].label} — that's a real read of current spreads, not a limitation of the scan. Showing the 20 closest cycles instead (best is ${fmtPct(ranked[0].profitPct)}); lower the filter, drop your fee assumption if you're on a maker/VIP tier, or try "All 3" to widen the search.`, 'info');
+      showMessage(cliNotice + `No cycle cleared your ${minProfit.toFixed(2)}% filter after a ${(feePct*3).toFixed(2)}% round-trip fee across ${keys.length > 1 ? 'all three books' : EXCHANGES[keys[0]].label} — that's a real read of current spreads, not a limitation of the scan. Showing the 20 closest cycles instead (best is ${fmtPct(ranked[0].profitPct)}); lower the filter, drop your fee assumption if you're on a maker/VIP tier, or try "All 3" to widen the search.`, 'info');
     } else {
-      els.results.innerHTML = `<div class="empty">No 3-leg cycles found for this anchor. Try "All currencies" or a different exchange.</div>`;
-      showMessage('', '');
+      els.results.innerHTML = `<div class="empty">No 3-leg cycles found for this anchor after the fiat/volume filter. Try "All currencies", a different exchange, or a lower min 24h volume.</div>`;
+      showMessage(cliNotice, cliNotice ? 'info' : '');
     }
   }catch(err){
     setStatus('err', 'error');
     console.error(err);
     showMessage(`Could not reach the exchange API(s) from the browser (${err.message}). This is usually a CORS or network restriction in this environment rather than an issue with the logic — the same code works when hosted normally or run through a CORS-enabled proxy.`, 'error');
   }finally{
-    els.scanBtn.disabled = false;
+    scanInFlight = false;
+    els.scanBtn.disabled = isLive; // stays disabled while Live Scan owns the loop; Stop Live Scan re-enables it
     els.scanBtn.classList.remove('is-scanning');
     els.scanBtn.querySelector('.btn-label').textContent = 'Scan Markets';
     els.results.classList.remove('is-loading');
   }
 }
+
+function startLiveScan(){
+  isLive = true;
+  resetTracking();
+  els.liveBtn.classList.add('on');
+  els.liveBtn.querySelector('.btn-label').textContent = 'Stop Live Scan';
+  els.scanBtn.disabled = true;
+  // Exchange/anchor stay fixed for the session, same as the CLI scanner
+  // picking one exchange up front — fee/min-profit/min-volume can still be
+  // tuned live since they only reshape which already-tracked cycles clear the bar.
+  els.exchange.disabled = true;
+  els.anchor.disabled = true;
+  const intervalMs = Math.max(5, parseFloat(els.scanInterval.value) || 20) * 1000;
+  runScan(); // scan immediately, then settle into the interval
+  liveTimer = setInterval(runScan, intervalMs);
+}
+function stopLiveScan(){
+  isLive = false;
+  if(liveTimer){ clearInterval(liveTimer); liveTimer = null; }
+  els.liveBtn.classList.remove('on');
+  els.liveBtn.querySelector('.btn-label').textContent = 'Start Live Scan';
+  els.scanBtn.disabled = false;
+  els.exchange.disabled = false;
+  els.anchor.disabled = false;
+  // Leave the last-rendered rows and closed strip in place rather than
+  // clearing them — stopping should freeze the picture, not blank it.
+}
+els.liveBtn.addEventListener('click', () => { isLive ? stopLiveScan() : startLiveScan(); });
 
 els.scanBtn.addEventListener('click', runScan);
 window.addEventListener('load', runScan);
