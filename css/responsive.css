@@ -120,13 +120,28 @@
   .rank-wrap{ display:flex; }
   .result{ text-align:right; }
 
-  /* opportunity loop becomes a vertical flow: BUY/SELL badge + rotated
-     arrow read top-to-bottom instead of wrapping awkwardly left-to-right */
-  .loop{ display:flex; flex-direction:column; align-items:flex-start; gap:4px; }
-  .node{ width:fit-content; }
-  .leg{ flex-direction:row; align-items:center; margin:2px 0; min-width:0; gap:8px; }
-  .leg .arrow{ transform:rotate(90deg); font-size:12px; }
-  .leg .pair{ margin-top:0; }
+  /* --- compact opportunity card: tighter padding, smaller type, and the
+     loop wraps left-to-right (2-3 nodes per line) instead of one long
+     vertical column, so a card takes a fraction of the screen instead of
+     most of it --- */
+  .row{ padding:12px 14px; gap:8px 12px; }
+  .row::after{ top:10px; bottom:10px; }
+  .rank{ font-size:15px; }
+  .profit{ font-size:19px; }
+  .yield{ font-size:10px; margin-top:1px; }
+  .expand-hint{ margin-top:4px; }
 
-  .xrow{ grid-template-columns:1fr 1fr; }
+  .loop{ display:flex; flex-direction:row; flex-wrap:wrap; align-items:center; gap:0; row-gap:6px; }
+  .node{ font-size:12px; padding:5px 11px 5px 7px; }
+  .leg{ margin:0 5px; min-width:44px; }
+  .leg .arrow{ font-size:12px; }
+  .leg .act{ font-size:8.5px; padding:1px 5px; }
+  .leg .pair{ font-size:8px; }
+  .exch{ margin-left:6px; }
+
+  .steps{ padding-top:10px; font-size:11px; }
+
+  .xrow{ grid-template-columns:1fr 1fr; padding:14px; gap:8px 12px; }
+  .xasset{ font-size:15px; }
+  .xprofit{ font-size:17px; }
 }

@@ -7,13 +7,19 @@
 /* -------------------- 7. Controls -------------------- */
 .controls{
   display:grid;
-  grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));
-  gap:16px;
-  align-items:end;
+  grid-template-columns:repeat(auto-fit, minmax(150px, 1fr));
+  gap:16px 18px;
+  align-items:stretch; /* every field stretches to the row's tallest cell, so
+    a field whose label wraps to two lines (Theoretical) can't throw off the
+    vertical position of the input/select in the fields beside it */
   background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
   padding:16px 18px; margin-bottom:20px;
 }
 .controls .field{ min-width:0; }
+/* label always starts at the top of the cell; the control itself is pushed
+   to the bottom via margin-top:auto below, so every input/select/checkbox
+   in a row lines up on the same baseline regardless of label length */
+.controls .field > select, .controls .field > input, .controls .field > .toggle-check{ margin-top:auto; }
 .controls .btn-row{
   grid-column:1 / -1;
   display:flex; gap:12px; flex-wrap:wrap;
