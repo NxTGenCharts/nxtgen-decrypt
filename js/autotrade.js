@@ -70,12 +70,20 @@ function showAtMessage(html, type){
 function renderConnectRows(){
   els.connectRows.innerHTML = Object.keys(EXCHANGES).map(key => {
     const label = EXCHANGES[key].label;
-    const cred = state.exchangeCreds[key];
+    const supportsTestnet = EXCHANGES[key].testnetSupported;
+    const mode = state.exchangeMode[key];
+    const cred = state.exchangeCreds[key][mode];
     const connected = !!cred;
-    return `<div class="connect-row" data-exchange="${key}">
-      <div class="connect-label">${label}</div>
-      <input class="ck-key" type="text" placeholder="Enter API key" value="${connected ? maskKey(cred.apiKey) : ''}" ${connected ? 'disabled' : ''}>
-      <input class="ck-secret" type="password" placeholder="Enter secret key" value="${connected ? '••••••••••••' : ''}" ${connected ? 'disabled' : ''}>
+    const modeToggle = supportsTestnet ? `
+      <div class="mode-toggle" role="group" aria-label="${label} network">
+        <button type="button" class="mode-btn ${mode==='live'?'active':''}" data-mode="live">Live</button>
+        <button type="button" class="mode-btn ${mode==='testnet'?'active':''}" data-mode="testnet">Testnet</button>
+      </div>` : `<div class="mode-toggle mode-toggle--disabled" title="Bitget has no public spot testnet"><span class="mode-btn active">Live only</span></div>`;
+    return `<div class="connect-row" data-exchange="${key}" data-mode="${mode}">
+      <div class="connect-label">${label}${mode==='testnet' ? ' <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">TESTNET</span>' : ''}</div>
+      ${modeToggle}
+      <input class="ck-key" type="text" placeholder="Enter ${mode === 'testnet' ? 'testnet ' : ''}API key" value="${connected ? maskKey(cred.apiKey) : ''}" ${connected ? 'disabled' : ''}>
+      <input class="ck-secret" type="password" placeholder="Enter ${mode === 'testnet' ? 'testnet ' : ''}secret key" value="${connected ? '••••••••••••' : ''}" ${connected ? 'disabled' : ''}>
       <button class="primary ${connected ? 'ghost' : ''} connect-btn" data-action="${connected ? 'disconnect' : 'connect'}">
         ${connected ? 'Disconnect' : 'Connect'}
       </button>
@@ -91,10 +99,22 @@ function maskKey(k){
 }
 
 els.connectRows.addEventListener('click', (e) => {
+  const modeBtn = e.target.closest('.mode-btn[data-mode]');
+  if(modeBtn){
+    const row = e.target.closest('.connect-row');
+    const key = row.dataset.exchange;
+    if(!EXCHANGES[key].testnetSupported) return; // Bitget: nothing to switch
+    state.exchangeMode[key] = modeBtn.dataset.mode;
+    persist();
+    renderConnectRows();
+    renderBalances();
+    return;
+  }
   const btn = e.target.closest('.connect-btn');
   if(!btn) return;
   const row = e.target.closest('.connect-row');
   const key = row.dataset.exchange;
+  const mode = state.exchangeMode[key];
   const action = btn.dataset.action;
   if(action === 'connect'){
     const apiKey = row.querySelector('.ck-key').value.trim();
@@ -104,11 +124,12 @@ els.connectRows.addEventListener('click', (e) => {
       return;
     }
     // Stored locally only, never sent anywhere — see the notice under Connect Exchanges.
-    state.exchangeCreds[key] = { apiKey, secretKeyMasked: true, connectedAt: new Date().toLocaleString() };
-    showAtMessage(`${EXCHANGES[key].label} connected. Keys are stored only in this browser (localStorage) and are not used to place any trade — Autotrade below runs as a simulation against ${EXCHANGES[key].label}'s public order book.`, 'info');
+    state.exchangeCreds[key][mode] = { apiKey, secretKeyMasked: true, connectedAt: new Date().toLocaleString() };
+    const netLabel = mode === 'testnet' ? 'testnet' : 'live';
+    showAtMessage(`${EXCHANGES[key].label} (${netLabel}) connected. Keys are stored only in this browser (localStorage) and are not used to place any trade — Autotrade below runs as a simulation against ${EXCHANGES[key].label}'s ${netLabel} public order book.`, 'info');
   } else {
-    state.exchangeCreds[key] = null;
-    showAtMessage(`${EXCHANGES[key].label} disconnected.`, 'info');
+    state.exchangeCreds[key][mode] = null;
+    showAtMessage(`${EXCHANGES[key].label} (${mode}) disconnected.`, 'info');
   }
   persist();
   renderConnectRows();
@@ -120,10 +141,12 @@ els.connectRows.addEventListener('click', (e) => {
 function renderBalances(){
   els.balanceRows.innerHTML = Object.keys(EXCHANGES).map(key => {
     const label = EXCHANGES[key].label;
-    const bal = state.balances[key];
-    const isAtExchange = state.autotrade.exchange === key;
+    const mode = state.exchangeMode[key];
+    const bal = state.balances[key][mode];
+    const isAtExchange = state.autotrade.exchange === key && state.autotrade.mode === mode;
+    const modeTag = mode === 'testnet' ? ' <span class="pill" style="color:var(--amber);border-color:var(--amber-dim);">TESTNET</span>' : '';
     return `<div class="balance-row" data-exchange="${key}">
-      <div class="connect-label">${label}${isAtExchange ? ' <span class="pill tr-yes" style="margin-left:6px;">AUTOTRADE</span>' : ''}</div>
+      <div class="connect-label">${label}${modeTag}${isAtExchange ? ' <span class="pill tr-yes" style="margin-left:6px;">AUTOTRADE</span>' : ''}</div>
       <input class="bal-input" type="number" min="0" step="0.01" placeholder="Enter balance (USDT)" value="${bal !== null && bal !== undefined ? bal : ''}">
       <button class="primary ghost bal-save-btn">Save Balance</button>
       <div class="balance-shown">${bal !== null && bal !== undefined ? money(bal) : '—'}</div>
@@ -136,15 +159,16 @@ els.balanceRows.addEventListener('click', (e) => {
   if(!btn) return;
   const row = e.target.closest('.balance-row');
   const key = row.dataset.exchange;
+  const mode = state.exchangeMode[key];
   const val = parseFloat(row.querySelector('.bal-input').value);
   if(!isFinite(val) || val < 0){
     showAtMessage('Enter a valid balance amount first.', 'error');
     return;
   }
-  state.balances[key] = val;
+  state.balances[key][mode] = val;
   persist();
   renderBalances();
-  showAtMessage(`${EXCHANGES[key].label} balance saved: ${money(val)}. This is a manual entry — reading a live balance requires an authenticated call this front-end intentionally does not make.`, 'info');
+  showAtMessage(`${EXCHANGES[key].label} (${mode}) balance saved: ${money(val)}. This is a manual entry — reading a live balance requires an authenticated call this front-end intentionally does not make.`, 'info');
 });
 
 // ---------------- Autotrade config UI ----------------
@@ -154,7 +178,23 @@ function renderExchangeOptions(){
     els.atExchange.dataset.built = '1';
   }
   els.atExchange.value = state.autotrade.exchange;
+  syncAtModeToggle();
 }
+
+function syncAtModeToggle(){
+  const key = els.atExchange.value;
+  const supportsTestnet = EXCHANGES[key].testnetSupported;
+  els.atModeRow.style.display = supportsTestnet ? '' : 'none';
+  if(!supportsTestnet) state.autotrade.mode = 'live';
+  els.atModeLive.classList.toggle('active', state.autotrade.mode === 'live');
+  els.atModeTestnet.classList.toggle('active', state.autotrade.mode === 'testnet');
+}
+
+els.atModeLive.addEventListener('click', () => { state.autotrade.mode = 'live'; syncAtModeToggle(); renderBalances(); });
+els.atModeTestnet.addEventListener('click', () => {
+  if(!EXCHANGES[els.atExchange.value].testnetSupported) return;
+  state.autotrade.mode = 'testnet'; syncAtModeToggle(); renderBalances();
+});
 
 function ensureDay(){
   const today = todayKey();
@@ -184,7 +224,7 @@ function renderAutotradeStatus(){
   const pct = Math.max(0, Math.min(100, (at.dayProfitPct / target) * 100));
   els.atProgressBar.style.width = pct.toFixed(1) + '%';
   els.atProgressBar.classList.toggle('done', at.targetReached);
-  els.atProgressLabel.textContent = `${fmtPct(at.dayProfitPct || 0)} of ${target}% daily target${at.targetReached ? ' — reached' : ''}`;
+  els.atProgressLabel.textContent = `${fmtPct(at.dayProfitPct || 0)} of ${target}% daily target${at.targetReached ? ' — reached' : ''}${at.mode === 'testnet' ? ' · TESTNET' : ''}`;
 
   els.atToggleBtn.classList.toggle('on', at.enabled && at.running);
   els.atToggleBtn.querySelector('.btn-label').textContent = at.enabled
@@ -222,16 +262,18 @@ async function tick(){
   ensureDay();
 
   const key = at.exchange;
+  const testnet = at.mode === 'testnet' && EXCHANGES[key].testnetSupported;
   const anchor = els.atAnchor.value;
   const feePct = parseFloat(els.atFee.value) || 0;
   const minVolume = parseFloat(els.atMinVolume.value) || 0;
   const configuredFloor = parseFloat(els.atMinProfit.value);
   const minProfitPct = Math.max(MIN_PROFIT_FLOOR, isFinite(configuredFloor) ? configuredFloor : MIN_PROFIT_FLOOR);
   const dailyTarget = parseFloat(els.atDailyTarget.value) || 11;
+  const netLabel = testnet ? ' (testnet)' : '';
 
   try{
-    const rawPairs = await EXCHANGES[key].load();
-    state.pairsCache[key] = rawPairs;
+    const rawPairs = await EXCHANGES[key].load(testnet);
+    if(!testnet) state.pairsCache[key] = rawPairs; // Overview's market count reflects live data only
     const pairs = filterTriPairs(rawPairs, minVolume);
     const adj = buildGraph(pairs, false); // realistic bid/ask + fee — never the theoretical mode for real decisions
     const { results } = findCycles(adj, anchor, feePct, key);
@@ -242,12 +284,12 @@ async function tick(){
       executeCycle(best, dailyTarget);
     } else {
       showAtMessage(best
-        ? `Watching ${EXCHANGES[key].label}… best cycle right now is ${fmtPct(best.profitPct)}, below your ${minProfitPct.toFixed(2)}% floor. No trade this pass.`
-        : `Watching ${EXCHANGES[key].label}… no complete cycle found this pass.`, 'info');
+        ? `Watching ${EXCHANGES[key].label}${netLabel}… best cycle right now is ${fmtPct(best.profitPct)}, below your ${minProfitPct.toFixed(2)}% floor. No trade this pass.`
+        : `Watching ${EXCHANGES[key].label}${netLabel}… no complete cycle found this pass.`, 'info');
     }
   }catch(err){
     console.error(err);
-    showAtMessage(`Couldn't reach ${EXCHANGES[key].label} this pass (${err.message}). Will retry on the next interval.`, 'error');
+    showAtMessage(`Couldn't reach ${EXCHANGES[key].label}${netLabel} this pass (${err.message}). Will retry on the next interval.`, 'error');
   }
   renderAutotradeStatus();
   persist();
@@ -281,12 +323,14 @@ function executeCycle(cycle, dailyTarget){
 function startAutotrade(){
   const at = state.autotrade;
   const key = els.atExchange.value;
+  const mode = EXCHANGES[key].testnetSupported ? state.autotrade.mode : 'live';
   const startBal = parseFloat(els.atStartBalance.value);
   if(!isFinite(startBal) || startBal <= 0){
     showAtMessage('Enter a starting balance for the day before starting Autotrade.', 'error');
     return;
   }
   at.exchange = key;
+  at.mode = mode;
   at.dateKey = todayKey();
   at.startingBalance = startBal;
   at.currentBalance = startBal;
@@ -304,8 +348,11 @@ function startAutotrade(){
   els.atExchange.disabled = true;
   els.atStartBalance.disabled = true;
   els.atAnchor.disabled = true;
+  els.atModeLive.disabled = true;
+  els.atModeTestnet.disabled = true;
 
-  showAtMessage(`Autotrade started on ${EXCHANGES[key].label} — Triangular only, Spot only. Will only act on cycles ≥ ${Math.max(MIN_PROFIT_FLOOR, parseFloat(els.atMinProfit.value)||MIN_PROFIT_FLOOR).toFixed(2)}%, and stops automatically at +${els.atDailyTarget.value}% for the day.`, 'info');
+  const netLabel = mode === 'testnet' ? ' (testnet)' : '';
+  showAtMessage(`Autotrade started on ${EXCHANGES[key].label}${netLabel} — Triangular only, Spot only. Will only act on cycles ≥ ${Math.max(MIN_PROFIT_FLOOR, parseFloat(els.atMinProfit.value)||MIN_PROFIT_FLOOR).toFixed(2)}%, and stops automatically at +${els.atDailyTarget.value}% for the day.`, 'info');
   persist();
   renderAutotradeStatus();
 }
@@ -318,6 +365,8 @@ function stopAutotrade(){
   els.atExchange.disabled = false;
   els.atStartBalance.disabled = false;
   els.atAnchor.disabled = false;
+  els.atModeLive.disabled = false;
+  els.atModeTestnet.disabled = false;
   persist();
   renderAutotradeStatus();
 }
@@ -328,6 +377,7 @@ els.atToggleBtn.addEventListener('click', () => {
 
 els.atExchange.addEventListener('change', () => {
   state.autotrade.exchange = els.atExchange.value;
+  syncAtModeToggle();
   renderBalances();
 });
 
@@ -337,8 +387,10 @@ export function initAutotrade(){
   renderConnectRows();
   renderBalances();
   ensureDay();
-  if(state.balances[state.autotrade.exchange] != null && !els.atStartBalance.value){
-    els.atStartBalance.value = state.autotrade.startingBalance || state.balances[state.autotrade.exchange] || '';
+  const modeForStart = EXCHANGES[state.autotrade.exchange].testnetSupported ? state.autotrade.mode : 'live';
+  const savedBal = state.balances[state.autotrade.exchange][modeForStart];
+  if(savedBal != null && !els.atStartBalance.value){
+    els.atStartBalance.value = state.autotrade.startingBalance || savedBal || '';
   }
   renderAutotradeStatus();
   // If Autotrade was left ON from a previous session (page refresh), resume it.
@@ -348,6 +400,8 @@ export function initAutotrade(){
     els.atExchange.disabled = true;
     els.atStartBalance.disabled = true;
     els.atAnchor.disabled = true;
+    els.atModeLive.disabled = true;
+    els.atModeTestnet.disabled = true;
     tick();
     state.autotrade.timer = setInterval(tick, intervalMs);
   }

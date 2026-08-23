@@ -60,6 +60,9 @@ export const els = {
   connectRows: document.getElementById('connectRows'),
   balanceRows: document.getElementById('balanceRows'),
   atExchange: document.getElementById('atExchange'),
+  atModeRow: document.getElementById('atModeRow'),
+  atModeLive: document.getElementById('atModeLive'),
+  atModeTestnet: document.getElementById('atModeTestnet'),
   atAnchor: document.getElementById('atAnchor'),
   atFee: document.getElementById('atFee'),
   atMinVolume: document.getElementById('atMinVolume'),
@@ -110,17 +113,30 @@ export const state = {
   // ---- Exchange "connections" — labels/status only. Keys are kept in the
   // browser's localStorage for this session's convenience and are never
   // sent anywhere by this app; nothing here places real orders. See
-  // autotrade.js for the full explanation shown in the UI. ----
-  exchangeCreds: { bitget:null, binance:null, bybit:null }, // { apiKey, connectedAt } — secret is stored but never rendered back
+  // autotrade.js for the full explanation shown in the UI. Bitget only has
+  // a `live` slot (no public spot testnet); Binance/Bybit have both. ----
+  exchangeCreds: {
+    bitget:  { live:null, testnet:null },
+    binance: { live:null, testnet:null },
+    bybit:   { live:null, testnet:null },
+  }, // each slot: { apiKey, connectedAt } — secret is stored but never rendered back
 
-  // ---- Manually-entered balances, per exchange (spot only) ----
-  balances: { bitget:null, binance:null, bybit:null },
+  // ---- Which network each exchange is currently set to. Bitget is always 'live'. ----
+  exchangeMode: { bitget:'live', binance:'live', bybit:'live' },
+
+  // ---- Manually-entered balances, per exchange+mode (spot only) ----
+  balances: {
+    bitget:  { live:null },
+    binance: { live:null, testnet:null },
+    bybit:   { live:null, testnet:null },
+  },
 
   // ---- Autotrade (Triangular-only) simulation state ----
   autotrade: {
     enabled: false,
     running: false,
     exchange: 'bitget',
+    mode: 'live',           // 'live' | 'testnet' — testnet only meaningful for binance/bybit
     dateKey: null,          // local date string; a new day resets the counters below
     startingBalance: 0,
     currentBalance: 0,

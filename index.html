@@ -202,7 +202,8 @@
       <div class="ov-block-title">Connect Exchanges</div>
       <div id="connectRows" class="connect-list"></div>
       <div class="warn-banner" style="margin:14px 0 0;">
-        <b>Your keys never leave this browser.</b> API/secret keys are stored only in this device's local storage, purely so this app can show a connected/disconnected badge per exchange. This app never sends them anywhere and does not place live orders — Autotrade below is a paper-trading simulation against each exchange's public order book. Use read-only keys if you connect real ones.
+        <b>Your keys never leave this browser.</b> API/secret keys are stored only in this device's local storage, purely so this app can show a connected/disconnected badge per exchange. This app never sends them anywhere and does not place live orders — Autotrade below is a paper-trading simulation against each exchange's public order book. Use read-only keys if you connect real ones.<br><br>
+        <b>Testnet.</b> Binance and Bybit each expose a public testnet — use the Live/Testnet switch on their row to enter separate testnet keys and paper-trade against fake-money order books instead of real market data. Bitget has no public spot testnet, so its row stays Live-only.
       </div>
     </div>
 
@@ -215,6 +216,13 @@
       <div class="field">
         <label for="atExchange">Autotrade exchange</label>
         <select id="atExchange" title="Autotrade watches this exchange only"></select>
+      </div>
+      <div class="field" id="atModeRow">
+        <label title="Testnet is available for Binance and Bybit only. Bitget has no public spot testnet.">Network</label>
+        <div class="mode-toggle">
+          <button type="button" class="mode-btn active" id="atModeLive">Live</button>
+          <button type="button" class="mode-btn" id="atModeTestnet">Testnet</button>
+        </div>
       </div>
       <div class="field">
         <label for="atAnchor">Start / anchor currency</label>

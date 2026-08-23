@@ -54,10 +54,11 @@ export async function loadBitgetCoinInfo(){
   return map;
 }
 
-export async function loadBinance(){
+export async function loadBinance(testnet){
+  const base = testnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
   const [infoRes, tickerRes] = await Promise.all([
-    fetchJSON('https://api.binance.com/api/v3/exchangeInfo'),
-    fetchJSON('https://api.binance.com/api/v3/ticker/24hr'),
+    fetchJSON(base + '/api/v3/exchangeInfo'),
+    fetchJSON(base + '/api/v3/ticker/24hr'),
   ]);
   const tickerMap = new Map();
   for(const t of tickerRes) tickerMap.set(t.symbol, t);
@@ -80,10 +81,11 @@ export async function loadBinance(){
   return pairs;
 }
 
-export async function loadBybit(){
+export async function loadBybit(testnet){
+  const base = testnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
   const [infoRes, tickerRes] = await Promise.all([
-    fetchJSON('https://api.bybit.com/v5/market/instruments-info?category=spot'),
-    fetchJSON('https://api.bybit.com/v5/market/tickers?category=spot'),
+    fetchJSON(base + '/v5/market/instruments-info?category=spot'),
+    fetchJSON(base + '/v5/market/tickers?category=spot'),
   ]);
   if(infoRes.retCode !== 0) throw new Error('instruments: ' + infoRes.retMsg);
   if(tickerRes.retCode !== 0) throw new Error('tickers: ' + tickerRes.retMsg);
@@ -110,9 +112,9 @@ export async function loadBybit(){
 }
 
 export const EXCHANGES = {
-  bitget:  { label:'Bitget',  load:loadBitget },
-  binance: { label:'Binance', load:loadBinance },
-  bybit:   { label:'Bybit',   load:loadBybit },
+  bitget:  { label:'Bitget',  load:loadBitget, testnetSupported:false },
+  binance: { label:'Binance', load:loadBinance, testnetSupported:true },
+  bybit:   { label:'Bybit',   load:loadBybit, testnetSupported:true },
 };
 
 // National fiat currency codes. Exchanges sometimes list fiat on/off-ramp
