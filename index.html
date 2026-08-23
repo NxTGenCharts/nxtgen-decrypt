@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Triangular Arbitrage Scanner — Bitget · Binance · Bybit</title>
+<title>NxTGen DeCrypt — Arbitrage Scanner</title>
 <style>
   :root{
     --bg:#0b0e0d;
@@ -31,12 +31,25 @@
   .brand{display:flex; align-items:center; gap:12px;}
   .mark{width:34px;height:34px; position:relative; flex-shrink:0;}
   .mark svg{width:100%;height:100%;}
+  .logo-img{height:36px; width:auto; display:block;}
   h1{font-family:var(--disp); font-weight:700; font-size:20px; letter-spacing:.01em; margin:0;}
   .sub{color:var(--dim); font-size:12px; margin-top:3px;}
   .ticker-strip{display:flex; gap:18px; align-items:center; font-size:11px; color:var(--dim);}
   .dot{width:7px;height:7px;border-radius:50%; background:var(--dim); display:inline-block; margin-right:6px;}
   .dot.live{background:var(--green); box-shadow:0 0 8px var(--green);}
   .dot.err{background:var(--red); box-shadow:0 0 8px var(--red);}
+
+  .tabs{display:flex; gap:8px; margin-bottom:20px;}
+  .tab{
+    font-family:var(--disp); font-weight:600; font-size:13px; color:var(--dim); background:var(--panel);
+    border:1px solid var(--line); border-radius:8px; padding:10px 18px; cursor:pointer; letter-spacing:.01em;
+    display:flex; align-items:center; gap:8px;
+  }
+  .tab:hover{color:var(--ink); border-color:#385243;}
+  .tab.active{color:#0d1a12; background:var(--amber); border-color:var(--amber);}
+  .tab .ic{font-size:14px;}
+  .panel{display:none;}
+  .panel.active{display:block;}
 
   .controls{display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin-bottom:22px;}
   .field{display:flex; flex-direction:column; gap:6px;}
@@ -95,6 +108,31 @@
   .empty{padding:60px 20px; text-align:center; color:var(--dim); border:1px dashed var(--line); border-radius:10px;}
   .empty b{color:var(--ink);}
 
+  .warn-banner{
+    background:#101a1e; border:1px solid #1f3a42; color:#8fc9dc; border-radius:8px;
+    padding:14px 16px; font-size:12px; line-height:1.6; margin-bottom:18px;
+  }
+  .warn-banner b{color:#bfe6f2;}
+
+  .xrow{
+    background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 18px;
+    display:grid; grid-template-columns:32px 1.2fr 1fr 1fr 1fr auto; gap:14px; align-items:center;
+    margin-bottom:8px;
+  }
+  .xrow.head{background:transparent; border:none; padding:0 18px; color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.08em;}
+  .xasset{font-family:var(--disp); font-weight:700; font-size:15px;}
+  .xside{display:flex; flex-direction:column; gap:2px;}
+  .xside .exch{margin-left:0; display:inline-block; width:fit-content;}
+  .xside .price{font-size:12px; color:var(--dim); margin-top:2px;}
+  .xfinal{font-size:13px;}
+  .xprofit{font-family:var(--disp); font-size:19px; font-weight:700; text-align:right;}
+
+  @media (max-width:900px){
+    .xrow{grid-template-columns:1fr; text-align:left;}
+    .xrow.head{display:none;}
+    .xprofit{text-align:left;}
+  }
+
   footer{margin-top:30px; padding-top:16px; border-top:1px solid var(--line); color:var(--dim); font-size:11px; line-height:1.7;}
   footer b{color:#a9bfae;}
 
@@ -110,12 +148,10 @@
 
   <header>
     <div class="brand">
-      <div class="mark">
-        <svg viewBox="0 0 34 34"><polygon points="17,3 31,26 3,26" fill="none" stroke="#f5b642" stroke-width="2"/><polygon points="17,11 24,23 10,23" fill="#f5b642" opacity="0.85"/></svg>
-      </div>
+      <img class="logo-img" src="data:image/png;base64,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" alt="NxTGen DeCrypt">
       <div>
-        <h1>Triangular Arbitrage Scanner</h1>
-        <div class="sub">Live order books · 3-leg cycles · Bitget · Binance · Bybit</div>
+        <h1>Arbitrage Scanner</h1>
+        <div class="sub">Live order books · Bitget · Binance · Bybit</div>
       </div>
     </div>
     <div class="ticker-strip">
@@ -124,51 +160,104 @@
     </div>
   </header>
 
-  <div class="controls">
-    <div class="field">
-      <label>Exchange</label>
-      <select id="exchange">
-        <option value="ALL" selected>All 3 (best across books)</option>
-        <option value="bitget">Bitget</option>
-        <option value="binance">Binance</option>
-        <option value="bybit">Bybit</option>
-      </select>
-    </div>
-    <div class="field">
-      <label>Start / anchor currency</label>
-      <select id="anchor">
-        <option value="ALL">All currencies</option>
-        <option value="USDT" selected>USDT</option>
-        <option value="USDC">USDC</option>
-        <option value="BTC">BTC</option>
-        <option value="ETH">ETH</option>
-        <option value="BNB">BNB</option>
-      </select>
-    </div>
-    <div class="field">
-      <label>Taker fee / leg (%)</label>
-      <input type="number" id="fee" value="0.10" step="0.01" min="0" max="1">
-    </div>
-    <div class="field">
-      <label>Min profit filter (%)</label>
-      <input type="number" id="minProfit" value="0.05" step="0.01" min="-5" max="5">
-    </div>
-    <button class="primary" id="scanBtn">Scan Markets</button>
-    <div class="spacer"></div>
-    <div class="stat"><span class="n" id="statPairs">–</span><span class="l">Pairs loaded</span></div>
-    <div class="stat"><span class="n" id="statCycles">–</span><span class="l">Cycles checked</span></div>
-    <div class="stat"><span class="n" id="statHits">–</span><span class="l">Profitable</span></div>
+  <div class="tabs">
+    <div class="tab active" id="tabTriBtn" data-tab="tri"><span class="ic">△</span> Triangular Arbitrage</div>
+    <div class="tab" id="tabXBtn" data-tab="x"><span class="ic">⇅</span> Cross-Exchange</div>
   </div>
 
-  <div id="messages"></div>
-  <div class="grid" id="results">
-    <div class="empty">Press <b>Scan Markets</b> to pull live order books and rank the best 3-leg cycles across exchanges.</div>
+  <!-- ============ TRIANGULAR PANEL ============ -->
+  <div class="panel active" id="panelTri">
+    <div class="controls">
+      <div class="field">
+        <label>Exchange</label>
+        <select id="exchange">
+          <option value="ALL" selected>All 3 (best across books)</option>
+          <option value="bitget">Bitget</option>
+          <option value="binance">Binance</option>
+          <option value="bybit">Bybit</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Start / anchor currency</label>
+        <select id="anchor">
+          <option value="ALL">All currencies</option>
+          <option value="USDT" selected>USDT</option>
+          <option value="USDC">USDC</option>
+          <option value="BTC">BTC</option>
+          <option value="ETH">ETH</option>
+          <option value="BNB">BNB</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Taker fee / leg (%)</label>
+        <input type="number" id="fee" value="0.10" step="0.01" min="0" max="1">
+      </div>
+      <div class="field">
+        <label>Min profit filter (%)</label>
+        <input type="number" id="minProfit" value="0.05" step="0.01" min="-5" max="5">
+      </div>
+      <button class="primary" id="scanBtn">Scan Markets</button>
+      <div class="spacer"></div>
+      <div class="stat"><span class="n" id="statPairs">–</span><span class="l">Pairs loaded</span></div>
+      <div class="stat"><span class="n" id="statCycles">–</span><span class="l">Cycles checked</span></div>
+      <div class="stat"><span class="n" id="statHits">–</span><span class="l">Profitable</span></div>
+    </div>
+
+    <div id="messages"></div>
+    <div class="grid" id="results">
+      <div class="empty">Press <b>Scan Markets</b> to pull live order books and rank the best 3-leg cycles across exchanges.</div>
+    </div>
+
+    <footer>
+      <b>How this works —</b> every leg multiplies your balance by the best bid (selling) or 1/ask (buying) available on that exchange's public order book, minus your taker fee. A positive % means the round trip A→B→C→A returns more than you started with, before slippage. All three legs of one cycle always execute on the <b>same</b> exchange — arbitrage never mixes order books mid-cycle.<br>
+      <b>Read before trading —</b> this is an informational scan of top-of-book prices, not a guarantee, and it does not manufacture profit that isn't really there. Real fills depend on order book depth, execution speed, and simultaneous availability of all three legs — thin books and latency routinely erase small or negative edges either way. This is not financial advice.
+    </footer>
   </div>
 
-  <footer>
-    <b>How this works —</b> every leg multiplies your balance by the best bid (selling) or 1/ask (buying) available on that exchange's public order book, minus your taker fee. A positive % means the round trip A→B→C→A returns more than you started with, before slippage. All three legs of one cycle always execute on the <b>same</b> exchange — arbitrage never mixes order books mid-cycle.<br>
-    <b>Read before trading —</b> this is an informational scan of top-of-book prices, not a guarantee, and it does not manufacture profit that isn't really there. Real fills depend on order book depth, execution speed, and simultaneous availability of all three legs — thin books and latency routinely erase small or negative edges either way. This is not financial advice.
-  </footer>
+  <!-- ============ CROSS-EXCHANGE PANEL ============ -->
+  <div class="panel" id="panelX">
+    <div class="warn-banner">
+      <b>Assumes pre-funded balances.</b> This scans price gaps only — it does not model moving funds between exchanges. Real execution needs quote-asset balance already sitting on the buy exchange and the base asset already sitting on the sell exchange; an on-chain or internal transfer takes minutes, and the gap is usually gone by the time it lands.
+    </div>
+    <div class="controls">
+      <div class="field">
+        <label>Amount (USDT)</label>
+        <input type="number" id="xAmount" value="100" step="10" min="1">
+      </div>
+      <div class="field">
+        <label>Taker fee / leg (%)</label>
+        <input type="number" id="xFee" value="0.10" step="0.01" min="0" max="1">
+      </div>
+      <div class="field">
+        <label>Profit threshold (%)</label>
+        <input type="number" id="xMinProfit" value="0.10" step="0.01" min="-5" max="10">
+      </div>
+      <button class="primary" id="xScanBtn">Scan Markets</button>
+      <div class="spacer"></div>
+      <div class="stat"><span class="n" id="xStatAssets">–</span><span class="l">Assets compared</span></div>
+      <div class="stat"><span class="n" id="xStatBest">–</span><span class="l">Best profit</span></div>
+      <div class="stat"><span class="n" id="xStatAvg">–</span><span class="l">Avg profit</span></div>
+    </div>
+
+    <div id="xMessages"></div>
+    <div class="xrow head">
+      <div></div>
+      <div>Asset</div>
+      <div>Buy on</div>
+      <div>Sell on</div>
+      <div>Final amount</div>
+      <div style="text-align:right;">Profit</div>
+    </div>
+    <div id="xResults">
+      <div class="empty">Press <b>Scan Markets</b> to compare the same asset across Bitget, Binance, and Bybit for price gaps.</div>
+    </div>
+
+    <footer>
+      <b>How this works —</b> for every asset traded on 2+ of the selected exchanges, this finds the lowest ask (buy side) and the highest bid (sell side) and computes the spread after two taker fees. It requires the buy and sell exchange to be different — a gap on one exchange against itself isn't arbitrage.<br>
+      <b>Read before trading —</b> a live spread here is not automatically capturable — see the banner above. Transfer time, withdrawal fees/limits, and the spread closing before you move funds are the main reasons a real gap this size rarely survives long enough to execute risk-free. This is not financial advice.
+    </footer>
+  </div>
+
 </div>
 
 <script>
@@ -186,7 +275,34 @@ const els = {
   statPairs: document.getElementById('statPairs'),
   statCycles: document.getElementById('statCycles'),
   statHits: document.getElementById('statHits'),
+  tabTriBtn: document.getElementById('tabTriBtn'),
+  tabXBtn: document.getElementById('tabXBtn'),
+  panelTri: document.getElementById('panelTri'),
+  panelX: document.getElementById('panelX'),
+  xAmount: document.getElementById('xAmount'),
+  xFee: document.getElementById('xFee'),
+  xMinProfit: document.getElementById('xMinProfit'),
+  xScanBtn: document.getElementById('xScanBtn'),
+  xMessages: document.getElementById('xMessages'),
+  xResults: document.getElementById('xResults'),
+  xStatAssets: document.getElementById('xStatAssets'),
+  xStatBest: document.getElementById('xStatBest'),
+  xStatAvg: document.getElementById('xStatAvg'),
 };
+
+// Cache of the last successful per-exchange pairs fetch, so switching tabs
+// (or re-scanning cross-exchange) doesn't force a redundant round-trip.
+let pairsCache = {}; // { bitget: [...], binance: [...], bybit: [...] }
+
+els.tabTriBtn.addEventListener('click', () => switchTab('tri'));
+els.tabXBtn.addEventListener('click', () => switchTab('x'));
+function switchTab(which){
+  const isTri = which === 'tri';
+  els.tabTriBtn.classList.toggle('active', isTri);
+  els.tabXBtn.classList.toggle('active', !isTri);
+  els.panelTri.classList.toggle('active', isTri);
+  els.panelX.classList.toggle('active', !isTri);
+}
 
 function setStatus(state, text){
   els.statusDot.className = 'dot' + (state ? ' ' + state : '');
@@ -194,6 +310,9 @@ function setStatus(state, text){
 }
 function showMessage(html, type){
   els.messages.innerHTML = html ? `<div class="msg ${type}">${html}</div>` : '';
+}
+function showXMessage(html, type){
+  els.xMessages.innerHTML = html ? `<div class="msg ${type}">${html}</div>` : '';
 }
 
 async function fetchJSON(url){
@@ -399,6 +518,7 @@ async function runScan(){
     for(const key of keys){
       try{
         const pairs = await EXCHANGES[key].load();
+        pairsCache[key] = pairs;
         totalPairs += pairs.length;
         const adj = buildGraph(pairs);
         const { results, checked } = findCycles(adj, anchor, feePct, key);
@@ -448,6 +568,150 @@ async function runScan(){
 
 els.scanBtn.addEventListener('click', runScan);
 window.addEventListener('load', runScan);
+
+// ============ CROSS-EXCHANGE ============
+
+function findCrossExchangeOpportunities(pairsByExchange, feePct){
+  const feeMult = 1 - (feePct/100);
+  // key "BASE|QUOTE" -> [{exchange, bid, ask, symbol}, ...]
+  const byAsset = new Map();
+  for(const [exchange, pairs] of Object.entries(pairsByExchange)){
+    for(const p of pairs){
+      const key = p.base + '|' + p.quote;
+      if(!byAsset.has(key)) byAsset.set(key, []);
+      byAsset.get(key).push({ exchange, bid:p.bid, ask:p.ask, symbol:p.symbol });
+    }
+  }
+
+  const opportunities = [];
+  for(const [key, entries] of byAsset.entries()){
+    const exchangeCount = new Set(entries.map(e => e.exchange)).size;
+    if(exchangeCount < 2) continue;
+
+    const buyEntry = entries.reduce((min, e) => e.ask < min.ask ? e : min, entries[0]);
+    const sellEntry = entries.reduce((max, e) => e.bid > max.bid ? e : max, entries[0]);
+    if(buyEntry.exchange === sellEntry.exchange) continue; // not a cross-exchange gap
+
+    const [base, quote] = key.split('|');
+    const rawMult = sellEntry.bid / buyEntry.ask;
+    const netMult = rawMult * feeMult * feeMult; // one taker fee on each leg
+    const profitPct = (netMult - 1) * 100;
+    if(!isFinite(profitPct)) continue;
+
+    opportunities.push({ base, quote, buyEntry, sellEntry, profitPct, netMult });
+  }
+  return opportunities;
+}
+
+function fmtPrice(x){
+  if(x >= 1) return x.toFixed(4);
+  const s = x.toFixed(10).replace(/0+$/, '');
+  return s;
+}
+
+function renderCross(opps, amount){
+  if(opps.length === 0){
+    els.xResults.innerHTML = `<div class="empty">No cross-exchange gaps found right now. Try lowering the profit threshold.</div>`;
+    return;
+  }
+  const top = opps.slice(0, 20);
+  els.xResults.innerHTML = top.map((o, i) => {
+    const label = o.quote === 'USDT' ? o.base : `${o.base}/${o.quote}`;
+    const finalAmt = amount * o.netMult;
+    const profitClass = o.profitPct < 0 ? 'profit neg' : o.profitPct < 0.15 ? 'profit low' : 'profit';
+    const buyExLabel = EXCHANGES[o.buyEntry.exchange] ? EXCHANGES[o.buyEntry.exchange].label : o.buyEntry.exchange;
+    const sellExLabel = EXCHANGES[o.sellEntry.exchange] ? EXCHANGES[o.sellEntry.exchange].label : o.sellEntry.exchange;
+    return `<div class="xrow">
+      <div class="rank ${i===0?'top1':''}">#${i+1}</div>
+      <div class="xasset">${label}</div>
+      <div class="xside">
+        <span class="exch ${o.buyEntry.exchange}">${buyExLabel}</span>
+        <span class="price">ask ${fmtPrice(o.buyEntry.ask)}</span>
+      </div>
+      <div class="xside">
+        <span class="exch ${o.sellEntry.exchange}">${sellExLabel}</span>
+        <span class="price">bid ${fmtPrice(o.sellEntry.bid)}</span>
+      </div>
+      <div class="xfinal">${finalAmt.toFixed(2)} ${o.quote}</div>
+      <div class="${profitClass} xprofit">${fmtPct(o.profitPct)}</div>
+    </div>`;
+  }).join('');
+}
+
+async function runXScan(){
+  els.xScanBtn.disabled = true;
+  setStatus('', 'connecting…');
+  showXMessage('', '');
+  try{
+    const keys = Object.keys(EXCHANGES);
+    const amount = parseFloat(els.xAmount.value) || 100;
+    const feePct = parseFloat(els.xFee.value) || 0;
+    const minProfit = parseFloat(els.xMinProfit.value);
+    const failed = [];
+
+    // Reuse cached pairs when we already have all three; otherwise fetch fresh.
+    const needFetch = keys.some(k => !pairsCache[k] || pairsCache[k].length === 0);
+    if(needFetch){
+      for(const key of keys){
+        try{
+          pairsCache[key] = await EXCHANGES[key].load();
+        }catch(exErr){
+          console.error(key, exErr);
+          failed.push(EXCHANGES[key].label);
+        }
+      }
+    }
+
+    const pairsByExchange = {};
+    let loadedCount = 0;
+    for(const key of keys){
+      if(pairsCache[key] && pairsCache[key].length){
+        pairsByExchange[key] = pairsCache[key];
+        loadedCount++;
+      }
+    }
+    if(loadedCount < 2){
+      throw new Error(failed.length ? `not enough exchanges responded (${failed.join(', ')} failed)` : 'need at least 2 exchanges of data');
+    }
+    setStatus('live', failed.length ? `connected (${failed.join(', ')} failed)` : 'connected');
+
+    const opportunities = findCrossExchangeOpportunities(pairsByExchange, feePct);
+    const ranked = opportunities.sort((a,b) => b.profitPct - a.profitPct);
+    const filtered = ranked.filter(o => o.profitPct >= minProfit);
+
+    els.xStatAssets.textContent = ranked.length.toLocaleString();
+    els.lastUpdate.textContent = 'updated ' + new Date().toLocaleTimeString();
+
+    const showSet = filtered.length > 0 ? filtered : ranked;
+    if(showSet.length > 0){
+      els.xStatBest.textContent = fmtPct(showSet[0].profitPct);
+      const avg = showSet.slice(0,20).reduce((s,o) => s+o.profitPct, 0) / Math.min(20, showSet.length);
+      els.xStatAvg.textContent = fmtPct(avg);
+    } else {
+      els.xStatBest.textContent = '–';
+      els.xStatAvg.textContent = '–';
+    }
+
+    if(filtered.length > 0){
+      renderCross(filtered, amount);
+      showXMessage(failed.length ? `${failed.join(', ')} couldn't be reached this scan — comparison below uses whichever exchanges responded.` : '', failed.length ? 'info' : '');
+    } else if(ranked.length > 0){
+      renderCross(ranked, amount);
+      showXMessage(`No asset cleared your ${minProfit.toFixed(2)}% threshold after a ${(feePct*2).toFixed(2)}% round-trip fee (one taker fee per leg) — showing the closest gaps instead (best is ${fmtPct(ranked[0].profitPct)}). Remember the pre-funded-balance caveat above before treating any of these as capturable.`, 'info');
+    } else {
+      els.xResults.innerHTML = `<div class="empty">No shared assets found across the responding exchanges.</div>`;
+      showXMessage('', '');
+    }
+  }catch(err){
+    setStatus('err', 'error');
+    console.error(err);
+    showXMessage(`Could not reach the exchange API(s) from the browser (${err.message}). This is usually a CORS or network restriction in this environment rather than an issue with the logic.`, 'error');
+  }finally{
+    els.xScanBtn.disabled = false;
+  }
+}
+
+els.xScanBtn.addEventListener('click', runXScan);
 </script>
 </body>
 </html>
