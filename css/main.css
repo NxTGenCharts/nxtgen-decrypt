@@ -1,0 +1,144 @@
+/* =========================================================
+   MAIN.CSS
+   Design tokens, reset, typography, base layout, header, nav.
+   ========================================================= */
+
+/* -------------------- 1. Design tokens -------------------- */
+:root{
+  --bg:#08090a;
+  --bg-glow-1:#101a15;
+  --bg-glow-2:#0f1713;
+  --panel:#111411;
+  --panel2:#161a17;
+  --panel-hi:#1a1f1b;
+  --line:#212a23;
+  --line-soft:#181f1a;
+  --ink:#eef1ee;
+  --ink-dim:#aebcb2;
+  --dim:#7f9385;
+  --dim2:#546156;
+  --amber:#f0b429;
+  --amber-ink:#1a1305;
+  --amber-dim:#8a6c22;
+  --green:#3ddc97;
+  --green-soft:rgba(61,220,151,.10);
+  --green-line:#22503b;
+  --red:#f2637a;
+  --red-soft:rgba(242,99,122,.10);
+  --red-line:#5a2530;
+  --mono:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --disp:'Space Grotesk', 'IBM Plex Mono', sans-serif;
+  --r-sm:4px;
+  --r-md:6px;
+  --r-lg:9px;
+  --r-pill:20px;
+
+  /* layout tokens (new — used by header/nav/controls redesign) */
+  --content-max:1600px;
+  --edge-pad:clamp(16px, 4vw, 32px);
+  --header-h-desktop:auto;
+  --touch-target:44px;
+}
+
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+
+/* -------------------- 2. Reset -------------------- */
+*{ box-sizing:border-box; }
+html{ -webkit-text-size-adjust:100%; }
+body{
+  margin:0;
+  background:
+    radial-gradient(1200px 520px at 12% -12%, var(--bg-glow-1) 0%, transparent 58%),
+    radial-gradient(1000px 520px at 102% -6%, var(--bg-glow-2) 0%, transparent 55%),
+    var(--bg);
+  color:var(--ink);
+  font-family:var(--mono);
+  min-height:100vh;
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden; /* belt-and-braces: nothing should ever force page-level horizontal scroll */
+}
+button, input, select{ font-family:inherit; }
+button{ font:inherit; }
+a{ color:inherit; }
+::selection{ background:rgba(61,220,151,.25); }
+
+:focus-visible{ outline:2px solid var(--amber); outline-offset:2px; border-radius:var(--r-sm); }
+
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{ animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; scroll-behavior:auto !important; }
+}
+
+/* -------------------- 3. Typography -------------------- */
+h1,h2,h3{ font-family:var(--disp); margin:0; letter-spacing:.005em; }
+.mono-num{ font-family:var(--disp); font-variant-numeric:tabular-nums; }
+.caption{ font-size:10px; text-transform:uppercase; letter-spacing:.09em; color:var(--dim); }
+
+/* -------------------- 4. Base layout -------------------- */
+.wrap{
+  width:100%;
+  max-width:var(--content-max);
+  margin:0 auto;
+  padding:clamp(16px, 3vw, 26px) var(--edge-pad) 60px;
+}
+.panel{ display:none; }
+.panel.active{ display:block; animation:panelIn .22s ease; }
+@keyframes panelIn{ from{ opacity:0; transform:translateY(4px);} to{ opacity:1; transform:none; } }
+
+/* -------------------- 5. Header -------------------- */
+.term-header{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:24px;
+  border-bottom:1px solid var(--line);
+  padding-bottom:20px;
+  margin-bottom:20px;
+}
+.brand-block{ display:flex; align-items:center; gap:14px; min-width:0; }
+.logo-img{ height:44px; width:auto; display:block; border-radius:var(--r-sm); flex-shrink:0; }
+.brand-copy{ display:flex; flex-direction:column; gap:4px; min-width:0; }
+.brand-row{ display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
+.product-name{ font-family:var(--disp); font-weight:700; font-size:16px; letter-spacing:.01em; color:var(--ink); }
+.sub{ color:var(--dim); font-size:11.5px; }
+
+.status-cluster{ display:flex; flex-direction:column; align-items:flex-end; gap:9px; flex-shrink:0; }
+.live-pill{
+  display:flex; align-items:center; gap:8px; font-size:11.5px; color:var(--ink-dim);
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r-pill); padding:6px 12px 6px 10px;
+}
+.dot{ width:7px;height:7px;border-radius:50%; background:var(--dim); display:inline-block; flex-shrink:0; }
+.dot.live{ background:var(--green); box-shadow:0 0 0 3px var(--green-soft); animation:pulseDot 2.2s infinite; }
+.dot.err{ background:var(--red); box-shadow:0 0 0 3px var(--red-soft); }
+@keyframes pulseDot{ 0%,100%{ box-shadow:0 0 0 0 rgba(61,220,151,.35);} 50%{ box-shadow:0 0 0 5px rgba(61,220,151,0);} }
+
+.exchange-badges{ display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+.xbadge{
+  display:flex; align-items:center; gap:6px; font-size:9.5px; font-weight:600; letter-spacing:.07em;
+  color:var(--dim2); border:1px solid var(--line-soft); border-radius:var(--r-sm); padding:4px 8px;
+  background:var(--panel); white-space:nowrap;
+}
+.xbadge-dot{ width:6px;height:6px;border-radius:50%; background:var(--dim2); flex-shrink:0; }
+.xbadge[data-state="up"]{ color:var(--green); border-color:var(--green-line); background:var(--green-soft); }
+.xbadge[data-state="up"] .xbadge-dot{ background:var(--green); }
+.xbadge[data-state="down"]{ color:var(--red); border-color:var(--red-line); background:var(--red-soft); }
+.xbadge[data-state="down"] .xbadge-dot{ background:var(--red); }
+.last-update{ font-size:10.5px; color:var(--dim2); white-space:nowrap; }
+
+/* -------------------- 6. Navigation -------------------- */
+.term-nav{
+  display:flex; gap:26px; border-bottom:1px solid var(--line); margin-bottom:22px;
+  overflow-x:auto; scrollbar-width:none; -ms-overflow-style:none;
+}
+.term-nav::-webkit-scrollbar{ display:none; }
+.navtab{
+  appearance:none; background:none; border:none; cursor:pointer;
+  display:flex; align-items:center; gap:8px;
+  font-family:var(--disp); font-weight:600; font-size:13px; color:var(--dim);
+  padding:11px 2px 12px; border-bottom:2px solid transparent; letter-spacing:.01em;
+  transition:color .15s, border-color .15s;
+  white-space:nowrap; flex-shrink:0;
+  min-height:var(--touch-target);
+}
+.navtab .ic{ font-size:13px; opacity:.85; }
+.navtab:hover{ color:var(--ink-dim); }
+.navtab.active{ color:var(--ink); border-bottom-color:var(--amber); }
