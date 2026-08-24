@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="38%" r="70%">
+      <stop offset="0%" stop-color="#16261c"/>
+      <stop offset="100%" stop-color="#08090a"/>
+    </radialGradient>
+    <linearGradient id="tri" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#f7c657"/>
+      <stop offset="100%" stop-color="#e0a51f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background: rounded square, terminal dark -->
+  <rect x="0" y="0" width="64" height="64" rx="14" fill="url(#glow)"/>
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="13.25" fill="none" stroke="#1c2a20" stroke-width="1.5"/>
+
+  <!-- triangular-arbitrage glyph: outline triangle with corner nodes and inner cycle arrows -->
+  <polygon points="32,12 52,46 12,46" fill="none" stroke="url(#tri)" stroke-width="4.5" stroke-linejoin="round"/>
+
+  <!-- corner nodes (the three "assets" of a triangular cycle) -->
+  <circle cx="32" cy="12" r="4.4" fill="#0d0f0d" stroke="#f0b429" stroke-width="2.6"/>
+  <circle cx="52" cy="46" r="4.4" fill="#0d0f0d" stroke="#3ddc97" stroke-width="2.6"/>
+  <circle cx="12" cy="46" r="4.4" fill="#0d0f0d" stroke="#3ddc97" stroke-width="2.6"/>
+
+  <!-- small directional tick on one edge, hinting at the trade cycle -->
+  <path d="M 22.5 46 L 27.5 46 L 25 41.5 Z" fill="#3ddc97"/>
+</svg>
