@@ -3,20 +3,26 @@
 // the Autotrade engine for the Triangular tab only.
 //
 // IMPORTANT — what this actually does:
-// This module does NOT place real orders on any exchange. It cannot:
-// browser JS has no safe way to sign authenticated exchange requests
-// without exposing your secret key to anyone who opens devtools, so
-// wiring a secret key straight to live order placement from a static
-// front-end would be a security problem, not just a feature. Real
-// auto-execution belongs behind a server you control that holds the
-// keys and signs requests — this file is the decision engine you'd
-// point at that server.
+// This module does NOT place real orders or move funds on any exchange.
+// On Connect, it makes exactly one read-only signed request straight from
+// the browser to Binance/Bybit's own account endpoint, to confirm the
+// key/secret pair is real and to read the balance — nothing more. That
+// single verify call is a reasonable thing to do client-side (it can only
+// read your account, and the exchange itself is the one confirming it).
+// Live order placement is a different story: browser JS has no safe way to
+// sign a continuous stream of trading requests without the secret key
+// sitting exposed in devtools/network traffic the whole session, so that
+// part stays a simulation. Real auto-execution belongs behind a server you
+// control that holds the keys and signs requests — this file is the
+// decision engine you'd point at that server.
 //
 // What it DOES do:
-// - Lets you "connect" an exchange (API key + secret stored only in
-//   this browser's localStorage, never transmitted anywhere).
-// - Lets you record today's balance per exchange (manual entry, since
-//   reading a real balance also requires an authenticated/signed call).
+// - Lets you connect an exchange: format-checks the key, then verifies it
+//   against the exchange (Binance/Bybit) and pulls your balance. Bitget
+//   can't be verified in-browser (needs a passphrase this app doesn't
+//   collect) and is saved as unverified.
+// - Keeps saved keys across Disconnect — only "Remove" deletes them — with
+//   a SHOW/HIDE toggle to reveal a saved key or secret on demand.
 // - Watches the selected exchange's live order books for triangular
 //   cycles, same math as the Triangular tab, and — when Autotrade is
 //   ON — paper-trades (simulates) the single highest-profit cycle that
@@ -39,7 +45,67 @@ function money(n){
   return '$' + (n < 0 ? '-' : '') + Math.abs(n).toLocaleString(undefined, { minimumFractionDigits:2, maximumFractionDigits:2 });
 }
 
-// ---------------- persistence (localStorage only — nothing leaves the browser) ----------------
+// ---------------- Web Crypto HMAC signing (client-side, for the Verify step only) ----------------
+async function hmacSha256Hex(secret, message){
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name:'HMAC', hash:'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message));
+  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+class VerifyRejected extends Error {}
+
+// Read-only account/balance checks — no orders, no withdrawals. Uses the
+// exchange's own signed endpoint, so it's the only way to actually confirm
+// a key/secret pair is real (format checks alone can't do that). If the
+// browser can't reach the endpoint at all (many exchanges don't allow
+// authenticated calls from a browser origin), this throws a network error
+// rather than a rejection, and the caller treats that as "unverified", not
+// "invalid" — the key might be fine, we just couldn't confirm it here.
+async function verifyBinance(testnet, apiKey, secretKey){
+  const base = testnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+  const qs = `timestamp=${Date.now()}&recvWindow=5000`;
+  const signature = await hmacSha256Hex(secretKey, qs);
+  const res = await fetch(`${base}/api/v3/account?${qs}&signature=${signature}`, { headers:{ 'X-MBX-APIKEY': apiKey } });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
+    throw new VerifyRejected(data && data.msg ? data.msg : `HTTP ${res.status}`);
+  }
+  const usdt = (data.balances || []).find(b => b.asset === 'USDT');
+  return { balance: usdt ? parseFloat(usdt.free) + parseFloat(usdt.locked) : null };
+}
+
+async function verifyBybit(testnet, apiKey, secretKey){
+  const base = testnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+  const timestamp = String(Date.now());
+  const recvWindow = '5000';
+  const query = 'accountType=UNIFIED';
+  const signature = await hmacSha256Hex(secretKey, timestamp + apiKey + recvWindow + query);
+  const res = await fetch(`${base}/v5/account/wallet-balance?${query}`, {
+    headers:{
+      'X-BAPI-API-KEY': apiKey, 'X-BAPI-SIGN': signature, 'X-BAPI-SIGN-TYPE': '2',
+      'X-BAPI-TIMESTAMP': timestamp, 'X-BAPI-RECV-WINDOW': recvWindow,
+    }
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || !data || data.retCode !== 0){
+    throw new VerifyRejected(data && data.retMsg ? data.retMsg : `HTTP ${res.status}`);
+  }
+  const coins = data.result?.list?.[0]?.coin || [];
+  const usdt = coins.find(c => c.coin === 'USDT');
+  return { balance: usdt ? parseFloat(usdt.walletBalance) : null };
+}
+
+const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit }; // Bitget needs a passphrase we don't collect — format-check only
+
+// Loose per-exchange format sanity check — catches empty/garbage input
+// immediately. It cannot confirm a key is real; only VERIFIERS above can.
+function formatLooksValid(key, apiKey, secretKey){
+  const clean = s => /^[A-Za-z0-9\-_]+$/.test(s);
+  if(apiKey.length < 10 || secretKey.length < 10) return false;
+  if(!clean(apiKey) || !clean(secretKey)) return false;
+  return true;
+}
 function persist(){
   try{
     localStorage.setItem(LS_KEY, JSON.stringify({
@@ -52,18 +118,30 @@ function persist(){
 }
 
 // A cred/balance slot from an older version of this app could be `null` or a
-// flat object/number instead of today's { live, testnet } shape. Coerce
-// anything unexpected back into a safe shape rather than letting a stale
-// localStorage value throw when we later index into .live/.testnet.
+// flat object/number instead of today's shape. Coerce anything unexpected
+// back into a safe shape rather than letting a stale localStorage value
+// throw when we later index into .live/.testnet.
 function coerceCredSlot(saved){
   if(saved && typeof saved === 'object' && ('live' in saved || 'testnet' in saved)){
-    return { live: saved.live || null, testnet: saved.testnet || null };
+    return { live: normalizeCred(saved.live), testnet: normalizeCred(saved.testnet) };
   }
   if(saved && typeof saved === 'object' && saved.apiKey){
     // Old flat "{ apiKey, connectedAt }" shape — treat it as a live-network connection.
-    return { live: saved, testnet: null };
+    return { live: normalizeCred(saved), testnet: null };
   }
   return { live: null, testnet: null };
+}
+
+function normalizeCred(c){
+  if(!c || typeof c !== 'object' || !c.apiKey) return null;
+  return {
+    apiKey: c.apiKey,
+    secretKey: c.secretKey || '',
+    connectedAt: c.connectedAt || new Date().toLocaleString(),
+    connected: c.connected !== false, // default true for old saves that had no such flag
+    verified: c.verified || false,
+    verifyNote: c.verifyNote || '',
+  };
 }
 
 function coerceBalanceSlot(saved, supportsTestnet){
@@ -116,32 +194,54 @@ function renderConnectRows(){
     const supportsTestnet = EXCHANGES[key].testnetSupported;
     const mode = supportsTestnet ? (state.exchangeMode[key] || 'live') : 'live';
     const cred = (state.exchangeCreds[key] || {})[mode] || null;
-    const connected = !!cred;
+    const stored = !!cred;               // a key/secret is saved for this slot
+    const connected = stored && cred.connected;
     const modeToggle = supportsTestnet ? `
       <div class="mode-toggle" role="group" aria-label="${label} network">
         <button type="button" class="mode-btn ${mode==='live'?'active':''}" data-mode="live">Live</button>
         <button type="button" class="mode-btn ${mode==='testnet'?'active':''}" data-mode="testnet">Testnet</button>
       </div>` : `<div class="mode-toggle mode-toggle--disabled" title="Bitget has no public spot testnet"><span class="mode-btn active">Live only</span></div>`;
+
+    let statusPill = '';
+    if(stored){
+      if(cred.verified) statusPill = `<span class="pill tr-yes" title="${cred.verifyNote||''}">VERIFIED</span>`;
+      else statusPill = `<span class="pill" style="color:var(--amber);border-color:var(--amber-dim);" title="${cred.verifyNote||'Could not confirm with the exchange from this browser.'}">UNVERIFIED</span>`;
+    }
+
     return `<div class="connect-row" data-exchange="${key}" data-mode="${mode}">
-      <div class="connect-label">${label}${mode==='testnet' ? ' <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">TESTNET</span>' : ''}</div>
+      <div class="connect-label">${label}${mode==='testnet' ? ' <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">TESTNET</span>' : ''}${statusPill ? ' '+statusPill : ''}</div>
       ${modeToggle}
-      <input class="ck-key" type="text" placeholder="Enter ${mode === 'testnet' ? 'testnet ' : ''}API key" value="${connected ? maskKey(cred.apiKey) : ''}" ${connected ? 'disabled' : ''}>
-      <input class="ck-secret" type="password" placeholder="Enter ${mode === 'testnet' ? 'testnet ' : ''}secret key" value="${connected ? '••••••••••••' : ''}" ${connected ? 'disabled' : ''}>
-      <button class="primary ${connected ? 'ghost' : ''} connect-btn" data-action="${connected ? 'disconnect' : 'connect'}">
-        ${connected ? 'Disconnect' : 'Connect'}
-      </button>
-      <span class="xbadge" data-state="${connected ? 'up' : 'idle'}"><span class="xbadge-dot"></span>${connected ? 'CONNECTED' : 'NOT CONNECTED'}</span>
+      <div class="kv-field">
+        <input class="ck-key" type="${stored ? 'password' : 'text'}" placeholder="Enter ${mode === 'testnet' ? 'testnet ' : ''}API key" value="${stored ? cred.apiKey : ''}" ${stored ? 'disabled' : ''}>
+        ${stored ? `<button type="button" class="reveal-btn" data-field="key" title="Show/hide">SHOW</button>` : ''}
+      </div>
+      <div class="kv-field">
+        <input class="ck-secret" type="password" placeholder="Enter ${mode === 'testnet' ? 'testnet ' : ''}secret key" value="${stored ? cred.secretKey : ''}" ${stored ? 'disabled' : ''}>
+        ${stored ? `<button type="button" class="reveal-btn" data-field="secret" title="Show/hide">SHOW</button>` : ''}
+      </div>
+      ${stored ? `
+        <button class="primary ghost connect-btn" data-action="${connected ? 'disconnect' : 'reconnect'}">${connected ? 'Disconnect' : 'Reconnect'}</button>
+        <button class="primary ghost remove-btn" data-action="remove" title="Permanently remove this saved key">Remove</button>
+      ` : `
+        <button class="primary connect-btn" data-action="connect">Connect</button>
+        <span></span>
+      `}
+      <span class="xbadge" data-state="${connected ? 'up' : 'idle'}"><span class="xbadge-dot"></span>${connected ? 'CONNECTED' : (stored ? 'DISCONNECTED' : 'NOT CONNECTED')}</span>
     </div>`;
   }).join('');
 }
 
-function maskKey(k){
-  if(!k) return '';
-  if(k.length <= 8) return '•'.repeat(k.length);
-  return k.slice(0,4) + '…' + k.slice(-4);
-}
+els.connectRows.addEventListener('click', async (e) => {
+  const revealBtn = e.target.closest('.reveal-btn');
+  if(revealBtn){
+    const row = e.target.closest('.connect-row');
+    const input = row.querySelector(revealBtn.dataset.field === 'key' ? '.ck-key' : '.ck-secret');
+    const showing = input.type === 'text';
+    input.type = showing ? 'password' : 'text';
+    revealBtn.textContent = showing ? 'SHOW' : 'HIDE';
+    return;
+  }
 
-els.connectRows.addEventListener('click', (e) => {
   const modeBtn = e.target.closest('.mode-btn[data-mode]');
   if(modeBtn){
     const row = e.target.closest('.connect-row');
@@ -153,27 +253,97 @@ els.connectRows.addEventListener('click', (e) => {
     renderBalances();
     return;
   }
+
+  const removeBtn = e.target.closest('.remove-btn');
+  if(removeBtn){
+    const row = e.target.closest('.connect-row');
+    const key = row.dataset.exchange;
+    const mode = row.dataset.mode;
+    state.exchangeCreds[key][mode] = null;
+    persist();
+    renderConnectRows();
+    renderBalances();
+    renderExchangeOptions();
+    showAtMessage(`${EXCHANGES[key].label} (${mode}) key removed.`, 'info');
+    return;
+  }
+
   const btn = e.target.closest('.connect-btn');
   if(!btn) return;
   const row = e.target.closest('.connect-row');
   const key = row.dataset.exchange;
-  const mode = state.exchangeMode[key];
+  const mode = row.dataset.mode;
   const action = btn.dataset.action;
-  if(action === 'connect'){
-    const apiKey = row.querySelector('.ck-key').value.trim();
-    const secretKey = row.querySelector('.ck-secret').value.trim();
-    if(!apiKey || !secretKey){
-      showAtMessage('Enter both an API key and a secret key before connecting.', 'error');
-      return;
-    }
-    // Stored locally only, never sent anywhere — see the notice under Connect Exchanges.
-    state.exchangeCreds[key][mode] = { apiKey, secretKeyMasked: true, connectedAt: new Date().toLocaleString() };
-    const netLabel = mode === 'testnet' ? 'testnet' : 'live';
-    showAtMessage(`${EXCHANGES[key].label} (${netLabel}) connected. Keys are stored only in this browser (localStorage) and are not used to place any trade — Autotrade below runs as a simulation against ${EXCHANGES[key].label}'s ${netLabel} public order book.`, 'info');
-  } else {
-    state.exchangeCreds[key][mode] = null;
-    showAtMessage(`${EXCHANGES[key].label} (${mode}) disconnected.`, 'info');
+
+  if(action === 'disconnect'){
+    state.exchangeCreds[key][mode].connected = false;
+    persist();
+    renderConnectRows();
+    renderBalances();
+    showAtMessage(`${EXCHANGES[key].label} (${mode}) disconnected. Your key is still saved — hit Reconnect to use it again, or Remove to delete it.`, 'info');
+    return;
   }
+  if(action === 'reconnect'){
+    state.exchangeCreds[key][mode].connected = true;
+    persist();
+    renderConnectRows();
+    renderBalances();
+    showAtMessage(`${EXCHANGES[key].label} (${mode}) reconnected.`, 'info');
+    return;
+  }
+
+  // action === 'connect' — brand new key entry
+  const apiKey = row.querySelector('.ck-key').value.trim();
+  const secretKey = row.querySelector('.ck-secret').value.trim();
+  if(!apiKey || !secretKey){
+    showAtMessage('Enter both an API key and a secret key before connecting.', 'error');
+    return;
+  }
+  if(!formatLooksValid(key, apiKey, secretKey)){
+    showAtMessage(`That doesn't look like a valid ${EXCHANGES[key].label} key/secret pair (wrong length or characters) — double-check it and try again.`, 'error');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Verifying…';
+  const netLabel = mode === 'testnet' ? 'testnet' : 'live';
+
+  const cred = { apiKey, secretKey, connectedAt: new Date().toLocaleString(), connected: true, verified: false, verifyNote: '' };
+  const verifier = VERIFIERS[key];
+
+  if(verifier){
+    try{
+      const testnet = mode === 'testnet';
+      const result = await verifier(testnet, apiKey, secretKey);
+      cred.verified = true;
+      cred.verifyNote = `Confirmed live with ${EXCHANGES[key].label} — account reachable and authenticated.`;
+      state.exchangeCreds[key][mode] = cred;
+      if(result.balance != null){
+        state.balances[key][mode] = result.balance;
+        showAtMessage(`${EXCHANGES[key].label} (${netLabel}) key verified against the exchange and balance pulled: ${money(result.balance)} USDT. Autotrade below still simulates trades — this only confirms the key works and reads your balance.`, 'info');
+      } else {
+        showAtMessage(`${EXCHANGES[key].label} (${netLabel}) key verified against the exchange.`, 'info');
+      }
+    }catch(err){
+      if(err instanceof VerifyRejected){
+        // The exchange itself rejected the key/secret — don't save it as connected.
+        showAtMessage(`${EXCHANGES[key].label} rejected that ${netLabel} key: ${err.message}. Double-check the key, secret, and that it has the right permissions/IP allow-list, then try again.`, 'error');
+        renderConnectRows();
+        return;
+      }
+      // Network/CORS failure — we genuinely can't tell if the key is valid from here.
+      cred.verified = false;
+      cred.verifyNote = `Could not reach ${EXCHANGES[key].label} to verify from this browser (likely blocked by the exchange for cross-origin requests). The key's format looks right, but it hasn't been confirmed.`;
+      state.exchangeCreds[key][mode] = cred;
+      showAtMessage(`Saved the ${EXCHANGES[key].label} (${netLabel}) key, but couldn't verify it against the exchange from this browser — that's usually the exchange blocking authenticated calls from a browser origin (CORS), not necessarily a bad key. Marked UNVERIFIED. For guaranteed verification and balance reads, that needs a small backend proxy holding the key server-side.`, 'error');
+    }
+  } else {
+    // Bitget: no in-browser verifier (needs a passphrase this app doesn't collect).
+    cred.verifyNote = 'Bitget verification isn\'t done in-browser — format looks valid, but this hasn\'t been confirmed against the exchange.';
+    state.exchangeCreds[key][mode] = cred;
+    showAtMessage(`${EXCHANGES[key].label} key saved (format looks valid). Bitget's signed endpoints need a passphrase this app doesn't collect, so it can't be verified in-browser — treat it as UNVERIFIED.`, 'info');
+  }
+
   persist();
   renderConnectRows();
   renderBalances();

@@ -202,7 +202,8 @@
       <div class="ov-block-title">Connect Exchanges</div>
       <div id="connectRows" class="connect-list"></div>
       <div class="warn-banner" style="margin:14px 0 0;">
-        <b>Your keys never leave this browser.</b> API/secret keys are stored only in this device's local storage, purely so this app can show a connected/disconnected badge per exchange. This app never sends them anywhere and does not place live orders — Autotrade below is a paper-trading simulation against each exchange's public order book. Use read-only keys if you connect real ones.<br><br>
+        <b>Your keys never leave this browser.</b> API/secret keys are stored only in this device's local storage. This app never sends them anywhere except a single read-only "verify" request straight to the exchange itself (Binance/Bybit) to confirm the key is real and pull your balance — it never places an order or moves funds. Disconnecting keeps the saved key so you can reconnect later; use Remove to delete it, and the SHOW/HIDE button next to each field to reveal it. Use read-only keys if you connect real ones.<br><br>
+        <b>Verification.</b> Binance and Bybit keys are checked against the exchange live — a rejected key won't connect. If the browser can't reach the exchange at all (some block authenticated calls from browser origins), the key is saved as UNVERIFIED rather than rejected, since that's not the same as being invalid. Bitget can't be verified in-browser (it needs a passphrase this app doesn't collect) and is always saved as UNVERIFIED.<br><br>
         <b>Testnet.</b> Binance and Bybit each expose a public testnet — use the Live/Testnet switch on their row to enter separate testnet keys and paper-trade against fake-money order books instead of real market data. Bitget has no public spot testnet, so its row stays Live-only.
       </div>
     </div>

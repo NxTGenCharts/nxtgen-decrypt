@@ -272,7 +272,15 @@ footer b{ color:#a9bfae; }
 .mode-toggle--disabled .mode-btn{ cursor:default; }
 .mode-btn + .mode-btn{ border-left:1px solid var(--line); }
 .mode-btn.active{ background:var(--amber); color:var(--amber-ink); font-weight:700; }
-.connect-row{ grid-template-columns:110px auto 1fr 1fr auto auto; }
+.connect-row{ grid-template-columns:110px auto 1fr 1fr auto auto auto; }
+.kv-field{ display:flex; align-items:stretch; gap:6px; }
+.kv-field input{ flex:1; min-width:0; }
+.reveal-btn{
+  background:var(--panel); color:var(--dim); border:1px solid var(--line); border-radius:var(--r-sm);
+  padding:0 10px; font-family:var(--mono); font-size:10.5px; cursor:pointer; white-space:nowrap; min-height:var(--touch-target);
+}
+.reveal-btn:hover{ color:var(--ink-dim); border-color:var(--ink-dim); }
+.remove-btn{ color:var(--red); border-color:var(--red-line); }
 
 .progress-wrap{ margin:6px 0 4px; }
 .progress-track{ background:var(--panel2); border:1px solid var(--line); border-radius:var(--r-pill); height:14px; overflow:hidden; }
