@@ -98,8 +98,43 @@ async function verifyBybit(testnet, apiKey, secretKey){
 
 const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit }; // Bitget needs a passphrase we don't collect — format-check only
 
+// If a verify proxy is configured (see /server), route through it — it can
+// actually complete the signed request, since CORS only blocks the
+// browser-to-exchange hop, not server-to-exchange. Returns the same shape
+// either way: { verified, rejected, balance, message }.
+async function runVerification(key, mode, apiKey, secretKey){
+  const proxyUrl = (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
+  if(proxyUrl){
+    try{
+      const res = await fetch(proxyUrl + '/api/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ exchange: key, mode, apiKey, secretKey }),
+      });
+      const data = await res.json().catch(() => null);
+      if(!data) return { verified:false, rejected:false, balance:null, message:`Proxy returned an unreadable response (HTTP ${res.status}).` };
+      return data;
+    }catch(err){
+      return { verified:false, rejected:false, balance:null, message:`Could not reach the verification proxy at ${proxyUrl} (${err.message}). Check the URL and that the server is running.` };
+    }
+  }
+
+  // No proxy configured — try the exchange directly from the browser. For
+  // Binance/Bybit this will almost always come back "couldn't reach" due
+  // to CORS on their authenticated endpoints; that's expected, not a bug.
+  const verifier = VERIFIERS[key];
+  if(!verifier) return { verified:false, rejected:false, balance:null, message:'' }; // Bitget — no verifier at all
+  try{
+    const result = await verifier(mode === 'testnet', apiKey, secretKey);
+    return { verified:true, rejected:false, balance:result.balance, message:`Confirmed with ${EXCHANGES[key].label}.` };
+  }catch(err){
+    if(err instanceof VerifyRejected) return { verified:false, rejected:true, balance:null, message:err.message };
+    return { verified:false, rejected:false, balance:null, message:`Could not reach ${EXCHANGES[key].label} directly from this browser (likely CORS on their signed endpoints). Set a Verification proxy URL above for reliable checks — see /server.` };
+  }
+}
+
 // Loose per-exchange format sanity check — catches empty/garbage input
-// immediately. It cannot confirm a key is real; only VERIFIERS above can.
+// immediately. It cannot confirm a key is real; only runVerification() can.
 function formatLooksValid(key, apiKey, secretKey){
   const clean = s => /^[A-Za-z0-9\-_]+$/.test(s);
   if(apiKey.length < 10 || secretKey.length < 10) return false;
@@ -109,6 +144,7 @@ function formatLooksValid(key, apiKey, secretKey){
 function persist(){
   try{
     localStorage.setItem(LS_KEY, JSON.stringify({
+      verifyProxyUrl: state.verifyProxyUrl,
       exchangeCreds: state.exchangeCreds,
       exchangeMode: state.exchangeMode,
       balances: state.balances,
@@ -160,6 +196,7 @@ function restore(){
     const raw = localStorage.getItem(LS_KEY);
     if(!raw) return;
     const saved = JSON.parse(raw);
+    if(typeof saved.verifyProxyUrl === 'string') state.verifyProxyUrl = saved.verifyProxyUrl;
     if(saved.exchangeCreds){
       for(const key of Object.keys(EXCHANGES)){
         state.exchangeCreds[key] = coerceCredSlot(saved.exchangeCreds[key]);
@@ -230,6 +267,11 @@ function renderConnectRows(){
     </div>`;
   }).join('');
 }
+
+els.atProxyUrl.addEventListener('change', () => {
+  state.verifyProxyUrl = els.atProxyUrl.value.trim();
+  persist();
+});
 
 els.connectRows.addEventListener('click', async (e) => {
   const revealBtn = e.target.closest('.reveal-btn');
@@ -307,41 +349,37 @@ els.connectRows.addEventListener('click', async (e) => {
   btn.disabled = true;
   btn.textContent = 'Verifying…';
   const netLabel = mode === 'testnet' ? 'testnet' : 'live';
+  const usingProxy = !!(state.verifyProxyUrl || '').trim();
 
   const cred = { apiKey, secretKey, connectedAt: new Date().toLocaleString(), connected: true, verified: false, verifyNote: '' };
-  const verifier = VERIFIERS[key];
 
-  if(verifier){
-    try{
-      const testnet = mode === 'testnet';
-      const result = await verifier(testnet, apiKey, secretKey);
-      cred.verified = true;
-      cred.verifyNote = `Confirmed live with ${EXCHANGES[key].label} — account reachable and authenticated.`;
-      state.exchangeCreds[key][mode] = cred;
+  if(key === 'bitget'){
+    cred.verifyNote = 'Bitget verification needs a passphrase this app doesn\'t collect — format looks valid, but this hasn\'t been confirmed against the exchange.';
+    state.exchangeCreds[key][mode] = cred;
+    showAtMessage(`${EXCHANGES[key].label} key saved (format looks valid). It can't be verified — even the proxy doesn't collect the third Bitget field (passphrase) — so it's marked UNVERIFIED.`, 'info');
+  } else {
+    const result = await runVerification(key, mode, apiKey, secretKey);
+    if(result.rejected){
+      // The exchange itself rejected the key/secret — don't save it as connected.
+      showAtMessage(`${EXCHANGES[key].label} rejected that ${netLabel} key: ${result.message}. Double-check the key, secret, and that it has the right permissions/IP allow-list, then try again.`, 'error');
+      renderConnectRows();
+      return;
+    }
+    cred.verified = result.verified;
+    cred.verifyNote = result.verified
+      ? `Confirmed with ${EXCHANGES[key].label}${usingProxy ? ' via your verification proxy' : ''}.`
+      : result.message;
+    state.exchangeCreds[key][mode] = cred;
+    if(result.verified){
       if(result.balance != null){
         state.balances[key][mode] = result.balance;
-        showAtMessage(`${EXCHANGES[key].label} (${netLabel}) key verified against the exchange and balance pulled: ${money(result.balance)} USDT. Autotrade below still simulates trades — this only confirms the key works and reads your balance.`, 'info');
+        showAtMessage(`${EXCHANGES[key].label} (${netLabel}) key verified and balance pulled: ${money(result.balance)} USDT. Autotrade below still simulates trades — this only confirms the key works and reads your balance.`, 'info');
       } else {
-        showAtMessage(`${EXCHANGES[key].label} (${netLabel}) key verified against the exchange.`, 'info');
+        showAtMessage(`${EXCHANGES[key].label} (${netLabel}) key verified.`, 'info');
       }
-    }catch(err){
-      if(err instanceof VerifyRejected){
-        // The exchange itself rejected the key/secret — don't save it as connected.
-        showAtMessage(`${EXCHANGES[key].label} rejected that ${netLabel} key: ${err.message}. Double-check the key, secret, and that it has the right permissions/IP allow-list, then try again.`, 'error');
-        renderConnectRows();
-        return;
-      }
-      // Network/CORS failure — we genuinely can't tell if the key is valid from here.
-      cred.verified = false;
-      cred.verifyNote = `Could not reach ${EXCHANGES[key].label} to verify from this browser (likely blocked by the exchange for cross-origin requests). The key's format looks right, but it hasn't been confirmed.`;
-      state.exchangeCreds[key][mode] = cred;
-      showAtMessage(`Saved the ${EXCHANGES[key].label} (${netLabel}) key, but couldn't verify it against the exchange from this browser — that's usually the exchange blocking authenticated calls from a browser origin (CORS), not necessarily a bad key. Marked UNVERIFIED. For guaranteed verification and balance reads, that needs a small backend proxy holding the key server-side.`, 'error');
+    } else {
+      showAtMessage(`Saved the ${EXCHANGES[key].label} (${netLabel}) key as UNVERIFIED: ${result.message}`, 'error');
     }
-  } else {
-    // Bitget: no in-browser verifier (needs a passphrase this app doesn't collect).
-    cred.verifyNote = 'Bitget verification isn\'t done in-browser — format looks valid, but this hasn\'t been confirmed against the exchange.';
-    state.exchangeCreds[key][mode] = cred;
-    showAtMessage(`${EXCHANGES[key].label} key saved (format looks valid). Bitget's signed endpoints need a passphrase this app doesn't collect, so it can't be verified in-browser — treat it as UNVERIFIED.`, 'info');
   }
 
   persist();
@@ -597,6 +635,7 @@ els.atExchange.addEventListener('change', () => {
 export function initAutotrade(){
   try{
     restore();
+    els.atProxyUrl.value = state.verifyProxyUrl || '';
     renderExchangeOptions();
     renderConnectRows();
     renderBalances();

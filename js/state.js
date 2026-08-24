@@ -60,6 +60,7 @@ export const els = {
   connectRows: document.getElementById('connectRows'),
   balanceRows: document.getElementById('balanceRows'),
   atExchange: document.getElementById('atExchange'),
+  atProxyUrl: document.getElementById('atProxyUrl'),
   atModeRow: document.getElementById('atModeRow'),
   atModeLive: document.getElementById('atModeLive'),
   atModeTestnet: document.getElementById('atModeTestnet'),
@@ -109,6 +110,10 @@ export const state = {
 
   // ---- Window: how long each gap has been visible across scans (client-side, this session) ----
   xFirstSeen: new Map(), // "base|quote|buyExch|sellExch" -> timestamp first observed
+
+  // ---- Optional self-hosted verify proxy (see /server) — a plain URL,
+  // not a secret, so it's fine to keep alongside the rest of this state ----
+  verifyProxyUrl: '',
 
   // ---- Exchange "connections" — labels/status only. Keys are kept in the
   // browser's localStorage for this session's convenience and are never

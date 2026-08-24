@@ -200,11 +200,14 @@
 
     <div class="ov-block" style="margin-bottom:18px;">
       <div class="ov-block-title">Connect Exchanges</div>
+      <div class="field" style="max-width:560px; margin:12px 0 4px;">
+        <label for="atProxyUrl">Verification proxy URL (optional — see /server)</label>
+        <input id="atProxyUrl" type="text" placeholder="https://your-proxy.example.com">
+      </div>
       <div id="connectRows" class="connect-list"></div>
       <div class="warn-banner" style="margin:14px 0 0;">
-        <b>Your keys never leave this browser.</b> API/secret keys are stored only in this device's local storage. This app never sends them anywhere except a single read-only "verify" request straight to the exchange itself (Binance/Bybit) to confirm the key is real and pull your balance — it never places an order or moves funds. Disconnecting keeps the saved key so you can reconnect later; use Remove to delete it, and the SHOW/HIDE button next to each field to reveal it. Use read-only keys if you connect real ones.<br><br>
-        <b>Verification.</b> Binance and Bybit keys are checked against the exchange live — a rejected key won't connect. If the browser can't reach the exchange at all (some block authenticated calls from browser origins), the key is saved as UNVERIFIED rather than rejected, since that's not the same as being invalid. Bitget can't be verified in-browser (it needs a passphrase this app doesn't collect) and is always saved as UNVERIFIED.<br><br>
-        <b>Testnet.</b> Binance and Bybit each expose a public testnet — use the Live/Testnet switch on their row to enter separate testnet keys and paper-trade against fake-money order books instead of real market data. Bitget has no public spot testnet, so its row stays Live-only.
+        <b>Your keys never leave this browser — unless you set a verification proxy above.</b> Without one, keys stay in this device's local storage only. Binance/Bybit's own servers reject authenticated requests made directly from a browser (that's how they prevent exactly this kind of key exposure), so without a proxy this app cannot verify a key or read a balance — it will honestly say UNVERIFIED rather than guess. Setting a proxy URL routes the one-time verify+balance check through a small backend you run yourself (see <code>/server</code> in this project) — it never places an order or moves funds, and doesn't store the key either; see its README for what it actually does. Disconnecting keeps the saved key so you can reconnect later; use Remove to delete it, and the SHOW/HIDE button next to each field to reveal it.<br><br>
+        <b>Testnet.</b> Binance and Bybit each expose a public testnet — use the Live/Testnet switch on their row to enter separate testnet keys and paper-trade against fake-money order books instead of real market data. Bitget has no public spot testnet, so its row stays Live-only, and it can't be verified even with the proxy (its signed endpoints need a passphrase this app doesn't collect).
       </div>
     </div>
 
