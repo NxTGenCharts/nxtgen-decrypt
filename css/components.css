@@ -274,7 +274,8 @@ footer b{ color:#a9bfae; }
 .mode-toggle--disabled .mode-btn{ cursor:default; }
 .mode-btn + .mode-btn{ border-left:1px solid var(--line); }
 .mode-btn.active{ background:var(--amber); color:var(--amber-ink); font-weight:700; }
-.connect-row{ grid-template-columns:110px auto 1fr 1fr auto auto auto; }
+.connect-row{ grid-template-columns:110px auto 1fr 1fr auto auto; }
+.connect-actions{ display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
 .kv-field{ display:flex; align-items:stretch; gap:6px; }
 .kv-field input{ flex:1; min-width:0; }
 .reveal-btn{

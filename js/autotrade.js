@@ -283,11 +283,15 @@ function renderConnectRows(){
         ${stored ? `<button type="button" class="reveal-btn" data-field="secret" title="Show/hide">SHOW</button>` : ''}
       </div>
       ${stored ? `
-        <button class="primary ghost connect-btn" data-action="${connected ? 'disconnect' : 'reconnect'}">${connected ? 'Disconnect' : 'Reconnect'}</button>
-        <button class="primary ghost remove-btn" data-action="remove" title="Permanently remove this saved key">Remove</button>
+        <div class="connect-actions">
+          <button class="primary ghost connect-btn" data-action="${connected ? 'disconnect' : 'reconnect'}">${connected ? 'Disconnect' : 'Reconnect'}</button>
+          ${key !== 'bitget' && !cred.verified ? `<button class="primary ghost retry-verify-btn" data-action="retry-verify" title="Re-run the balance/key check against ${label} now">Retry Verification</button>` : ''}
+          <button class="primary ghost remove-btn" data-action="remove" title="Permanently remove this saved key">Remove</button>
+        </div>
       ` : `
-        <button class="primary connect-btn" data-action="connect">Connect</button>
-        <span></span>
+        <div class="connect-actions">
+          <button class="primary connect-btn" data-action="connect">Connect</button>
+        </div>
       `}
       <span class="xbadge" data-state="${connected ? 'up' : 'idle'}"><span class="xbadge-dot"></span>${connected ? 'CONNECTED' : (stored ? 'DISCONNECTED' : 'NOT CONNECTED')}</span>
     </div>`;
@@ -322,6 +326,44 @@ els.connectRows.addEventListener('click', async (e) => {
     const key = row.dataset.exchange;
     if(!EXCHANGES[key].testnetSupported) return; // Bitget: nothing to switch
     state.exchangeMode[key] = modeBtn.dataset.mode;
+    persist();
+    renderConnectRows();
+    renderBalances();
+    return;
+  }
+
+  const retryBtn = e.target.closest('.retry-verify-btn');
+  if(retryBtn){
+    const row = e.target.closest('.connect-row');
+    const key = row.dataset.exchange;
+    const mode = row.dataset.mode;
+    const cred = state.exchangeCreds[key][mode];
+    if(!cred){ return; } // shouldn't happen — button only renders when a cred is stored
+    retryBtn.disabled = true;
+    retryBtn.textContent = 'Verifying…';
+    const netLabel = mode === 'testnet' ? 'testnet' : mode === 'demo' ? 'demo' : 'live';
+    const usingProxy = !!(state.verifyProxyUrl || '').trim();
+    const result = await runVerification(key, mode, cred.apiKey, cred.secretKey);
+    if(result.rejected){
+      cred.verified = false;
+      cred.verifyNote = result.message;
+      showAtMessage(`${EXCHANGES[key].label} rejected that ${netLabel} key: ${result.message}. Double-check the key, secret, and that it has the right permissions/IP allow-list, then try again.`, 'error');
+    } else {
+      cred.verified = result.verified;
+      cred.verifyNote = result.verified
+        ? `Confirmed with ${EXCHANGES[key].label}${usingProxy ? ' via the verification proxy' : ''}.`
+        : result.message;
+      if(result.verified){
+        if(result.balance != null){
+          state.balances[key][mode] = result.balance;
+          showAtMessage(`${EXCHANGES[key].label} (${netLabel}) key verified and balance pulled: ${money(result.balance)} USDT.`, 'info');
+        } else {
+          showAtMessage(`${EXCHANGES[key].label} (${netLabel}) key verified.`, 'info');
+        }
+      } else {
+        showAtMessage(`Still UNVERIFIED: ${result.message}`, 'error');
+      }
+    }
     persist();
     renderConnectRows();
     renderBalances();
