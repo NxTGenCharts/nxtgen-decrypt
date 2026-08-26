@@ -42,9 +42,20 @@ function hmacSha256Hex(secret, message){
 
 class VerifyRejected extends Error {}
 
+// Base URLs per network. "demo" is Binance/Bybit's separate Demo Trading
+// environment (realistic live-mirrored data, keys created from the Demo
+// Trading UI) — NOT the same thing as "testnet" (independent fake order
+// books, keys created from the Testnet portal). A key from one will be
+// rejected by the other's base URL, which is the #1 cause of a false 401
+// here — see each exchange's docs before assuming a key is bad:
+//   Binance: https://developers.binance.com/docs/binance-spot-api-docs/demo-mode/general-info
+//   Bybit:   https://bybit-exchange.github.io/docs/v5/demo
+const BINANCE_BASE = { live: 'https://api.binance.com', testnet: 'https://testnet.binance.vision', demo: 'https://demo-api.binance.com' };
+const BYBIT_BASE = { live: 'https://api.bybit.com', testnet: 'https://api-testnet.bybit.com', demo: 'https://api-demo.bybit.com' };
+
 // ---- Binance: GET /api/v3/account, signed with HMAC-SHA256 ----
-async function verifyBinance(testnet, apiKey, secretKey){
-  const base = testnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+async function verifyBinance(mode, apiKey, secretKey){
+  const base = BINANCE_BASE[mode] || BINANCE_BASE.live;
   const qs = `timestamp=${Date.now()}&recvWindow=5000`;
   const signature = hmacSha256Hex(secretKey, qs);
   const res = await fetch(`${base}/api/v3/account?${qs}&signature=${signature}`, {
@@ -59,8 +70,8 @@ async function verifyBinance(testnet, apiKey, secretKey){
 }
 
 // ---- Bybit v5: GET /v5/account/wallet-balance, signed with HMAC-SHA256 ----
-async function verifyBybit(testnet, apiKey, secretKey){
-  const base = testnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+async function verifyBybit(mode, apiKey, secretKey){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
   const timestamp = String(Date.now());
   const recvWindow = '5000';
   const query = 'accountType=UNIFIED';
@@ -98,9 +109,10 @@ app.post('/api/verify', async (req, res) => {
   if(!verifier){
     return res.status(400).json({ verified:false, rejected:false, message:`No verifier for "${exchange}" — only binance and bybit are supported.` });
   }
+  const netMode = ['live', 'testnet', 'demo'].includes(mode) ? mode : 'live';
 
   try{
-    const result = await verifier(mode === 'testnet', apiKey, secretKey);
+    const result = await verifier(netMode, apiKey, secretKey);
     return res.json({ verified:true, rejected:false, balance: result.balance, message:`Confirmed with ${exchange}.` });
   }catch(err){
     if(err instanceof VerifyRejected){

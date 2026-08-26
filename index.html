@@ -215,7 +215,7 @@
       <div id="connectRows" class="connect-list"></div>
       <div class="warn-banner" style="margin:14px 0 0;">
         <b>Your keys never leave this browser — unless you set a verification proxy above.</b> Without one, keys stay in this device's local storage only. Binance/Bybit's own servers reject authenticated requests made directly from a browser (that's how they prevent exactly this kind of key exposure), so without a proxy this app cannot verify a key or read a balance — it will honestly say UNVERIFIED rather than guess. Setting a proxy URL routes the one-time verify+balance check through a small backend you run yourself (see <code>/server</code> in this project) — it never places an order or moves funds, and doesn't store the key either; see its README for what it actually does. Disconnecting keeps the saved key so you can reconnect later; use Remove to delete it, and the SHOW/HIDE button next to each field to reveal it.<br><br>
-        <b>Testnet.</b> Binance and Bybit each expose a public testnet — use the Live/Testnet switch on their row to enter separate testnet keys and paper-trade against fake-money order books instead of real market data. Bitget has no public spot testnet, so its row stays Live-only, and it can't be verified even with the proxy (its signed endpoints need a passphrase this app doesn't collect).
+        <b>Testnet vs. Demo — these are two different environments with two different sets of keys.</b> Binance and Bybit each expose a public Testnet (independent, reset-on-a-schedule fake order books) <i>and</i> a separate Demo Trading environment (real-looking, live-mirrored prices — this is what the terminal bot's "Demo" auto-trade mode uses). A Testnet key will be rejected against Demo's URL and vice versa — that's the #1 cause of an unexpected 401 here. Use the Live / Testnet / Demo switch on each row to pick the matching one before entering a key. Bitget has no public spot testnet or demo environment, so its row stays Live-only, and it can't be verified even with the proxy (its signed endpoints need a passphrase this app doesn't collect).
       </div>
     </div>
 
@@ -230,10 +230,11 @@
         <select id="atExchange" title="Autotrade watches this exchange only"></select>
       </div>
       <div class="field" id="atModeRow">
-        <label title="Testnet is available for Binance and Bybit only. Bitget has no public spot testnet.">Network</label>
+        <label title="Testnet and Demo are available for Binance and Bybit only. Bitget has no public spot testnet or demo environment.">Network</label>
         <div class="mode-toggle">
           <button type="button" class="mode-btn active" id="atModeLive">Live</button>
           <button type="button" class="mode-btn" id="atModeTestnet">Testnet</button>
+          <button type="button" class="mode-btn" id="atModeDemo">Demo</button>
         </div>
       </div>
       <div class="field">

@@ -15,7 +15,14 @@ it's under 120 lines specifically so that's easy to verify yourself.
 
 ## Endpoints
 
-- `POST /api/verify` — body `{ exchange: "binance"|"bybit", mode: "live"|"testnet", apiKey, secretKey }`.
+- `POST /api/verify` — body `{ exchange: "binance"|"bybit", mode: "live"|"testnet"|"demo", apiKey, secretKey }`.
+  - `"testnet"` and `"demo"` are **different environments with different keys** — a
+    key created on Binance/Bybit's Demo Trading UI will be rejected against the
+    testnet base URL and vice versa. Demo mirrors live market data and is what
+    the CLI bot's "Demo" auto-trade mode uses; testnet is an independent,
+    reset-on-a-schedule sandbox. See:
+    [Binance](https://developers.binance.com/docs/binance-spot-api-docs/demo-mode/general-info),
+    [Bybit](https://bybit-exchange.github.io/docs/v5/demo).
   Returns `{ verified, rejected, balance, message }`.
   - `verified: true` — the exchange confirmed the key and returned a balance.
   - `rejected: true` — the exchange explicitly said the key/secret is invalid. Trust this.
