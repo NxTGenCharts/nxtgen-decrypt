@@ -14,7 +14,7 @@
 // endpoint, same as any API base URL), so hardcoding it here is fine; the
 // actual secrets (API key/secret) still never leave the browser except in
 // the one signed verify call this proxy forwards.
-export const DEFAULT_VERIFY_PROXY_URL = 'https://nxtgen-decrypt.onrender.com';
+export const DEFAULT_VERIFY_PROXY_URL = 'https://nxtgen-decrypt-2.onrender.com';
 
 export const els = {
   exchange: document.getElementById('exchange'),
