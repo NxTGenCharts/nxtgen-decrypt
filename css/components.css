@@ -31,12 +31,14 @@
 }
 .field{ display:flex; flex-direction:column; gap:6px; }
 .field label{ font-size:10px; text-transform:uppercase; letter-spacing:.09em; color:var(--dim); cursor:default; }
-select, input[type=number]{
+select, input[type=number], input[type=text], input[type=password]{
   background:var(--panel2); color:var(--ink); border:1px solid var(--line); border-radius:var(--r-sm);
   padding:10px; font-family:var(--mono); font-size:13px; width:100%; min-height:var(--touch-target);
 }
 select:hover, input[type=number]:hover{ border-color:#33443a; }
 select:focus, input:focus{ outline:1px solid var(--amber); border-color:var(--amber); }
+input[readonly]{ cursor:default; opacity:.75; background:var(--panel); }
+input[readonly]:focus{ outline:1px solid var(--line); border-color:var(--line); }
 .toggle-check{
   display:flex; align-items:center; gap:6px; background:var(--panel2); border:1px solid var(--line);
   border-radius:var(--r-sm); padding:10px; font-size:11px; color:var(--dim); cursor:pointer; white-space:nowrap;

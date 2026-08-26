@@ -7,6 +7,15 @@
 // resolves exactly as it did in the original inline <script>.
 // =============================================================
 
+// The verification proxy this deployment ships with by default (see
+// /server). Baked in here so every device that loads the site gets working
+// balance verification with zero setup — nobody has to find or type a proxy
+// URL. This is intentionally NOT a secret (it's just a public HTTPS
+// endpoint, same as any API base URL), so hardcoding it here is fine; the
+// actual secrets (API key/secret) still never leave the browser except in
+// the one signed verify call this proxy forwards.
+export const DEFAULT_VERIFY_PROXY_URL = 'https://nxtgen-decrypt.onrender.com';
+
 export const els = {
   exchange: document.getElementById('exchange'),
   anchor: document.getElementById('anchor'),
@@ -113,8 +122,11 @@ export const state = {
   xFirstSeen: new Map(), // "base|quote|buyExch|sellExch" -> timestamp first observed
 
   // ---- Optional self-hosted verify proxy (see /server) — a plain URL,
-  // not a secret, so it's fine to keep alongside the rest of this state ----
-  verifyProxyUrl: '',
+  // not a secret, so it's fine to keep alongside the rest of this state.
+  // Defaults to the deployment's own hosted proxy; not user-editable in the
+  // UI (see autotrade.js) so every device gets working verification without
+  // any setup. ----
+  verifyProxyUrl: DEFAULT_VERIFY_PROXY_URL,
 
   // ---- Exchange "connections" — labels/status only. Keys are kept in the
   // browser's localStorage for this session's convenience and are never

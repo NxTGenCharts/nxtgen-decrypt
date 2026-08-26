@@ -29,7 +29,7 @@
 //   clears your profit floor, compounding a running "today" balance
 //   until your daily target is hit, then stops and shows the summary.
 // =============================================================
-import { els, state } from './state.js';
+import { els, state, DEFAULT_VERIFY_PROXY_URL } from './state.js';
 import { EXCHANGES, filterTriPairs } from './exchanges.js';
 import { buildGraph, findCycles } from './triangular.js';
 import { fmtPct, coinIconHtml } from './utils.js';
@@ -155,7 +155,6 @@ function formatLooksValid(key, apiKey, secretKey){
 function persist(){
   try{
     localStorage.setItem(LS_KEY, JSON.stringify({
-      verifyProxyUrl: state.verifyProxyUrl,
       exchangeCreds: state.exchangeCreds,
       exchangeMode: state.exchangeMode,
       balances: state.balances,
@@ -209,7 +208,11 @@ function restore(){
     const raw = localStorage.getItem(LS_KEY);
     if(!raw) return;
     const saved = JSON.parse(raw);
-    if(typeof saved.verifyProxyUrl === 'string') state.verifyProxyUrl = saved.verifyProxyUrl;
+    // verifyProxyUrl is intentionally NOT restored from localStorage — it's
+    // a fixed, non-editable site default (see DEFAULT_VERIFY_PROXY_URL in
+    // state.js), not a per-user setting. Older saves may still contain a
+    // stale value; ignore it so a device that previously had a blank/custom
+    // value doesn't lose working verification.
     if(saved.exchangeCreds){
       for(const key of Object.keys(EXCHANGES)){
         state.exchangeCreds[key] = coerceCredSlot(saved.exchangeCreds[key]);
@@ -291,10 +294,16 @@ function renderConnectRows(){
   }).join('');
 }
 
-els.atProxyUrl.addEventListener('change', () => {
-  state.verifyProxyUrl = els.atProxyUrl.value.trim();
-  persist();
-});
+// The proxy field is a locked, read-only display — not user-editable (see
+// DEFAULT_VERIFY_PROXY_URL in state.js). No change listener needed.
+function maskProxyUrl(url){
+  // Show just enough to confirm something real is configured, without
+  // spelling out the whole host — e.g. "https://nxtgen-decrypt.onrender.com"
+  // becomes "https://nxtgen-decrypt.onren…". Purely cosmetic (this is a
+  // public URL, not a secret); the full value is still what's actually used.
+  const shown = 28;
+  return url.length > shown ? url.slice(0, shown) + '…' : url;
+}
 
 els.connectRows.addEventListener('click', async (e) => {
   const revealBtn = e.target.closest('.reveal-btn');
@@ -673,7 +682,9 @@ els.atExchange.addEventListener('change', () => {
 export function initAutotrade(){
   try{
     restore();
-    els.atProxyUrl.value = state.verifyProxyUrl || '';
+    els.atProxyUrl.value = maskProxyUrl(state.verifyProxyUrl || DEFAULT_VERIFY_PROXY_URL);
+    els.atProxyUrl.setAttribute('readonly', 'readonly');
+    els.atProxyUrl.title = 'Managed automatically — verification is pre-configured for every device, no setup needed.';
     renderExchangeOptions();
     renderConnectRows();
     renderBalances();
