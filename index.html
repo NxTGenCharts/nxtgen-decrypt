@@ -162,6 +162,9 @@
     <div class="warn-banner">
       <b>Assumes pre-funded balances.</b> This scans price gaps only — it does not model moving funds between exchanges. Real execution needs quote-asset balance already sitting on the buy exchange and the base asset already sitting on the sell exchange; an on-chain or internal transfer takes minutes, and the gap is usually gone by the time it lands.
     </div>
+    <div class="warn-banner">
+      <b>Ticker symbols are not globally unique.</b> This scan matches assets across exchanges by their ticker (e.g. "AI"), but the same ticker can belong to completely unrelated projects on different exchanges — there's no contract address or chain ID in these exchanges' public price data to tell them apart automatically. Known collisions are excluded from cross-exchange matching entirely rather than risk showing a fake gap between two different coins: currently <b>AI</b> (a different project on each exchange — e.g. Sleepless AI vs. Gensyn). They're still scanned normally within a single exchange (Triangular Arbitrage), where the ticker is unambiguous.
+    </div>
     <div class="controls">
       <div class="field">
         <label for="xAmount">Amount (USDT)</label>
@@ -259,6 +262,15 @@
       <div class="field">
         <label for="atMinProfit" title="Autotrade never fires below 0.8% regardless of this value">Min profit to autotrade (%)</label>
         <input id="atMinProfit" type="number" min="0.8" max="10" step="0.05" value="0.8">
+      </div>
+      <div class="field">
+        <label for="atTestMode" title="Executes the best cycle found on every scan, even if it's break-even or a loss — bypasses the 0.8% floor entirely. This is for confirming the execute → log → balance-update path works end-to-end; it will make genuinely bad trades on purpose, so only use it in Testnet/Demo, and turn it off before running for real.">
+          Test mode <span class="pill" style="margin-left:4px;color:var(--red);border-color:var(--red-line);">forces unprofitable trades</span>
+        </label>
+        <label class="toggle-check">
+          <input id="atTestMode" type="checkbox">
+          <span>ignore profit floor, always execute best cycle</span>
+        </label>
       </div>
       <div class="field">
         <label for="atDailyTarget">Daily profit target (%)</label>

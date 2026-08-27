@@ -8,12 +8,30 @@ import { EXCHANGES, loadBitgetCoinInfo } from './exchanges.js';
 import { coinIconHtml, fmtPct, fmtPrice } from './utils.js';
 import { setStatus, showXMessage, updateExchangeBadge, renderOverview } from './ui.js';
 
+// Ticker symbols reused by unrelated projects on different exchanges — the
+// same three/four-letter symbol does NOT mean the same coin. Confirmed:
+// "AI" is Sleepless AI on one exchange and Gensyn (an unrelated project) on
+// another. Plain spot ticker endpoints don't expose a contract address or
+// chain ID to auto-detect this kind of collision, so rather than risk
+// silently pairing two different assets as a fake arbitrage opportunity,
+// any symbol in this list is dropped from cross-exchange matching entirely.
+// It's still scanned normally within a single exchange (e.g. Triangular
+// Arbitrage), where "AI" unambiguously means whatever that one exchange
+// lists under that ticker — the ambiguity only exists when comparing
+// across exchanges. Add to this list as more collisions are found.
+export const AMBIGUOUS_CROSS_EXCHANGE_TICKERS = new Set(['AI']);
+
 export function findCrossExchangeOpportunities(pairsByExchange, feePct){
   const feeMult = 1 - (feePct/100);
   // key "BASE|QUOTE" -> [{exchange, bid, ask, symbol, bidQty, askQty, quoteVolume24h}, ...]
   const byAsset = new Map();
+  let excludedAmbiguousCount = 0;
   for(const [exchange, pairs] of Object.entries(pairsByExchange)){
     for(const p of pairs){
+      if(AMBIGUOUS_CROSS_EXCHANGE_TICKERS.has(p.base)){
+        excludedAmbiguousCount++;
+        continue;
+      }
       const key = p.base + '|' + p.quote;
       if(!byAsset.has(key)) byAsset.set(key, []);
       byAsset.get(key).push({
@@ -40,7 +58,7 @@ export function findCrossExchangeOpportunities(pairsByExchange, feePct){
 
     opportunities.push({ base, quote, buyEntry, sellEntry, profitPct, netMult });
   }
-  return opportunities;
+  return { opportunities, excludedAmbiguousCount };
 }
 
 function opportunityKey(o){
@@ -186,6 +204,10 @@ els.xResults.addEventListener('keydown', (e) => {
 });
 
 export async function runXScan(){
+  const startedAt = Date.now();
+  const MIN_VISIBLE_MS = 450; // floor so the spinner/dimmed-rows feedback is always perceptible,
+                               // even when every exchange responds in a handful of milliseconds —
+                               // otherwise a fast scan looks identical to nothing happening at all.
   els.xScanBtn.disabled = true;
   els.xScanBtn.classList.add('is-scanning');
   els.xScanBtn.querySelector('.btn-label').textContent = 'Scanning Markets…';
@@ -199,18 +221,21 @@ export async function runXScan(){
     const minProfit = parseFloat(els.xMinProfit.value);
     const failed = [];
 
-    // Reuse cached pairs when we already have all three; otherwise fetch fresh.
-    const needFetch = keys.some(k => !state.pairsCache[k] || state.pairsCache[k].length === 0);
-    if(needFetch){
-      for(const key of keys){
-        try{
-          state.pairsCache[key] = await EXCHANGES[key].load();
-          updateExchangeBadge(key, 'up');
-        }catch(exErr){
-          console.error(key, exErr);
-          failed.push(EXCHANGES[key].label);
-          updateExchangeBadge(key, 'down');
-        }
+    // Every explicit "Scan Markets" click always fetches fresh order-book
+    // data from all three exchanges — this used to reuse whatever was
+    // already cached in state.pairsCache (e.g. from Overview loading it
+    // first), which meant every scan after the first was just recomputing
+    // from stale, unchanged prices almost instantly: no network activity,
+    // no visible progress, and no actual new data. The button is a request
+    // for a fresh read, so it should always be one.
+    for(const key of keys){
+      try{
+        state.pairsCache[key] = await EXCHANGES[key].load();
+        updateExchangeBadge(key, 'up');
+      }catch(exErr){
+        console.error(key, exErr);
+        failed.push(EXCHANGES[key].label);
+        updateExchangeBadge(key, 'down');
       }
     }
 
@@ -237,7 +262,7 @@ export async function runXScan(){
     }
     setStatus('live', failed.length ? `connected (${failed.join(', ')} failed)` : 'connected');
 
-    const opportunities = findCrossExchangeOpportunities(pairsByExchange, feePct);
+    const { opportunities, excludedAmbiguousCount } = findCrossExchangeOpportunities(pairsByExchange, feePct);
     const ranked = opportunities.sort((a,b) => b.profitPct - a.profitPct);
     const filtered = ranked.filter(o => o.profitPct >= minProfit);
 
@@ -264,21 +289,27 @@ export async function runXScan(){
     };
     renderOverview();
 
+    const ambiguousNote = excludedAmbiguousCount > 0
+      ? ` (excluded ${[...AMBIGUOUS_CROSS_EXCHANGE_TICKERS].join(', ')} from cross-exchange matching — see note above)`
+      : '';
+
     if(filtered.length > 0){
       renderCross(filtered, amount);
-      showXMessage(failed.length ? `${failed.join(', ')} couldn't be reached this scan — comparison below uses whichever exchanges responded.` : '', failed.length ? 'info' : '');
+      showXMessage((failed.length ? `${failed.join(', ')} couldn't be reached this scan — comparison below uses whichever exchanges responded.` : '') + ambiguousNote, (failed.length || excludedAmbiguousCount) ? 'info' : '');
     } else if(ranked.length > 0){
       renderCross(ranked, amount);
-      showXMessage(`No asset cleared your ${minProfit.toFixed(2)}% threshold after a ${(feePct*2).toFixed(2)}% round-trip fee (one taker fee per leg) — showing the closest gaps instead (best is ${fmtPct(ranked[0].profitPct)}). Remember the pre-funded-balance caveat above before treating any of these as capturable.`, 'info');
+      showXMessage(`No asset cleared your ${minProfit.toFixed(2)}% threshold after a ${(feePct*2).toFixed(2)}% round-trip fee (one taker fee per leg) — showing the closest gaps instead (best is ${fmtPct(ranked[0].profitPct)}). Remember the pre-funded-balance caveat above before treating any of these as capturable.${ambiguousNote}`, 'info');
     } else {
       els.xResults.innerHTML = `<div class="empty">No shared assets found across the responding exchanges.</div>`;
-      showXMessage('', '');
+      showXMessage(ambiguousNote ? ambiguousNote.replace(/^\s*\(/, '(') : '', ambiguousNote ? 'info' : '');
     }
   }catch(err){
     setStatus('err', 'error');
     console.error(err);
     showXMessage(`Could not reach the exchange API(s) from the browser (${err.message}). This is usually a CORS or network restriction in this environment rather than an issue with the logic.`, 'error');
   }finally{
+    const elapsed = Date.now() - startedAt;
+    if(elapsed < MIN_VISIBLE_MS) await new Promise(r => setTimeout(r, MIN_VISIBLE_MS - elapsed));
     els.xScanBtn.disabled = false;
     els.xScanBtn.classList.remove('is-scanning');
     els.xScanBtn.querySelector('.btn-label').textContent = 'Scan Markets';

@@ -78,6 +78,7 @@ export const els = {
   atFee: document.getElementById('atFee'),
   atMinVolume: document.getElementById('atMinVolume'),
   atMinProfit: document.getElementById('atMinProfit'),
+  atTestMode: document.getElementById('atTestMode'),
   atDailyTarget: document.getElementById('atDailyTarget'),
   atInterval: document.getElementById('atInterval'),
   atStartBalance: document.getElementById('atStartBalance'),
@@ -163,6 +164,10 @@ export const state = {
     targetReached: false,
     cycles: [],             // executed cycles today: {path, profitPct, profitAmt, balanceAfter, time}
     timer: null,
+    testMode: false,        // when true, ignores the min-profit floor entirely and executes the
+                             // best cycle found each scan regardless of profitability — for
+                             // exercising the execute/log/balance-update path only, never for
+                             // real decisions. See MIN_PROFIT_FLOOR in autotrade.js.
   },
 };
 

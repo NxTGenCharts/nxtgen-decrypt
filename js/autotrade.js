@@ -285,7 +285,7 @@ function renderConnectRows(){
       ${stored ? `
         <div class="connect-actions">
           <button class="primary ghost connect-btn" data-action="${connected ? 'disconnect' : 'reconnect'}">${connected ? 'Disconnect' : 'Reconnect'}</button>
-          ${key !== 'bitget' && !cred.verified ? `<button class="primary ghost retry-verify-btn" data-action="retry-verify" title="Re-run the balance/key check against ${label} now">Retry Verification</button>` : ''}
+          ${key !== 'bitget' ? `<button class="primary ghost retry-verify-btn" data-action="retry-verify" title="Re-check this key against ${label} right now and pull the latest balance">Refresh Balance</button>` : ''}
           <button class="primary ghost remove-btn" data-action="remove" title="Permanently remove this saved key">Remove</button>
         </div>
       ` : `
@@ -332,38 +332,78 @@ els.connectRows.addEventListener('click', async (e) => {
     return;
   }
 
+// Re-checks an already-saved key against the exchange and refreshes its
+// verified flag + balance. Used by both "Refresh Balance" (on-demand, any
+// state) and "Reconnect" (which used to just flip a flag without actually
+// checking anything — see the earlier bug where a stale balance survived a
+// disconnect/reconnect cycle). Returns true on a successful verified read.
+async function reverifyStoredCred(key, mode, { silent = false } = {}){
+  const cred = state.exchangeCreds[key][mode];
+  if(!cred || key === 'bitget') return false; // Bitget can't be verified at all
+  const netLabel = mode === 'testnet' ? 'testnet' : mode === 'demo' ? 'demo' : 'live';
+  const usingProxy = !!(state.verifyProxyUrl || '').trim();
+  const result = await runVerification(key, mode, cred.apiKey, cred.secretKey);
+  if(result.rejected){
+    cred.verified = false;
+    cred.verifyNote = result.message;
+    if(!silent) showAtMessage(`${EXCHANGES[key].label} rejected that ${netLabel} key: ${result.message}. Double-check the key, secret, and that it has the right permissions/IP allow-list, then try again.`, 'error');
+    return false;
+  }
+  cred.verified = result.verified;
+  cred.verifyNote = result.verified
+    ? `Confirmed with ${EXCHANGES[key].label}${usingProxy ? ' via the verification proxy' : ''}.`
+    : result.message;
+  if(result.verified){
+    if(result.balance != null) state.balances[key][mode] = result.balance;
+    if(!silent){
+      showAtMessage(result.balance != null
+        ? `${EXCHANGES[key].label} (${netLabel}) key verified and balance refreshed: ${money(result.balance)} USDT.`
+        : `${EXCHANGES[key].label} (${netLabel}) key verified.`, 'info');
+    }
+    return true;
+  }
+  if(!silent) showAtMessage(`Still UNVERIFIED: ${result.message}`, 'error');
+  return false;
+}
+
+// Refreshes every connected, saved Binance/Bybit credential's balance in the
+// background. Called once on page load and on a recurring timer, so the
+// numbers shown don't just freeze at whatever they were the moment you
+// first connected — see the earlier issue where a balance change on the
+// exchange (deposit, withdrawal, a real trade) never showed up here until
+// you happened to click something that re-verified.
+let balanceRefreshInFlight = false;
+async function refreshAllConnectedBalances(){
+  if(balanceRefreshInFlight) return; // don't overlap if one run is still in progress
+  balanceRefreshInFlight = true;
+  try{
+    for(const key of Object.keys(EXCHANGES)){
+      if(key === 'bitget') continue;
+      for(const mode of ['live', 'testnet', 'demo']){
+        const cred = state.exchangeCreds[key]?.[mode];
+        if(cred && cred.connected){
+          await reverifyStoredCred(key, mode, { silent: true });
+        }
+      }
+    }
+    persist();
+    renderConnectRows();
+    renderBalances();
+  } finally {
+    balanceRefreshInFlight = false;
+  }
+}
+const BALANCE_REFRESH_INTERVAL_MS = 90 * 1000; // matches a "reasonably fresh without hammering the proxy" cadence
+
   const retryBtn = e.target.closest('.retry-verify-btn');
   if(retryBtn){
     const row = e.target.closest('.connect-row');
     const key = row.dataset.exchange;
     const mode = row.dataset.mode;
-    const cred = state.exchangeCreds[key][mode];
-    if(!cred){ return; } // shouldn't happen — button only renders when a cred is stored
+    if(!state.exchangeCreds[key][mode]){ return; } // shouldn't happen — button only renders when a cred is stored
     retryBtn.disabled = true;
-    retryBtn.textContent = 'Verifying…';
-    const netLabel = mode === 'testnet' ? 'testnet' : mode === 'demo' ? 'demo' : 'live';
-    const usingProxy = !!(state.verifyProxyUrl || '').trim();
-    const result = await runVerification(key, mode, cred.apiKey, cred.secretKey);
-    if(result.rejected){
-      cred.verified = false;
-      cred.verifyNote = result.message;
-      showAtMessage(`${EXCHANGES[key].label} rejected that ${netLabel} key: ${result.message}. Double-check the key, secret, and that it has the right permissions/IP allow-list, then try again.`, 'error');
-    } else {
-      cred.verified = result.verified;
-      cred.verifyNote = result.verified
-        ? `Confirmed with ${EXCHANGES[key].label}${usingProxy ? ' via the verification proxy' : ''}.`
-        : result.message;
-      if(result.verified){
-        if(result.balance != null){
-          state.balances[key][mode] = result.balance;
-          showAtMessage(`${EXCHANGES[key].label} (${netLabel}) key verified and balance pulled: ${money(result.balance)} USDT.`, 'info');
-        } else {
-          showAtMessage(`${EXCHANGES[key].label} (${netLabel}) key verified.`, 'info');
-        }
-      } else {
-        showAtMessage(`Still UNVERIFIED: ${result.message}`, 'error');
-      }
-    }
+    retryBtn.textContent = 'Refreshing…';
+    await reverifyStoredCred(key, mode);
     persist();
     renderConnectRows();
     renderBalances();
@@ -401,10 +441,21 @@ els.connectRows.addEventListener('click', async (e) => {
   }
   if(action === 'reconnect'){
     state.exchangeCreds[key][mode].connected = true;
+    if(key === 'bitget'){
+      persist();
+      renderConnectRows();
+      renderBalances();
+      showAtMessage(`${EXCHANGES[key].label} (${mode}) reconnected.`, 'info');
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Reconnecting…';
+    await reverifyStoredCred(key, mode); // this is the actual fix — reconnect now re-checks the exchange
+                                          // instead of just flipping the connected flag and leaving the
+                                          // old balance/verified state exactly as it was before.
     persist();
     renderConnectRows();
     renderBalances();
-    showAtMessage(`${EXCHANGES[key].label} (${mode}) reconnected.`, 'info');
     return;
   }
 
@@ -530,6 +581,11 @@ els.atModeDemo.addEventListener('click', () => {
   state.autotrade.mode = 'demo'; syncAtModeToggle(); renderBalances();
 });
 
+els.atTestMode.addEventListener('change', () => {
+  state.autotrade.testMode = els.atTestMode.checked;
+  persist();
+});
+
 function ensureDay(){
   const today = todayKey();
   if(state.autotrade.dateKey !== today){
@@ -578,8 +634,8 @@ function renderCycleLog(){
   els.atCycleLog.innerHTML = cycles.slice().reverse().map((c, idx) => {
     const n = cycles.length - idx;
     const [A,B,C] = c.path;
-    return `<div class="cycle-log-row">
-      <div class="cycle-log-n">#${n}</div>
+    return `<div class="cycle-log-row"${c.testMode ? ' style="outline:1px solid var(--red-line);"' : ''}>
+      <div class="cycle-log-n">#${n}${c.testMode ? ' <span class="pill" style="color:var(--red);border-color:var(--red-line);">TEST</span>' : ''}</div>
       <div class="cycle-log-path">${coinIconHtml(A,14)}${A} → ${coinIconHtml(B,14)}${B} → ${coinIconHtml(C,14)}${C} → ${A}</div>
       <div class="cycle-log-pct">${fmtPct(c.profitPct)}</div>
       <div class="cycle-log-amt">${money(c.profitAmt)}</div>
@@ -617,9 +673,10 @@ async function tick(){
     const { results } = findCycles(adj, anchor, feePct, key);
     const ranked = results.filter(r => isFinite(r.profitPct)).sort((a,b) => b.profitPct - a.profitPct);
     const best = ranked[0];
+    const testMode = !!at.testMode;
 
-    if(best && best.profitPct >= minProfitPct){
-      executeCycle(best, dailyTarget);
+    if(best && (testMode || best.profitPct >= minProfitPct)){
+      executeCycle(best, dailyTarget, testMode);
     } else {
       showAtMessage(best
         ? `Watching ${EXCHANGES[key].label}${netLabel}… best cycle right now is ${fmtPct(best.profitPct)}, below your ${minProfitPct.toFixed(2)}% floor. No trade this pass.`
@@ -633,7 +690,7 @@ async function tick(){
   persist();
 }
 
-function executeCycle(cycle, dailyTarget){
+function executeCycle(cycle, dailyTarget, testMode){
   const at = state.autotrade;
   const bal = at.currentBalance;
   const profitAmt = bal * (cycle.profitPct / 100);
@@ -647,12 +704,15 @@ function executeCycle(cycle, dailyTarget){
     profitAmt,
     balanceAfter,
     time: new Date().toLocaleTimeString(),
+    testMode: !!testMode,
   });
 
-  if(at.dayProfitPct >= dailyTarget){
+  if(!testMode && at.dayProfitPct >= dailyTarget){
     at.targetReached = true;
     stopAutotrade();
     showAtMessage(`🎯 Daily target of ${dailyTarget}% reached after ${at.cycles.length} cycle${at.cycles.length===1?'':'s'} — Autotrade stopped for the day. Started at ${money(at.startingBalance)}, ended at ${money(at.currentBalance)} (+${fmtPct(at.dayProfitPct)}). See the cycle summary below.`, 'info');
+  } else if(testMode){
+    showAtMessage(`⚠ TEST MODE — executed cycle #${at.cycles.length} regardless of profitability: ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(cycle.profitPct)} (${money(profitAmt)}). This trade ignored the profit floor on purpose. Running total: ${fmtPct(at.dayProfitPct)}.`, 'error');
   } else {
     showAtMessage(`Executed cycle #${at.cycles.length}: ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(cycle.profitPct)} (${money(profitAmt)}). Running total: ${fmtPct(at.dayProfitPct)} of ${dailyTarget}% target.`, 'info');
   }
@@ -678,6 +738,7 @@ function startAutotrade(){
   at.cycles = [];
   at.enabled = true;
   at.running = true;
+  at.testMode = !!els.atTestMode.checked;
 
   const intervalMs = Math.max(5, parseFloat(els.atInterval.value) || 15) * 1000;
   tick();
@@ -691,7 +752,10 @@ function startAutotrade(){
   els.atModeDemo.disabled = true;
 
   const netLabel = mode === 'testnet' ? ' (testnet)' : mode === 'demo' ? ' (demo)' : '';
-  showAtMessage(`Autotrade started on ${EXCHANGES[key].label}${netLabel} — Triangular only, Spot only. Will only act on cycles ≥ ${Math.max(MIN_PROFIT_FLOOR, parseFloat(els.atMinProfit.value)||MIN_PROFIT_FLOOR).toFixed(2)}%, and stops automatically at +${els.atDailyTarget.value}% for the day.`, 'info');
+  const floorNote = at.testMode
+    ? `⚠ TEST MODE is ON — it will execute the best cycle every scan regardless of profitability, including losses, to exercise the trade/log/balance path. It will NOT stop at the daily target automatically; use Stop Autotrade when you're done testing.`
+    : `Will only act on cycles ≥ ${Math.max(MIN_PROFIT_FLOOR, parseFloat(els.atMinProfit.value)||MIN_PROFIT_FLOOR).toFixed(2)}%, and stops automatically at +${els.atDailyTarget.value}% for the day.`;
+  showAtMessage(`Autotrade started on ${EXCHANGES[key].label}${netLabel} — Triangular only, Spot only. ${floorNote}`, at.testMode ? 'error' : 'info');
   persist();
   renderAutotradeStatus();
 }
@@ -731,6 +795,7 @@ export function initAutotrade(){
     renderConnectRows();
     renderBalances();
     ensureDay();
+    els.atTestMode.checked = !!state.autotrade.testMode;
     const modeForStart = EXCHANGES[state.autotrade.exchange].testnetSupported ? state.autotrade.mode : 'live';
     const savedBal = state.balances[state.autotrade.exchange][modeForStart];
     if(savedBal != null && !els.atStartBalance.value){
@@ -750,6 +815,13 @@ export function initAutotrade(){
       tick();
       state.autotrade.timer = setInterval(tick, intervalMs);
     }
+    // Kick off a background refresh of every connected key's balance right
+    // away (so a stale number from last session doesn't just sit there),
+    // then keep it fresh on a recurring timer for as long as this tab is
+    // open — this runs independently of whether Autotrade itself is
+    // started, since the Balances panel is useful on its own.
+    refreshAllConnectedBalances();
+    setInterval(refreshAllConnectedBalances, BALANCE_REFRESH_INTERVAL_MS);
   }catch(err){
     // Never let a bad stored value blank the whole panel silently — clear the
     // corrupt local data, fall back to defaults, and still render the panel.
