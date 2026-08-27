@@ -219,7 +219,7 @@
       <div id="connectRows" class="connect-list"></div>
       <div class="warn-banner" style="margin:14px 0 0;">
         <b>Your keys never leave this browser — balance verification is handled by a proxy this site already runs for you.</b> Keys stay in this device's local storage only. Binance/Bybit's own servers reject authenticated requests made directly from a browser (that's how they prevent exactly this kind of key exposure), so this site runs a small backend (see <code>/server</code> in this project) that makes the one-time verify+balance check on your behalf — it never places an order or moves funds, and doesn't store the key either; see its README for what it actually does. This is pre-configured and not something you need to set up per device. Disconnecting keeps the saved key so you can reconnect later; use Remove to delete it, and the SHOW/HIDE button next to each field to reveal it.<br><br>
-        <b>Testnet vs. Demo — these are two different environments with two different sets of keys.</b> Binance and Bybit each expose a public Testnet (independent, reset-on-a-schedule fake order books) <i>and</i> a separate Demo Trading environment (real-looking, live-mirrored prices — this is what the terminal bot's "Demo" auto-trade mode uses). A Testnet key will be rejected against Demo's URL and vice versa — that's the #1 cause of an unexpected 401 here. Use the Live / Testnet / Demo switch on each row to pick the matching one before entering a key. Bitget has no public spot testnet or demo environment, so its row stays Live-only, and it can't be verified even with the proxy (its signed endpoints need a passphrase this app doesn't collect).
+        <b>Live vs. Demo — these are two different environments with two different sets of keys.</b> Binance and Bybit each expose a separate Demo Trading environment (real-looking, live-mirrored prices, demo funds only — this is what the terminal bot's "Demo" auto-trade mode uses) alongside your normal Live account. A Live key will be rejected against Demo's URL and vice versa — that's the #1 cause of an unexpected 401 here. Use the Live / Demo switch on each row to pick the matching one before entering a key. Bitget has no public Demo Trading environment, so its row stays Live-only, and it can't be verified even with the proxy (its signed endpoints need a passphrase this app doesn't collect).
       </div>
     </div>
 
@@ -234,10 +234,9 @@
         <select id="atExchange" title="Autotrade watches this exchange only"></select>
       </div>
       <div class="field" id="atModeRow">
-        <label title="Testnet and Demo are available for Binance and Bybit only. Bitget has no public spot testnet or demo environment.">Network</label>
+        <label title="Demo is available for Binance and Bybit only. Bitget has no public Demo Trading environment.">Network</label>
         <div class="mode-toggle">
           <button type="button" class="mode-btn active" id="atModeLive">Live</button>
-          <button type="button" class="mode-btn" id="atModeTestnet">Testnet</button>
           <button type="button" class="mode-btn" id="atModeDemo">Demo</button>
         </div>
       </div>
@@ -264,9 +263,7 @@
         <input id="atMinProfit" type="number" min="0.8" max="10" step="0.05" value="0.8">
       </div>
       <div class="field">
-        <label for="atTestMode" title="Executes the best cycle found on every scan, even if it's break-even or a loss — bypasses the 0.8% floor entirely. This is for confirming the execute → log → balance-update path works end-to-end; it will make genuinely bad trades on purpose, so only use it in Testnet/Demo, and turn it off before running for real.">
-          Test mode <span class="pill" style="margin-left:4px;color:var(--red);border-color:var(--red-line);">forces unprofitable trades</span>
-        </label>
+        <label for="atTestMode" title="Executes the best cycle found on every scan, even if it's break-even or a loss — bypasses the 0.8% floor entirely. This is for confirming the execute → log → balance-update path works end-to-end; it will make genuinely bad trades on purpose, so only use it in Demo mode, and turn it off before running for real.">Test mode <span class="pill" style="margin-left:4px;color:var(--red);border-color:var(--red-line);">forces unprofitable trades</span></label>
         <label class="toggle-check">
           <input id="atTestMode" type="checkbox">
           <span>ignore profit floor, always execute best cycle</span>

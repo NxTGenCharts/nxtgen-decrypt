@@ -55,16 +55,14 @@ async function hmacSha256Hex(secret, message){
 
 class VerifyRejected extends Error {}
 
-// Base URLs per network. IMPORTANT: "testnet" and "demo" are separate
-// environments on both exchanges, each with its own keys — a Demo Trading
-// key will be rejected against the testnet base URL (and vice versa), which
-// shows up as a plain 401 that looks like "bad key" but isn't. Demo mirrors
-// live market data/prices (what the CLI bot's "Demo" auto-trade mode uses);
-// testnet is an independent, reset-on-a-schedule sandbox. See:
+// Base URLs per network. "demo" is Binance/Bybit's separate Demo Trading
+// environment — a distinct set of keys from a normal Live account, created
+// from each exchange's own Demo Trading UI, that mirrors real market prices
+// but trades demo funds only. See:
 //   Binance: https://developers.binance.com/docs/binance-spot-api-docs/demo-mode/general-info
 //   Bybit:   https://bybit-exchange.github.io/docs/v5/demo
-const BINANCE_BASE = { live:'https://api.binance.com', testnet:'https://testnet.binance.vision', demo:'https://demo-api.binance.com' };
-const BYBIT_BASE = { live:'https://api.bybit.com', testnet:'https://api-testnet.bybit.com', demo:'https://api-demo.bybit.com' };
+const BINANCE_BASE = { live:'https://api.binance.com', demo:'https://demo-api.binance.com' };
+const BYBIT_BASE = { live:'https://api.bybit.com', demo:'https://api-demo.bybit.com' };
 
 // Read-only account/balance checks — no orders, no withdrawals. Uses the
 // exchange's own signed endpoint, so it's the only way to actually confirm
@@ -166,16 +164,18 @@ function persist(){
 // A cred/balance slot from an older version of this app could be `null` or a
 // flat object/number instead of today's shape. Coerce anything unexpected
 // back into a safe shape rather than letting a stale localStorage value
-// throw when we later index into .live/.testnet.
+// throw when we later index into .live/.demo. Also absorbs old saves that
+// still have a `demo` slot mismatch —
+// that data is simply dropped, since there's no equivalent to migrate it to.
 function coerceCredSlot(saved){
-  if(saved && typeof saved === 'object' && ('live' in saved || 'testnet' in saved || 'demo' in saved)){
-    return { live: normalizeCred(saved.live), testnet: normalizeCred(saved.testnet), demo: normalizeCred(saved.demo) };
+  if(saved && typeof saved === 'object' && ('live' in saved || 'demo' in saved)){
+    return { live: normalizeCred(saved.live), demo: normalizeCred(saved.demo) };
   }
   if(saved && typeof saved === 'object' && saved.apiKey){
     // Old flat "{ apiKey, connectedAt }" shape — treat it as a live-network connection.
-    return { live: normalizeCred(saved), testnet: null, demo: null };
+    return { live: normalizeCred(saved), demo: null };
   }
-  return { live: null, testnet: null, demo: null };
+  return { live: null, demo: null };
 }
 
 function normalizeCred(c){
@@ -190,17 +190,17 @@ function normalizeCred(c){
   };
 }
 
-function coerceBalanceSlot(saved, supportsTestnet){
-  if(saved && typeof saved === 'object' && ('live' in saved || 'testnet' in saved || 'demo' in saved)){
-    return supportsTestnet
-      ? { live: saved.live ?? null, testnet: saved.testnet ?? null, demo: saved.demo ?? null }
+function coerceBalanceSlot(saved, supportsDemo){
+  if(saved && typeof saved === 'object' && ('live' in saved || 'demo' in saved)){
+    return supportsDemo
+      ? { live: saved.live ?? null, demo: saved.demo ?? null }
       : { live: saved.live ?? null };
   }
   if(typeof saved === 'number'){
     // Old flat number shape — treat it as the live-network balance.
-    return supportsTestnet ? { live: saved, testnet: null, demo: null } : { live: saved };
+    return supportsDemo ? { live: saved, demo: null } : { live: saved };
   }
-  return supportsTestnet ? { live: null, testnet: null, demo: null } : { live: null };
+  return supportsDemo ? { live: null, demo: null } : { live: null };
 }
 
 function restore(){
@@ -221,19 +221,19 @@ function restore(){
     if(saved.exchangeMode){
       for(const key of Object.keys(EXCHANGES)){
         const m = saved.exchangeMode[key];
-        const sandboxOk = EXCHANGES[key].testnetSupported && (m === 'testnet' || m === 'demo');
-        state.exchangeMode[key] = sandboxOk ? m : 'live';
+        const demoOk = EXCHANGES[key].demoSupported && m === 'demo';
+        state.exchangeMode[key] = demoOk ? m : 'live';
       }
     }
     if(saved.balances){
       for(const key of Object.keys(EXCHANGES)){
-        state.balances[key] = coerceBalanceSlot(saved.balances[key], EXCHANGES[key].testnetSupported);
+        state.balances[key] = coerceBalanceSlot(saved.balances[key], EXCHANGES[key].demoSupported);
       }
     }
     if(saved.autotrade) Object.assign(state.autotrade, saved.autotrade, { timer:null, running:false });
     if(!EXCHANGES[state.autotrade.exchange]) state.autotrade.exchange = 'bitget';
-    const atSandboxOk = EXCHANGES[state.autotrade.exchange].testnetSupported && (state.autotrade.mode === 'testnet' || state.autotrade.mode === 'demo');
-    if(!atSandboxOk) state.autotrade.mode = 'live';
+    const atDemoOk = EXCHANGES[state.autotrade.exchange].demoSupported && state.autotrade.mode === 'demo';
+    if(!atDemoOk) state.autotrade.mode = 'live';
   }catch(e){ /* ignore corrupt/blocked storage — safe defaults from state.js are already in place */ }
 }
 
@@ -246,17 +246,16 @@ function showAtMessage(html, type){
 function renderConnectRows(){
   els.connectRows.innerHTML = Object.keys(EXCHANGES).map(key => {
     const label = EXCHANGES[key].label;
-    const supportsTestnet = EXCHANGES[key].testnetSupported;
-    const mode = supportsTestnet ? (state.exchangeMode[key] || 'live') : 'live';
+    const supportsDemo = EXCHANGES[key].demoSupported;
+    const mode = supportsDemo ? (state.exchangeMode[key] || 'live') : 'live';
     const cred = (state.exchangeCreds[key] || {})[mode] || null;
     const stored = !!cred;               // a key/secret is saved for this slot
     const connected = stored && cred.connected;
-    const modeToggle = supportsTestnet ? `
+    const modeToggle = supportsDemo ? `
       <div class="mode-toggle" role="group" aria-label="${label} network">
         <button type="button" class="mode-btn ${mode==='live'?'active':''}" data-mode="live">Live</button>
-        <button type="button" class="mode-btn ${mode==='testnet'?'active':''}" data-mode="testnet">Testnet</button>
         <button type="button" class="mode-btn ${mode==='demo'?'active':''}" data-mode="demo">Demo</button>
-      </div>` : `<div class="mode-toggle mode-toggle--disabled" title="Bitget has no public spot testnet or demo environment"><span class="mode-btn active">Live only</span></div>`;
+      </div>` : `<div class="mode-toggle mode-toggle--disabled" title="Bitget has no public Demo Trading environment"><span class="mode-btn active">Live only</span></div>`;
 
     let statusPill = '';
     if(stored){
@@ -264,12 +263,10 @@ function renderConnectRows(){
       else statusPill = `<span class="pill" style="color:var(--amber);border-color:var(--amber-dim);" title="${cred.verifyNote||'Could not confirm with the exchange from this browser.'}">UNVERIFIED</span>`;
     }
 
-    const modePillHtml = mode==='testnet'
-      ? ' <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">TESTNET</span>'
-      : mode==='demo'
-        ? ' <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">DEMO</span>'
-        : '';
-    const placeholderPrefix = mode === 'testnet' ? 'testnet ' : mode === 'demo' ? 'demo ' : '';
+    const modePillHtml = mode==='demo'
+      ? ' <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">DEMO</span>'
+      : '';
+    const placeholderPrefix = mode === 'demo' ? 'demo ' : '';
 
     return `<div class="connect-row" data-exchange="${key}" data-mode="${mode}">
       <div class="connect-label">${label}${modePillHtml}${statusPill ? ' '+statusPill : ''}</div>
@@ -324,7 +321,7 @@ els.connectRows.addEventListener('click', async (e) => {
   if(modeBtn){
     const row = e.target.closest('.connect-row');
     const key = row.dataset.exchange;
-    if(!EXCHANGES[key].testnetSupported) return; // Bitget: nothing to switch
+    if(!EXCHANGES[key].demoSupported) return; // Bitget: nothing to switch
     state.exchangeMode[key] = modeBtn.dataset.mode;
     persist();
     renderConnectRows();
@@ -340,7 +337,7 @@ els.connectRows.addEventListener('click', async (e) => {
 async function reverifyStoredCred(key, mode, { silent = false } = {}){
   const cred = state.exchangeCreds[key][mode];
   if(!cred || key === 'bitget') return false; // Bitget can't be verified at all
-  const netLabel = mode === 'testnet' ? 'testnet' : mode === 'demo' ? 'demo' : 'live';
+  const netLabel = mode === 'demo' ? 'demo' : 'live';
   const usingProxy = !!(state.verifyProxyUrl || '').trim();
   const result = await runVerification(key, mode, cred.apiKey, cred.secretKey);
   if(result.rejected){
@@ -379,7 +376,7 @@ async function refreshAllConnectedBalances(){
   try{
     for(const key of Object.keys(EXCHANGES)){
       if(key === 'bitget') continue;
-      for(const mode of ['live', 'testnet', 'demo']){
+      for(const mode of ['live', 'demo']){
         const cred = state.exchangeCreds[key]?.[mode];
         if(cred && cred.connected){
           await reverifyStoredCred(key, mode, { silent: true });
@@ -473,7 +470,7 @@ const BALANCE_REFRESH_INTERVAL_MS = 90 * 1000; // matches a "reasonably fresh wi
 
   btn.disabled = true;
   btn.textContent = 'Verifying…';
-  const netLabel = mode === 'testnet' ? 'testnet' : mode === 'demo' ? 'demo' : 'live';
+  const netLabel = mode === 'demo' ? 'demo' : 'live';
   const usingProxy = !!(state.verifyProxyUrl || '').trim();
 
   const cred = { apiKey, secretKey, connectedAt: new Date().toLocaleString(), connected: true, verified: false, verifyNote: '' };
@@ -517,14 +514,12 @@ const BALANCE_REFRESH_INTERVAL_MS = 90 * 1000; // matches a "reasonably fresh wi
 function renderBalances(){
   els.balanceRows.innerHTML = Object.keys(EXCHANGES).map(key => {
     const label = EXCHANGES[key].label;
-    const mode = EXCHANGES[key].testnetSupported ? (state.exchangeMode[key] || 'live') : 'live';
+    const mode = EXCHANGES[key].demoSupported ? (state.exchangeMode[key] || 'live') : 'live';
     const bal = (state.balances[key] || {})[mode];
     const isAtExchange = state.autotrade.exchange === key && state.autotrade.mode === mode;
-    const modeTag = mode === 'testnet'
-      ? ' <span class="pill" style="color:var(--amber);border-color:var(--amber-dim);">TESTNET</span>'
-      : mode === 'demo'
-        ? ' <span class="pill" style="color:var(--amber);border-color:var(--amber-dim);">DEMO</span>'
-        : '';
+    const modeTag = mode === 'demo'
+      ? ' <span class="pill" style="color:var(--amber);border-color:var(--amber-dim);">DEMO</span>'
+      : '';
     return `<div class="balance-row" data-exchange="${key}">
       <div class="connect-label">${label}${modeTag}${isAtExchange ? ' <span class="pill tr-yes" style="margin-left:6px;">AUTOTRADE</span>' : ''}</div>
       <input class="bal-input" type="number" min="0" step="0.01" placeholder="Enter balance (USDT)" value="${bal !== null && bal !== undefined ? bal : ''}">
@@ -563,21 +558,16 @@ function renderExchangeOptions(){
 
 function syncAtModeToggle(){
   const key = els.atExchange.value;
-  const supportsTestnet = EXCHANGES[key].testnetSupported;
-  els.atModeRow.style.display = supportsTestnet ? '' : 'none';
-  if(!supportsTestnet) state.autotrade.mode = 'live';
+  const supportsDemo = EXCHANGES[key].demoSupported;
+  els.atModeRow.style.display = supportsDemo ? '' : 'none';
+  if(!supportsDemo) state.autotrade.mode = 'live';
   els.atModeLive.classList.toggle('active', state.autotrade.mode === 'live');
-  els.atModeTestnet.classList.toggle('active', state.autotrade.mode === 'testnet');
   els.atModeDemo.classList.toggle('active', state.autotrade.mode === 'demo');
 }
 
 els.atModeLive.addEventListener('click', () => { state.autotrade.mode = 'live'; syncAtModeToggle(); renderBalances(); });
-els.atModeTestnet.addEventListener('click', () => {
-  if(!EXCHANGES[els.atExchange.value].testnetSupported) return;
-  state.autotrade.mode = 'testnet'; syncAtModeToggle(); renderBalances();
-});
 els.atModeDemo.addEventListener('click', () => {
-  if(!EXCHANGES[els.atExchange.value].testnetSupported) return;
+  if(!EXCHANGES[els.atExchange.value].demoSupported) return;
   state.autotrade.mode = 'demo'; syncAtModeToggle(); renderBalances();
 });
 
@@ -614,7 +604,7 @@ function renderAutotradeStatus(){
   const pct = Math.max(0, Math.min(100, (at.dayProfitPct / target) * 100));
   els.atProgressBar.style.width = pct.toFixed(1) + '%';
   els.atProgressBar.classList.toggle('done', at.targetReached);
-  els.atProgressLabel.textContent = `${fmtPct(at.dayProfitPct || 0)} of ${target}% daily target${at.targetReached ? ' — reached' : ''}${at.mode === 'testnet' ? ' · TESTNET' : ''}${at.mode === 'demo' ? ' · DEMO' : ''}`;
+  els.atProgressLabel.textContent = `${fmtPct(at.dayProfitPct || 0)} of ${target}% daily target${at.targetReached ? ' — reached' : ''}${at.mode === 'demo' ? ' · DEMO' : ''}`;
 
   els.atToggleBtn.classList.toggle('on', at.enabled && at.running);
   els.atToggleBtn.querySelector('.btn-label').textContent = at.enabled
@@ -652,19 +642,17 @@ async function tick(){
   ensureDay();
 
   const key = at.exchange;
-  const usesFakeOrderBooks = at.mode === 'testnet' && EXCHANGES[key].testnetSupported;
   const anchor = els.atAnchor.value;
   const feePct = parseFloat(els.atFee.value) || 0;
   const minVolume = parseFloat(els.atMinVolume.value) || 0;
   const configuredFloor = parseFloat(els.atMinProfit.value);
   const minProfitPct = Math.max(MIN_PROFIT_FLOOR, isFinite(configuredFloor) ? configuredFloor : MIN_PROFIT_FLOOR);
   const dailyTarget = parseFloat(els.atDailyTarget.value) || 11;
-  const netLabel = at.mode === 'testnet' ? ' (testnet)' : at.mode === 'demo' ? ' (demo)' : '';
+  const netLabel = at.mode === 'demo' ? ' (demo)' : '';
 
   try{
     // Demo mode mirrors live market data/prices (only the account & order
     // endpoints differ — see BINANCE_BASE/BYBIT_BASE above), so opportunity
-    // scanning always reads real order books except in Testnet mode, which
     // is genuinely a separate, thinner fake order book.
     const rawPairs = await EXCHANGES[key].load(usesFakeOrderBooks);
     if(!usesFakeOrderBooks) state.pairsCache[key] = rawPairs; // Overview's market count reflects live data only
@@ -721,7 +709,7 @@ function executeCycle(cycle, dailyTarget, testMode){
 function startAutotrade(){
   const at = state.autotrade;
   const key = els.atExchange.value;
-  const mode = EXCHANGES[key].testnetSupported ? state.autotrade.mode : 'live';
+  const mode = EXCHANGES[key].demoSupported ? state.autotrade.mode : 'live';
   const startBal = parseFloat(els.atStartBalance.value);
   if(!isFinite(startBal) || startBal <= 0){
     showAtMessage('Enter a starting balance for the day before starting Autotrade.', 'error');
@@ -748,10 +736,9 @@ function startAutotrade(){
   els.atStartBalance.disabled = true;
   els.atAnchor.disabled = true;
   els.atModeLive.disabled = true;
-  els.atModeTestnet.disabled = true;
   els.atModeDemo.disabled = true;
 
-  const netLabel = mode === 'testnet' ? ' (testnet)' : mode === 'demo' ? ' (demo)' : '';
+  const netLabel = mode === 'demo' ? ' (demo)' : '';
   const floorNote = at.testMode
     ? `⚠ TEST MODE is ON — it will execute the best cycle every scan regardless of profitability, including losses, to exercise the trade/log/balance path. It will NOT stop at the daily target automatically; use Stop Autotrade when you're done testing.`
     : `Will only act on cycles ≥ ${Math.max(MIN_PROFIT_FLOOR, parseFloat(els.atMinProfit.value)||MIN_PROFIT_FLOOR).toFixed(2)}%, and stops automatically at +${els.atDailyTarget.value}% for the day.`;
@@ -769,7 +756,6 @@ function stopAutotrade(){
   els.atStartBalance.disabled = false;
   els.atAnchor.disabled = false;
   els.atModeLive.disabled = false;
-  els.atModeTestnet.disabled = false;
   els.atModeDemo.disabled = false;
   persist();
   renderAutotradeStatus();
@@ -796,7 +782,7 @@ export function initAutotrade(){
     renderBalances();
     ensureDay();
     els.atTestMode.checked = !!state.autotrade.testMode;
-    const modeForStart = EXCHANGES[state.autotrade.exchange].testnetSupported ? state.autotrade.mode : 'live';
+    const modeForStart = EXCHANGES[state.autotrade.exchange].demoSupported ? state.autotrade.mode : 'live';
     const savedBal = state.balances[state.autotrade.exchange][modeForStart];
     if(savedBal != null && !els.atStartBalance.value){
       els.atStartBalance.value = state.autotrade.startingBalance || savedBal || '';
@@ -810,7 +796,6 @@ export function initAutotrade(){
       els.atStartBalance.disabled = true;
       els.atAnchor.disabled = true;
       els.atModeLive.disabled = true;
-      els.atModeTestnet.disabled = true;
       els.atModeDemo.disabled = true;
       tick();
       state.autotrade.timer = setInterval(tick, intervalMs);

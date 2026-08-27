@@ -54,8 +54,8 @@ export async function loadBitgetCoinInfo(){
   return map;
 }
 
-export async function loadBinance(testnet){
-  const base = testnet ? 'https://testnet.binance.vision' : 'https://api.binance.com';
+export async function loadBinance(){
+  const base = 'https://api.binance.com';
   const [infoRes, tickerRes] = await Promise.all([
     fetchJSON(base + '/api/v3/exchangeInfo'),
     fetchJSON(base + '/api/v3/ticker/24hr'),
@@ -81,8 +81,8 @@ export async function loadBinance(testnet){
   return pairs;
 }
 
-export async function loadBybit(testnet){
-  const base = testnet ? 'https://api-testnet.bybit.com' : 'https://api.bybit.com';
+export async function loadBybit(){
+  const base = 'https://api.bybit.com';
   const [infoRes, tickerRes] = await Promise.all([
     fetchJSON(base + '/v5/market/instruments-info?category=spot'),
     fetchJSON(base + '/v5/market/tickers?category=spot'),
@@ -112,9 +112,9 @@ export async function loadBybit(testnet){
 }
 
 export const EXCHANGES = {
-  bitget:  { label:'Bitget',  load:loadBitget, testnetSupported:false },
-  binance: { label:'Binance', load:loadBinance, testnetSupported:true },
-  bybit:   { label:'Bybit',   load:loadBybit, testnetSupported:true },
+  bitget:  { label:'Bitget',  load:loadBitget, demoSupported:false },
+  binance: { label:'Binance', load:loadBinance, demoSupported:true },
+  bybit:   { label:'Bybit',   load:loadBybit, demoSupported:true },
 };
 
 // National fiat currency codes. Exchanges sometimes list fiat on/off-ramp

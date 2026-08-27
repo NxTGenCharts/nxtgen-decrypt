@@ -72,7 +72,6 @@ export const els = {
   atProxyUrl: document.getElementById('atProxyUrl'),
   atModeRow: document.getElementById('atModeRow'),
   atModeLive: document.getElementById('atModeLive'),
-  atModeTestnet: document.getElementById('atModeTestnet'),
   atModeDemo: document.getElementById('atModeDemo'),
   atAnchor: document.getElementById('atAnchor'),
   atFee: document.getElementById('atFee'),
@@ -133,11 +132,11 @@ export const state = {
   // browser's localStorage for this session's convenience and are never
   // sent anywhere by this app; nothing here places real orders. See
   // autotrade.js for the full explanation shown in the UI. Bitget only has
-  // a `live` slot (no public spot testnet); Binance/Bybit have both. ----
+  // a `live` slot (no public Demo Trading environment); Binance/Bybit have both. ----
   exchangeCreds: {
-    bitget:  { live:null, testnet:null, demo:null },
-    binance: { live:null, testnet:null, demo:null },
-    bybit:   { live:null, testnet:null, demo:null },
+    bitget:  { live:null, demo:null },
+    binance: { live:null, demo:null },
+    bybit:   { live:null, demo:null },
   }, // each slot: { apiKey, connectedAt } — secret is stored but never rendered back
 
   // ---- Which network each exchange is currently set to. Bitget is always 'live'. ----
@@ -146,8 +145,8 @@ export const state = {
   // ---- Manually-entered balances, per exchange+mode (spot only) ----
   balances: {
     bitget:  { live:null },
-    binance: { live:null, testnet:null, demo:null },
-    bybit:   { live:null, testnet:null, demo:null },
+    binance: { live:null, demo:null },
+    bybit:   { live:null, demo:null },
   },
 
   // ---- Autotrade (Triangular-only) simulation state ----
@@ -155,7 +154,7 @@ export const state = {
     enabled: false,
     running: false,
     exchange: 'bitget',
-    mode: 'live',           // 'live' | 'testnet' | 'demo' — testnet/demo only meaningful for binance/bybit
+    mode: 'live',           // 'live' | 'demo' — demo only meaningful for binance/bybit
     dateKey: null,          // local date string; a new day resets the counters below
     startingBalance: 0,
     currentBalance: 0,
