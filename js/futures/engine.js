@@ -41,10 +41,34 @@ function combineEnsemble(signals){
   return { conflict: false, direction: primary.direction, ensembleConfidence: clamp(weighted, 0, 99), primary, all: group };
 }
 
-function buildLevels(snap, direction){
+function buildLevels(snap, direction, setupType){
   const entry = snap.price;
   const atrM15 = atr(snap.m15, 14) || entry * 0.003;
   const atrPct = (atrM15 / entry) * 100;
+
+  if(setupType === 'Range Scalp'){
+    // Deliberately asymmetric: a tight target close to the mean it's
+    // fading back to, and a stop wide enough to sit outside normal
+    // noise. This is what produces a high hit-rate — see README-SCALP.md
+    // for the math on why the stop has to be this much wider, and what
+    // that implies about the rare loss when it happens.
+    // NOTE: a 5.5:1 stop:target skew (theoretical ~85% hit rate) was tried
+    // first here and pulled from this build — the target came out smaller
+    // than round-trip costs (fees+spread+slippage), so it was a guaranteed
+    // net loser on every single win. This ~2.2:1 skew (theoretical ~69%
+    // hit rate) is the tightest skew that still clears costs with room to
+    // spare. See README-SCALP.md for the numbers.
+    const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
+    const atrPct5 = (atrM5 / entry) * 100;
+    const stopDistancePct = clamp(atrPct5 * 1.8, 0.35, 1.0);
+    const tp1Pct = clamp(stopDistancePct / 2.2, 0.16, 0.5);
+    const stopPrice = direction === 'LONG' ? entry * (1 - stopDistancePct / 100) : entry * (1 + stopDistancePct / 100);
+    const sign = direction === 'LONG' ? 1 : -1;
+    const tp1 = entry * (1 + sign * tp1Pct / 100);
+    // Single-exit: tp2/tp3 set equal to tp1 so the whole position closes at the one target instead of scaling out.
+    return { entry, stopPrice, stopDistancePct, tp1, tp2: tp1, tp3: tp1, tp1Pct, tp2Pct: tp1Pct, tp3Pct: tp1Pct, atrPct: atrPct5 };
+  }
+
   const { support, resistance } = swingLevels(snap.m15, 30);
 
   const structuralStopPct = direction === 'LONG'
@@ -106,10 +130,10 @@ export function runScanCycle(cfg, dayState){
     let confidence = weightedScore(factorScores, weights);
     confidence = Math.round((confidence + ensemble.ensembleConfidence) / 2);
 
-    const levels = buildLevels(snap, direction);
+    const levels = buildLevels(snap, direction, primary.type);
     const volExp = volumeExpansion(snap.m5, 10);
     const execution = decideExecution({ setupType: primary.type, volExpansionRatio: volExp });
-    const holdMinutes = 90; // typical expected hold for TP1, used for funding-cost estimation
+    const holdMinutes = primary.type === 'Range Scalp' ? 20 : 90; // scalp is meant to resolve fast; used for funding-cost estimation
 
     const costs = estimateCosts({
       exchange: cfg.exchange || 'binance',
@@ -128,8 +152,19 @@ export function runScanCycle(cfg, dayState){
     const isAltcoin = symbol !== 'BTCUSDT';
 
     const minConfidence = cfg.highSelectivity ? 82 : (cfg.minConfidence ?? 60);
-    const minRR = cfg.highSelectivity ? 1.5 : (cfg.minRiskReward ?? 1.2);
-    const minNetProfit = cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT;
+    // Range Scalp is intentionally a high-win-rate / low-R:R strategy
+    // (small target, wider stop) — the R:R filter that makes sense for
+    // the old trend/breakout setups would reject every scalp signal by
+    // design, so it gets its own, much lower floor. Net-profit-after-costs
+    // (below) stays the same for every setup — that's the filter that
+    // actually protects you here, not R:R.
+    const minRR = primary.type === 'Range Scalp' ? (cfg.scalpMinRiskReward ?? 0.35) : (cfg.highSelectivity ? 1.5 : (cfg.minRiskReward ?? 1.2));
+    // Same reasoning as minRR: the scalp's gross target is deliberately
+    // small, so the default 0.30% net-profit floor (sized for the old
+    // bigger-target setups) would reject nearly every scalp signal even
+    // when it clears costs. Its own floor is still a real, positive
+    // number — it still has to clear costs, just not by as much.
+    const minNetProfit = primary.type === 'Range Scalp' ? (cfg.scalpMinNetProfitPct ?? 0.04) : (cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT);
 
     const gate = evaluateNoTradeFilters({
       snap, regime, confidence, minConfidence,
@@ -233,7 +268,7 @@ export function managePositions(dayState, tradeHistory, cfg){
     const hitTP = (price) => dir === 1 ? candle.h >= price : candle.l <= price;
     const hitSL = candle.h !== undefined && (dir === 1 ? candle.l <= pos.stop : candle.h >= pos.stop);
     const ageMinutes = (mockMarket.now() - pos.openedAt) / 60_000;
-    const timeStopMinutes = cfg.timeStopMinutes || 240;
+    const timeStopMinutes = pos.setup === 'Range Scalp' ? (cfg.scalpTimeStopMinutes || 45) : (cfg.timeStopMinutes || 240);
 
     let closedFraction = 0;
     const events = [];
@@ -251,6 +286,16 @@ export function managePositions(dayState, tradeHistory, cfg){
       pos.stop = pos.entry; // move to break-even after TP1
       dayState.realizedNetUsd += pnl.netUsd; dayState.realizedGrossUsd += pnl.grossUsd;
       dayState.feesUsd += pnl.feesUsd; dayState.fundingUsd += pnl.fundingUsd;
+      // BUGFIX: earlier partial fills were added to dayState totals above
+      // (correct) but were never carried into pos.finalNetUsd, so a
+      // trade's win/loss verdict and its trade-history row only ever
+      // reflected whichever leg happened to close it, silently dropping
+      // any TP1/TP2 partial profit already banked. Accrue it on the
+      // position so closeTrade() below can report the true full-trade
+      // total instead of just the last slice.
+      pos.accrued = pos.accrued || { netUsd: 0, grossUsd: 0, feesUsd: 0, fundingUsd: 0 };
+      pos.accrued.netUsd += pnl.netUsd; pos.accrued.grossUsd += pnl.grossUsd;
+      pos.accrued.feesUsd += pnl.feesUsd; pos.accrued.fundingUsd += pnl.fundingUsd;
       events.push('Partial TP1 taken, stop moved to break-even');
     }
 
@@ -261,6 +306,9 @@ export function managePositions(dayState, tradeHistory, cfg){
       pos.stop = pos.tp1; // trail stop up to TP1 after TP2
       dayState.realizedNetUsd += pnl.netUsd; dayState.realizedGrossUsd += pnl.grossUsd;
       dayState.feesUsd += pnl.feesUsd; dayState.fundingUsd += pnl.fundingUsd;
+      pos.accrued = pos.accrued || { netUsd: 0, grossUsd: 0, feesUsd: 0, fundingUsd: 0 };
+      pos.accrued.netUsd += pnl.netUsd; pos.accrued.grossUsd += pnl.grossUsd;
+      pos.accrued.feesUsd += pnl.feesUsd; pos.accrued.fundingUsd += pnl.fundingUsd;
       events.push('Partial TP2 taken, stop trailed to TP1');
     }
 
@@ -289,9 +337,13 @@ function closeTrade(pos, exitPrice, pnl, exitReason, dayState, tradeHistory, ext
   dayState.feesUsd += pnl.feesUsd;
   dayState.fundingUsd += pnl.fundingUsd;
 
-  // Win/loss is judged on the FULL trade's net P&L across all partials,
-  // tracked on the position object as it accrues, not just this slice.
-  pos.finalNetUsd = (pos.finalNetUsd || 0) + pnl.netUsd;
+  // Win/loss (and the trade-history row) reflect the FULL trade's net
+  // P&L across every partial fill, not just whichever slice closed it.
+  const accrued = pos.accrued || { netUsd: 0, grossUsd: 0, feesUsd: 0, fundingUsd: 0 };
+  pos.finalNetUsd = accrued.netUsd + pnl.netUsd;
+  const totalGrossUsd = accrued.grossUsd + pnl.grossUsd;
+  const totalFeesUsd = accrued.feesUsd + pnl.feesUsd;
+  const totalFundingUsd = accrued.fundingUsd + pnl.fundingUsd;
 
   dayState.trades++;
   if(pos.finalNetUsd > 0){ dayState.wins++; dayState.consecutiveLosses = 0; }
@@ -305,7 +357,7 @@ function closeTrade(pos, exitPrice, pnl, exitReason, dayState, tradeHistory, ext
   tradeHistory.unshift({
     timestamp: mockMarket.now(), exchange: pos.exchange, symbol: pos.symbol, direction: pos.direction,
     entry: pos.entry, exit: exitPrice, qty: pos.qty, leverage: pos.leverage,
-    grossPnlUsd: pnl.grossUsd, feesUsd: pnl.feesUsd, fundingUsd: pnl.fundingUsd, netPnlUsd: pnl.netUsd,
+    grossPnlUsd: totalGrossUsd, feesUsd: totalFeesUsd, fundingUsd: totalFundingUsd, netPnlUsd: pos.finalNetUsd,
     confidence: pos.confidence, strategy: pos.setup, reasonEntry: (pos.reasons || []).join('; '),
     reasonExit: exitReason, durationMin: Math.round((mockMarket.now() - pos.openedAt) / 60_000),
   });

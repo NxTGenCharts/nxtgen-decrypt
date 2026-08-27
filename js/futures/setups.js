@@ -161,11 +161,61 @@ export function detectLiquiditySweep(snap, regime){
   return { type: 'Liquidity Sweep Reversal', direction: dir, rawConfidence: Math.round(conf), reasons, meta: { support, resistance } };
 }
 
+// ---- SETUP E: Range Scalp (mean-reversion fade) ----
+// The ONE strategy this build now trades. Only in calm, non-trending
+// conditions (Range / Low Volatility) — fades short-term overextensions
+// away from the M5 EMA9 back toward the mean, on a rejection candle.
+// Deliberately asymmetric: tight target, wider stop, so it wins far
+// more often than it loses. See README-SCALP.md for why that does NOT
+// by itself mean it's profitable — the size of the rare loss matters
+// just as much as how often you win.
+export function detectRangeScalp(snap, regime){
+  const CALM_REGIMES = new Set([REGIMES.RANGE, REGIMES.LOW_VOL]);
+  if(!CALM_REGIMES.has(regime.regime)) return null;
+  const m5 = snap.m5;
+  if(m5.length < 30) return null;
+
+  const c = closes(m5);
+  const ema9 = ema(c, 9);
+  const atr5 = atr(m5, 14);
+  if(!ema9 || !atr5) return null;
+
+  const last = m5[m5.length - 1];
+  const devPct = ((last.c - ema9) / ema9) * 100;
+  const atrPct = (atr5 / ema9) * 100;
+  if(atrPct <= 0) return null;
+
+  const devInAtr = Math.abs(devPct) / atrPct; // how many ATRs price has stretched from the mean
+  if(devInAtr < 1.1) return null; // not stretched enough to fade
+
+  const dir = devPct < 0 ? 'LONG' : 'SHORT'; // fade back toward the mean
+  const rejecting = dir === 'LONG' ? last.c > last.o : last.c < last.o;
+  if(!rejecting) return null; // require a rejection candle in the fade direction, not just distance
+
+  const rsiVal = rsi(m5, 14);
+  const rsiOk = dir === 'LONG' ? (rsiVal !== null && rsiVal < 35) : (rsiVal !== null && rsiVal > 65);
+
+  const reasons = [
+    `Price stretched ${devInAtr.toFixed(2)}x ATR from M5 EMA9 (calm regime)`,
+    `Rejection candle back toward the mean`,
+  ];
+  if(rsiOk) reasons.push(`RSI ${rsiVal.toFixed(0)} confirms short-term exhaustion`);
+
+  let conf = 60;
+  conf += devInAtr > 1.6 ? 12 : 5;
+  conf += rsiOk ? 10 : 0;
+  conf = clamp(conf, 0, 90);
+
+  return { type: 'Range Scalp', direction: dir, rawConfidence: Math.round(conf), reasons, meta: { devInAtr, atrPct } };
+}
+
 export function detectAllSetups(snap, regime){
+  // Single-strategy build: only Range Scalp trades. The other four
+  // detectors above are kept (and still exported) so a future build
+  // can bring them back, but the engine no longer ensembles between
+  // strategies mid-session — that switching is what was producing the
+  // inconsistent, unexplainable trade history.
   return [
-    detectTrendContinuation(snap, regime),
-    detectBreakoutRetest(snap, regime),
-    detectRangeReversal(snap, regime),
-    detectLiquiditySweep(snap, regime),
+    detectRangeScalp(snap, regime),
   ].filter(Boolean);
 }
