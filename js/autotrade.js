@@ -230,7 +230,9 @@ function restore(){
         state.balances[key] = coerceBalanceSlot(saved.balances[key], EXCHANGES[key].demoSupported);
       }
     }
-    if(saved.autotrade) Object.assign(state.autotrade, saved.autotrade, { timer:null, running:false });
+    if(saved.autotrade) Object.assign(state.autotrade, saved.autotrade, { timer:null, running:false, liveExecution:false });
+    // liveExecution is NEVER restored as true from storage — see the field
+    // comment in state.js. It must be re-armed explicitly every session.
     if(!EXCHANGES[state.autotrade.exchange]) state.autotrade.exchange = 'bitget';
     const atDemoOk = EXCHANGES[state.autotrade.exchange].demoSupported && state.autotrade.mode === 'demo';
     if(!atDemoOk) state.autotrade.mode = 'live';
@@ -527,6 +529,26 @@ function renderBalances(){
       <div class="balance-shown">${bal !== null && bal !== undefined ? money(bal) : '—'}</div>
     </div>`;
   }).join('');
+  syncStartBalanceField();
+}
+
+// Keeps "Today's starting balance" locked to whatever the real connected
+// balance is for the currently-selected Autotrade exchange/mode — it used
+// to be a free-typed number completely disconnected from your actual
+// account, which is exactly why Autotrade could only ever be a local
+// simulation: there was no link between what you typed and what the
+// exchange actually reported. This doesn't make Autotrade place real
+// orders (see the "Simulated only" note in the UI) — it just makes sure
+// the *simulation's* starting point can't drift from reality by accident.
+function syncStartBalanceField(){
+  const key = state.autotrade.exchange;
+  const mode = EXCHANGES[key].demoSupported ? state.autotrade.mode : 'live';
+  const bal = state.balances[key]?.[mode];
+  els.atStartBalance.value = bal != null ? bal : '';
+  els.atStartBalance.setAttribute('readonly', 'readonly');
+  els.atStartBalance.title = bal != null
+    ? `Locked to ${EXCHANGES[key].label}'s actual ${mode} balance — connect/refresh that account to change this.`
+    : `No balance found for ${EXCHANGES[key].label} (${mode}) yet — connect that account or click Refresh Balance on the row above first.`;
 }
 
 els.balanceRows.addEventListener('click', (e) => {
@@ -563,6 +585,8 @@ function syncAtModeToggle(){
   if(!supportsDemo) state.autotrade.mode = 'live';
   els.atModeLive.classList.toggle('active', state.autotrade.mode === 'live');
   els.atModeDemo.classList.toggle('active', state.autotrade.mode === 'demo');
+  syncStartBalanceField();
+  disarmLiveExecution(); // switching account/network invalidates any prior arm — never carry it over silently
 }
 
 els.atModeLive.addEventListener('click', () => { state.autotrade.mode = 'live'; syncAtModeToggle(); renderBalances(); });
@@ -573,7 +597,62 @@ els.atModeDemo.addEventListener('click', () => {
 
 els.atTestMode.addEventListener('change', () => {
   state.autotrade.testMode = els.atTestMode.checked;
+  if(state.autotrade.testMode && state.autotrade.liveExecution){
+    // Mutually exclusive by design (see the check in tick()) — turning one
+    // on always turns the other off rather than letting both sit checked.
+    state.autotrade.liveExecution = false;
+    els.atLiveExecution.checked = false;
+    disarmLiveExecution();
+  }
   persist();
+});
+
+const ARM_PHRASE = 'PLACE REAL ORDERS';
+
+function disarmLiveExecution(){
+  state.autotrade.liveExecution = false;
+  els.atLiveExecution.checked = false;
+  els.atArmRow.style.display = 'none';
+  els.atArmPhrase.value = '';
+}
+
+els.atLiveExecution.addEventListener('change', () => {
+  if(!els.atLiveExecution.checked){
+    disarmLiveExecution();
+    persist();
+    return;
+  }
+  if(state.autotrade.testMode){
+    // Same exclusion from the other direction.
+    els.atTestMode.checked = false;
+    state.autotrade.testMode = false;
+  }
+  // Checking the box only reveals the arm step — it does NOT arm anything
+  // by itself. state.autotrade.liveExecution stays false until the exact
+  // phrase is typed and Arm is clicked below.
+  els.atLiveExecution.checked = false;
+  els.atArmRow.style.display = 'flex';
+  els.atArmPhrase.focus();
+});
+
+els.atArmBtn.addEventListener('click', () => {
+  const key = els.atExchange.value;
+  const mode = EXCHANGES[key].demoSupported ? state.autotrade.mode : 'live';
+  const cred = state.exchangeCreds[key]?.[mode];
+  if(els.atArmPhrase.value.trim() !== ARM_PHRASE){
+    showAtMessage(`Type exactly "${ARM_PHRASE}" to arm real order execution.`, 'error');
+    return;
+  }
+  if(key === 'bitget' || !cred || !cred.verified){
+    showAtMessage(`Real order execution needs a VERIFIED connected key for ${EXCHANGES[key].label} (${mode}) — connect/verify it above first.`, 'error');
+    return;
+  }
+  state.autotrade.liveExecution = true;
+  els.atLiveExecution.checked = true;
+  els.atArmRow.style.display = 'none';
+  els.atArmPhrase.value = '';
+  persist();
+  showAtMessage(`Real order execution ARMED for ${EXCHANGES[key].label} (${mode}). The next qualifying cycle will place real orders. Uncheck the box above at any time to disarm immediately.`, 'error');
 });
 
 function ensureDay(){
@@ -624,12 +703,18 @@ function renderCycleLog(){
   els.atCycleLog.innerHTML = cycles.slice().reverse().map((c, idx) => {
     const n = cycles.length - idx;
     const [A,B,C] = c.path;
-    return `<div class="cycle-log-row"${c.testMode ? ' style="outline:1px solid var(--red-line);"' : ''}>
-      <div class="cycle-log-n">#${n}${c.testMode ? ' <span class="pill" style="color:var(--red);border-color:var(--red-line);">TEST</span>' : ''}</div>
+    const badge = c.real
+      ? (c.unwound
+          ? ' <span class="pill" style="color:var(--red);border-color:var(--red-line);" title="A later leg failed and this position was unwound back to the anchor with real orders.">UNWOUND</span>'
+          : ' <span class="pill tr-yes" title="Real signed orders were placed on the exchange for all three legs.">REAL</span>')
+      : (c.testMode ? ' <span class="pill" style="color:var(--red);border-color:var(--red-line);">TEST</span>' : '');
+    const balCell = c.balanceAfter != null ? money(c.balanceAfter) : '<span title="Real cycles don\'t compute a local balance — see the refreshed CURRENT BALANCE above instead.">—</span>';
+    return `<div class="cycle-log-row"${(c.testMode || c.real) ? ' style="outline:1px solid var(--red-line);"' : ''}>
+      <div class="cycle-log-n">#${n}${badge}</div>
       <div class="cycle-log-path">${coinIconHtml(A,14)}${A} → ${coinIconHtml(B,14)}${B} → ${coinIconHtml(C,14)}${C} → ${A}</div>
       <div class="cycle-log-pct">${fmtPct(c.profitPct)}</div>
       <div class="cycle-log-amt">${money(c.profitAmt)}</div>
-      <div class="cycle-log-bal">${money(c.balanceAfter)}</div>
+      <div class="cycle-log-bal">${balCell}</div>
       <div class="cycle-log-time">${c.time}</div>
     </div>`;
   }).join('');
@@ -652,18 +737,31 @@ async function tick(){
 
   try{
     // Demo mode mirrors live market data/prices (only the account & order
-    // endpoints differ — see BINANCE_BASE/BYBIT_BASE above), so opportunity
-    // is genuinely a separate, thinner fake order book.
-    const rawPairs = await EXCHANGES[key].load(usesFakeOrderBooks);
-    if(!usesFakeOrderBooks) state.pairsCache[key] = rawPairs; // Overview's market count reflects live data only
+    // endpoints differ — see BINANCE_BASE/BYBIT_BASE in server.js), so
+    // scanning always reads real live order books regardless of mode.
+    const rawPairs = await EXCHANGES[key].load();
+    state.pairsCache[key] = rawPairs;
     const pairs = filterTriPairs(rawPairs, minVolume);
     const adj = buildGraph(pairs, false); // realistic bid/ask + fee — never the theoretical mode for real decisions
     const { results } = findCycles(adj, anchor, feePct, key);
     const ranked = results.filter(r => isFinite(r.profitPct)).sort((a,b) => b.profitPct - a.profitPct);
     const best = ranked[0];
     const testMode = !!at.testMode;
+    const liveExecution = !!at.liveExecution;
 
-    if(best && (testMode || best.profitPct >= minProfitPct)){
+    if(testMode && liveExecution){
+      // Should be unreachable — the UI enforces these as mutually exclusive
+      // — but this is exactly the kind of state a real bot must never act
+      // on if it somehow occurs, since "ignore the profit floor" combined
+      // with "place real orders" means deliberately losing real money.
+      showAtMessage('Autotrade stopped: Test mode and Real order execution were both on at once, which should never happen. No order was placed.', 'error');
+      stopAutotrade();
+    } else if(liveExecution && best && best.profitPct >= minProfitPct){
+      // Real execution NEVER honors Test mode's floor bypass — that bypass
+      // exists purely to exercise the simulated path, and must never touch
+      // an exchange.
+      await executeCycleReal(best, dailyTarget);
+    } else if(best && (testMode || best.profitPct >= minProfitPct)){
       executeCycle(best, dailyTarget, testMode);
     } else {
       showAtMessage(best
@@ -676,6 +774,147 @@ async function tick(){
   }
   renderAutotradeStatus();
   persist();
+}
+
+// ---------------- Real order execution ----------------
+// Places actual signed MARKET orders for all three legs of a cycle via the
+// proxy's /api/order endpoint, sizing each leg from the REAL fill of the
+// previous one — never the scanned estimate, since slippage between the
+// scan and the fill is exactly what a real bot has to live with. See the
+// long comment on server.js's ORDER EXECUTION block for the exact
+// Binance/Bybit response-shape difference this depends on.
+async function placeOrderViaProxy(key, mode, cred, { symbol, side, amountKind, amount }){
+  const proxyUrl = (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
+  if(!proxyUrl) throw new Error('No verification proxy configured — real order execution requires one (see /server).');
+  const res = await fetch(`${proxyUrl}/api/order`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ exchange: key, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, symbol, side, amountKind, amount }),
+  });
+  const data = await res.json().catch(() => null);
+  if(!data) throw new Error(`No response from proxy (HTTP ${res.status}).`);
+  if(!data.ok) throw new Error(data.message || 'Order failed for an unknown reason.');
+  return data; // { ok:true, orderId, filledBaseQty, filledQuoteQty, avgPrice }
+}
+
+// The exact reverse of a graph edge: if the edge spent `from` (quote) to
+// buy `to` (base) — a BUY — the reverse sells that same `to` back for
+// `from` — a SELL on the identical symbol, and vice versa. Used to walk
+// backward through legs that already executed when a later leg fails —
+// see executeCycleReal below for why this has to be a loop, not a single
+// reversal: failing on leg 3 of A→B→C→A means you're two hops from the
+// anchor (C→B, then B→A), not one.
+function reverseLeg(leg, heldAmount){
+  return leg.side === 'BUY'
+    ? { symbol: leg.symbol, side: 'SELL', amountKind: 'base', amount: heldAmount }
+    : { symbol: leg.symbol, side: 'BUY', amountKind: 'quote', amount: heldAmount };
+}
+
+async function executeCycleReal(cycle, dailyTarget){
+  const at = state.autotrade;
+  const key = at.exchange;
+  const mode = at.mode;
+  const cred = state.exchangeCreds[key]?.[mode];
+  if(!cred || !cred.verified){
+    showAtMessage(`Real execution skipped: ${EXCHANGES[key].label} (${mode}) isn't a VERIFIED connected key. Connect/verify it above first.`, 'error');
+    return;
+  }
+  const startBal = state.balances[key]?.[mode];
+  if(startBal == null){
+    showAtMessage(`Real execution skipped: no known balance for ${EXCHANGES[key].label} (${mode}).`, 'error');
+    return;
+  }
+
+  const spendPct = Math.min(100, Math.max(1, parseFloat(els.atSpendPct.value) || 99));
+  const spendAmount = startBal * (spendPct / 100);
+
+  const legResults = [];
+  let heldAmount = spendAmount;
+  let heldCurrency = cycle.path[0];
+  let failedAtLeg = -1;
+  let failMessage = '';
+
+  for(let i = 0; i < cycle.legs.length; i++){
+    const leg = cycle.legs[i];
+    const amountKind = leg.side === 'BUY' ? 'quote' : 'base';
+    try{
+      const result = await placeOrderViaProxy(key, mode, cred, { symbol: leg.symbol, side: leg.side, amountKind, amount: heldAmount });
+      legResults.push({ leg, result });
+      heldAmount = leg.side === 'BUY' ? result.filledBaseQty : result.filledQuoteQty;
+      heldCurrency = leg.to;
+    }catch(err){
+      failedAtLeg = i;
+      failMessage = err.message;
+      break;
+    }
+  }
+
+  if(failedAtLeg === -1){
+    // All three legs filled — heldAmount is now back in the anchor currency.
+    const profitAmt = heldAmount - spendAmount;
+    const profitPct = spendAmount > 0 ? (profitAmt / spendAmount) * 100 : 0;
+    at.cycles.push({
+      path: cycle.path, profitPct, profitAmt, balanceAfter: null,
+      time: new Date().toLocaleTimeString(), real: true,
+      orders: legResults.map(r => ({ symbol: r.leg.symbol, side: r.leg.side, orderId: r.result.orderId, filledBaseQty: r.result.filledBaseQty, filledQuoteQty: r.result.filledQuoteQty, avgPrice: r.result.avgPrice })),
+    });
+    showAtMessage(`✅ REAL cycle executed on ${EXCHANGES[key].label} (${mode}): ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(profitPct)} (${money(profitAmt)}). Refreshing balance…`, 'info');
+  } else if(failedAtLeg === 0){
+    // Leg 1 never executed — nothing was spent, nothing to unwind.
+    showAtMessage(`⛔ REAL execution stopped before leg 1 on ${EXCHANGES[key].label} (${mode}): ${failMessage}. No funds were moved.`, 'error');
+  } else {
+    // A later leg failed. Walk BACKWARD through every leg that DID
+    // execute, reversing each one in turn — failing on leg 3 of a
+    // A→B→C→A cycle leaves you holding C, which is two hops from the
+    // anchor (C→B, then B→A), not one; a single reversal would silently
+    // strand you on B. Stop and alert immediately if a reversal itself
+    // fails, rather than guessing at a further route.
+    showAtMessage(`⚠ REAL execution failed at leg ${failedAtLeg + 1} on ${EXCHANGES[key].label} (${mode}): ${failMessage}. Holding ${heldCurrency} — attempting to unwind back to ${cycle.path[0]}…`, 'error');
+    const unwindOrders = [];
+    let unwindOk = true;
+    for(let i = failedAtLeg - 1; i >= 0; i--){
+      const leg = cycle.legs[i];
+      try{
+        const unwind = reverseLeg(leg, heldAmount);
+        const unwindResult = await placeOrderViaProxy(key, mode, cred, unwind);
+        unwindOrders.push({ symbol: unwind.symbol, side: unwind.side, orderId: unwindResult.orderId, unwind: true });
+        heldAmount = unwind.side === 'BUY' ? unwindResult.filledBaseQty : unwindResult.filledQuoteQty;
+        heldCurrency = cycle.path[i]; // reversing leg i always lands back on the currency that leg started from
+      }catch(unwindErr){
+        unwindOk = false;
+        showAtMessage(`🛑 UNWIND FAILED partway through, on ${EXCHANGES[key].label} (${mode}): ${unwindErr.message}. You are currently holding ${heldCurrency} on this account, NOT back at ${cycle.path[0]} — check the exchange directly and resolve this manually before doing anything else.`, 'error');
+        stopAutotrade();
+        break;
+      }
+    }
+    if(unwindOk){
+      const profitAmt = heldAmount - spendAmount; // almost always a loss — this is a failed cycle, not a profitable one
+      const profitPct = spendAmount > 0 ? (profitAmt / spendAmount) * 100 : 0;
+      at.cycles.push({
+        path: cycle.path, profitPct, profitAmt, balanceAfter: null,
+        time: new Date().toLocaleTimeString(), real: true, unwound: true,
+        orders: [...legResults.map(r => ({ symbol: r.leg.symbol, side: r.leg.side, orderId: r.result.orderId })), ...unwindOrders],
+      });
+      showAtMessage(`↩ Unwound successfully back to ${cycle.path[0]} on ${EXCHANGES[key].label} (${mode}) after the leg ${failedAtLeg + 1} failure — net ${fmtPct(profitPct)} (${money(profitAmt)}) on this attempt. This was a real loss-limiting trade, not a profitable cycle.`, 'error');
+    }
+  }
+
+  // Either way, the tracked balance/profit numbers only mean anything if
+  // they reflect what the exchange actually reports now — never re-derive
+  // them purely from the leg math above for a real cycle; fees, slippage,
+  // and dust all show up in the real balance and nowhere else.
+  await reverifyStoredCred(key, mode, { silent: true });
+  const newBal = state.balances[key]?.[mode];
+  if(newBal != null){
+    at.currentBalance = newBal;
+    at.dayProfitAmt = newBal - at.startingBalance;
+    at.dayProfitPct = at.startingBalance > 0 ? (at.dayProfitAmt / at.startingBalance) * 100 : 0;
+    if(at.dayProfitPct >= dailyTarget){
+      at.targetReached = true;
+      stopAutotrade();
+      showAtMessage(`🎯 Daily target of ${dailyTarget}% reached — Autotrade stopped for the day. Started at ${money(at.startingBalance)}, now at ${money(at.currentBalance)} (${fmtPct(at.dayProfitPct)}).`, 'info');
+    }
+  }
 }
 
 function executeCycle(cycle, dailyTarget, testMode){
@@ -710,9 +949,9 @@ function startAutotrade(){
   const at = state.autotrade;
   const key = els.atExchange.value;
   const mode = EXCHANGES[key].demoSupported ? state.autotrade.mode : 'live';
-  const startBal = parseFloat(els.atStartBalance.value);
-  if(!isFinite(startBal) || startBal <= 0){
-    showAtMessage('Enter a starting balance for the day before starting Autotrade.', 'error');
+  const startBal = state.balances[key]?.[mode];
+  if(startBal == null || !isFinite(startBal) || startBal <= 0){
+    showAtMessage(`No balance found for ${EXCHANGES[key].label} (${mode}). Connect that account (or click Refresh Balance on its row) above before starting Autotrade.`, 'error');
     return;
   }
   at.exchange = key;
@@ -752,6 +991,7 @@ function stopAutotrade(){
   at.enabled = false;
   at.running = false;
   if(at.timer){ clearInterval(at.timer); at.timer = null; }
+  disarmLiveExecution(); // require an explicit re-arm before Real order execution can run again
   els.atExchange.disabled = false;
   els.atStartBalance.disabled = false;
   els.atAnchor.disabled = false;
@@ -782,11 +1022,9 @@ export function initAutotrade(){
     renderBalances();
     ensureDay();
     els.atTestMode.checked = !!state.autotrade.testMode;
-    const modeForStart = EXCHANGES[state.autotrade.exchange].demoSupported ? state.autotrade.mode : 'live';
-    const savedBal = state.balances[state.autotrade.exchange][modeForStart];
-    if(savedBal != null && !els.atStartBalance.value){
-      els.atStartBalance.value = state.autotrade.startingBalance || savedBal || '';
-    }
+    els.atLiveExecution.checked = false; // always starts unarmed — see restore()
+    els.atArmRow.style.display = 'none';
+    syncStartBalanceField();
     renderAutotradeStatus();
     // If Autotrade was left ON from a previous session (page refresh), resume it.
     if(state.autotrade.enabled && !state.autotrade.targetReached){

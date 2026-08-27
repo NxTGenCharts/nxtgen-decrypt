@@ -78,6 +78,11 @@ export const els = {
   atMinVolume: document.getElementById('atMinVolume'),
   atMinProfit: document.getElementById('atMinProfit'),
   atTestMode: document.getElementById('atTestMode'),
+  atSpendPct: document.getElementById('atSpendPct'),
+  atLiveExecution: document.getElementById('atLiveExecution'),
+  atArmRow: document.getElementById('atArmRow'),
+  atArmPhrase: document.getElementById('atArmPhrase'),
+  atArmBtn: document.getElementById('atArmBtn'),
   atDailyTarget: document.getElementById('atDailyTarget'),
   atInterval: document.getElementById('atInterval'),
   atStartBalance: document.getElementById('atStartBalance'),
@@ -167,6 +172,10 @@ export const state = {
                              // best cycle found each scan regardless of profitability — for
                              // exercising the execute/log/balance-update path only, never for
                              // real decisions. See MIN_PROFIT_FLOOR in autotrade.js.
+    liveExecution: false,   // when true (and armed), places real signed orders via /api/order
+                             // instead of simulating. ALWAYS forced to false on page load and on
+                             // any exchange/mode change — see restore() in autotrade.js. Never
+                             // persisted as "on" across a refresh, on purpose.
   },
 };
 

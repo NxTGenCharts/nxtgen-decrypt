@@ -278,8 +278,28 @@
         <input id="atInterval" type="number" min="5" max="300" step="1" value="15">
       </div>
       <div class="field">
-        <label for="atStartBalance">Today's starting balance (USDT)</label>
-        <input id="atStartBalance" type="number" min="0" step="1" placeholder="e.g. 1000">
+        <label for="atStartBalance">Today's starting balance (USDT) <span class="pill" style="margin-left:4px;color:var(--amber);border-color:var(--amber-dim);" title="Locked to the actual connected balance for the selected exchange/mode above — connect or Refresh Balance to change it.">AUTO</span></label>
+        <input id="atStartBalance" type="number" min="0" step="1" readonly placeholder="Connect an account above first">
+      </div>
+      <div class="field">
+        <label for="atSpendPct" title="What share of the connected account's balance to commit to each cycle. Real execution only.">Spend per cycle (%)</label>
+        <input id="atSpendPct" type="number" min="1" max="100" step="1" value="99">
+      </div>
+      <div class="field" style="grid-column:1 / -1;">
+        <label for="atLiveExecution" title="When ON, Autotrade signs and sends real MARKET orders to the connected exchange account for all three legs of a cycle — spending and receiving real (or, in Demo mode, demo) funds. When OFF (default), Autotrade only simulates the arithmetic against the tracked balance and never contacts the exchange to trade.">
+          Real order execution <span class="pill" style="margin-left:4px;color:var(--red);border-color:var(--red-line);">places real orders — reversible only by trading back</span>
+        </label>
+        <label class="toggle-check">
+          <input id="atLiveExecution" type="checkbox">
+          <span>sign and send real orders instead of simulating (requires a VERIFIED key; disabled together with Test mode)</span>
+        </label>
+        <div id="atArmRow" style="display:none;margin-top:8px;gap:8px;align-items:center;" class="kv-field">
+          <input id="atArmPhrase" type="text" placeholder="Type PLACE REAL ORDERS to arm" style="flex:1;">
+          <button type="button" class="primary" id="atArmBtn">Arm</button>
+        </div>
+        <div style="font-size:11px;color:var(--dim);margin-top:6px;">
+          Resets to OFF every time this page loads or the exchange/mode/Autotrade selection changes — it is never left armed silently across a refresh.
+        </div>
       </div>
       <div class="btn-row">
         <button class="primary live-toggle" id="atToggleBtn"><span class="dot"></span><span class="btn-label">Start Autotrade</span></button>
