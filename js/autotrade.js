@@ -308,29 +308,6 @@ function maskProxyUrl(url){
   return url.length > shown ? url.slice(0, shown) + '…' : url;
 }
 
-els.connectRows.addEventListener('click', async (e) => {
-  const revealBtn = e.target.closest('.reveal-btn');
-  if(revealBtn){
-    const row = e.target.closest('.connect-row');
-    const input = row.querySelector(revealBtn.dataset.field === 'key' ? '.ck-key' : '.ck-secret');
-    const showing = input.type === 'text';
-    input.type = showing ? 'password' : 'text';
-    revealBtn.textContent = showing ? 'SHOW' : 'HIDE';
-    return;
-  }
-
-  const modeBtn = e.target.closest('.mode-btn[data-mode]');
-  if(modeBtn){
-    const row = e.target.closest('.connect-row');
-    const key = row.dataset.exchange;
-    if(!EXCHANGES[key].demoSupported) return; // Bitget: nothing to switch
-    state.exchangeMode[key] = modeBtn.dataset.mode;
-    persist();
-    renderConnectRows();
-    renderBalances();
-    return;
-  }
-
 // Re-checks an already-saved key against the exchange and refreshes its
 // verified flag + balance. Used by both "Refresh Balance" (on-demand, any
 // state) and "Reconnect" (which used to just flip a flag without actually
@@ -393,6 +370,29 @@ async function refreshAllConnectedBalances(){
   }
 }
 const BALANCE_REFRESH_INTERVAL_MS = 90 * 1000; // matches a "reasonably fresh without hammering the proxy" cadence
+
+els.connectRows.addEventListener('click', async (e) => {
+  const revealBtn = e.target.closest('.reveal-btn');
+  if(revealBtn){
+    const row = e.target.closest('.connect-row');
+    const input = row.querySelector(revealBtn.dataset.field === 'key' ? '.ck-key' : '.ck-secret');
+    const showing = input.type === 'text';
+    input.type = showing ? 'password' : 'text';
+    revealBtn.textContent = showing ? 'SHOW' : 'HIDE';
+    return;
+  }
+
+  const modeBtn = e.target.closest('.mode-btn[data-mode]');
+  if(modeBtn){
+    const row = e.target.closest('.connect-row');
+    const key = row.dataset.exchange;
+    if(!EXCHANGES[key].demoSupported) return; // Bitget: nothing to switch
+    state.exchangeMode[key] = modeBtn.dataset.mode;
+    persist();
+    renderConnectRows();
+    renderBalances();
+    return;
+  }
 
   const retryBtn = e.target.closest('.retry-verify-btn');
   if(retryBtn){
