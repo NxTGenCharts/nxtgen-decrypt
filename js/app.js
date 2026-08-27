@@ -9,6 +9,7 @@ import { switchTabAll } from './ui.js';
 import { runScan, startLiveScan, stopLiveScan } from './triangular.js';
 import { runXScan } from './cross-exchange.js';
 import { initAutotrade } from './autotrade.js';
+import { initFuturesEngine } from './futures-ui.js';
 
 els.tabOverviewBtn.addEventListener('click', () => switchTabAll('overview'));
 els.ovRunBtn.addEventListener('click', () => { runScan(); runXScan(); });
@@ -18,6 +19,7 @@ els.ovRunBtn.addEventListener('click', () => { runScan(); runXScan(); });
 els.tabTriBtn.addEventListener('click', () => switchTabAll('tri'));
 els.tabXBtn.addEventListener('click', () => switchTabAll('x'));
 els.tabAutoBtn.addEventListener('click', () => switchTabAll('auto'));
+els.tabFuturesBtn.addEventListener('click', () => switchTabAll('futures'));
 
 els.liveBtn.addEventListener('click', () => { state.isLive ? stopLiveScan() : startLiveScan(); });
 
@@ -26,3 +28,4 @@ els.xScanBtn.addEventListener('click', runXScan);
 
 window.addEventListener('load', runScan);
 initAutotrade();
+initFuturesEngine();

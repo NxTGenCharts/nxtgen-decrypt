@@ -96,6 +96,37 @@ export const els = {
   atProgressBar: document.getElementById('atProgressBar'),
   atProgressLabel: document.getElementById('atProgressLabel'),
   atCycleLog: document.getElementById('atCycleLog'),
+  // --- AI Futures Engine tab ---
+  tabFuturesBtn: document.getElementById('tabFuturesBtn'),
+  panelFutures: document.getElementById('panelFutures'),
+  fuStatus: document.getElementById('fuStatus'),
+  fuModeBtn: document.getElementById('fuModeBtn'),
+  fuSelectivityToggle: document.getElementById('fuSelectivityToggle'),
+  fuExchange: document.getElementById('fuExchange'),
+  fuMinConfidence: document.getElementById('fuMinConfidence'),
+  fuMinRR: document.getElementById('fuMinRR'),
+  fuMinNetProfit: document.getElementById('fuMinNetProfit'),
+  fuRiskPct: document.getElementById('fuRiskPct'),
+  fuLeverage: document.getElementById('fuLeverage'),
+  fuRegime: document.getElementById('fuRegime'),
+  fuConfidenceAvg: document.getElementById('fuConfidenceAvg'),
+  fuOpenPositions: document.getElementById('fuOpenPositions'),
+  fuTradesToday: document.getElementById('fuTradesToday'),
+  fuWins: document.getElementById('fuWins'),
+  fuLosses: document.getElementById('fuLosses'),
+  fuWinRate: document.getElementById('fuWinRate'),
+  fuGrossPnl: document.getElementById('fuGrossPnl'),
+  fuFees: document.getElementById('fuFees'),
+  fuFunding: document.getElementById('fuFunding'),
+  fuSlippage: document.getElementById('fuSlippage'),
+  fuNetPnl: document.getElementById('fuNetPnl'),
+  fuProfitFactor: document.getElementById('fuProfitFactor'),
+  fuDailyDrawdown: document.getElementById('fuDailyDrawdown'),
+  fuMaxDrawdown: document.getElementById('fuMaxDrawdown'),
+  fuScannerRows: document.getElementById('fuScannerRows'),
+  fuHistoryRows: document.getElementById('fuHistoryRows'),
+  fuExplain: document.getElementById('fuExplain'),
+  fuMessages: document.getElementById('fuMessages'),
 };
 
 // Single mutable state object. Every other module imports `state` and
@@ -176,6 +207,29 @@ export const state = {
                              // instead of simulating. ALWAYS forced to false on page load and on
                              // any exchange/mode change — see restore() in autotrade.js. Never
                              // persisted as "on" across a refresh, on purpose.
+  },
+
+  // ---- AI Futures Engine (PAPER MODE only — see js/futures/*.js) ----
+  // Market data driving this is currently the synthetic generator in
+  // js/futures/mockMarket.js (Phase 1: strategy/scoring/dashboard).
+  // Wiring real Binance/Bybit USDT-M futures data is a separate phase;
+  // nothing below assumes mock data specifically.
+  futures: {
+    running: false,
+    timer: null,
+    mode: 'PAPER',           // PAPER only for now — LIVE requires the backend/key-security work called out in the architecture assessment
+    highSelectivity: false,
+    exchange: 'binance',
+    minConfidence: 60,
+    minRiskReward: 1.2,
+    minNetProfitPct: 0.30,
+    riskPctPerTrade: 0.375,
+    leverage: 2,
+    dayState: null,           // built lazily by futures-ui.js: { equity, startingEquity, trades, wins, losses, ... , positions:[] }
+    tradeHistory: [],
+    lastRows: [],
+    lastRegimeSummary: null,
+    lastExplainIndex: null,
   },
 };
 

@@ -16,6 +16,7 @@
 <link rel="stylesheet" href="./css/main.css">
 <link rel="stylesheet" href="./css/components.css">
 <link rel="stylesheet" href="./css/responsive.css">
+<link rel="stylesheet" href="./css/futures.css">
 </head>
 <body>
 <div class="wrap">
@@ -49,6 +50,7 @@
     <button class="navtab" id="tabTriBtn" role="tab" aria-selected="false"><span class="ic">&#9651;</span>Triangular Arbitrage</button>
     <button class="navtab" id="tabXBtn" role="tab" aria-selected="false"><span class="ic">&#8645;</span>Cross-Exchange</button>
     <button class="navtab" id="tabAutoBtn" role="tab" aria-selected="false"><span class="ic">&#9889;</span>Autotrade &amp; Balances</button>
+    <button class="navtab" id="tabFuturesBtn" role="tab" aria-selected="false"><span class="ic">&#9670;</span>AI Futures Engine</button>
   </nav>
 
   <!-- ============ OVERVIEW ============ -->
@@ -327,10 +329,104 @@
     </div>
 
     <footer>
-      <b>Scope —</b> Autotrade only trades <b>Triangular Arbitrage</b>, only on <b>Spot</b> markets, and only on the single exchange selected above. Cross-Exchange scanning and futures are not included; futures may come in a future update.<br>
+      <b>Scope —</b> Autotrade only trades <b>Triangular Arbitrage</b>, only on <b>Spot</b> markets, and only on the single exchange selected above. Cross-Exchange scanning is not included. Futures trading now lives in its own AI Futures Engine tab (paper mode).<br>
       <b>How it decides —</b> each pass, it ranks every triangular cycle on the selected exchange and, if the single most profitable one clears both your min-profit field and the hard 0.8% floor, it "executes" it — this compounds a running day-balance rather than placing a real order (see the notice above).<br>
       <b>Daily target —</b> once today's simulated balance is up 11% (or your configured target) from the starting balance you entered, Autotrade stops itself automatically for the day, however many cycles it took to get there, and the summary above is the full record.<br>
       This is not financial advice, and simulated results will not exactly match a real fill — depth, slippage, and timing between the three legs all affect a real execution.
+    </footer>
+  </div>
+
+  <!-- ============ AI FUTURES ENGINE ============ -->
+  <div class="panel" id="panelFutures">
+
+    <div class="warn-banner">
+      <b>PAPER MODE only, synthetic market data.</b> This engine is Phase 1 of the build: the scoring/regime/setup/risk/no-trade logic is real and runs every cycle, but the price data driving it is currently a seeded random-walk generator (see <code>js/futures/mockMarket.js</code>), not live Binance/Bybit futures feeds — that's Phase 2. Nothing here places, or is capable of placing, a real order; there is no LIVE MODE in this build. Whatever win rate / expectancy you see below is whatever the synthetic price path actually produced against these rules — it is not tuned to look good.
+    </div>
+
+    <div class="ov-head">
+      <h2>AI Futures Engine <span class="pill" id="fuStatus" style="margin-left:8px;">PAUSED · PAPER</span></h2>
+      <button class="primary" id="fuModeBtn">Start Paper Engine</button>
+    </div>
+
+    <div class="controls">
+      <div class="field">
+        <label for="fuExchange">Exchange</label>
+        <select id="fuExchange"><option value="binance">Binance Futures</option><option value="bybit">Bybit Derivatives</option></select>
+      </div>
+      <div class="field">
+        <label for="fuMinConfidence">Min confidence</label>
+        <input id="fuMinConfidence" type="number" min="0" max="100" step="1" value="60">
+      </div>
+      <div class="field">
+        <label for="fuMinRR">Min risk/reward</label>
+        <input id="fuMinRR" type="number" min="0.5" max="5" step="0.1" value="1.2">
+      </div>
+      <div class="field">
+        <label for="fuMinNetProfit">Min expected net profit (%)</label>
+        <input id="fuMinNetProfit" type="number" min="0" max="3" step="0.05" value="0.30">
+      </div>
+      <div class="field">
+        <label for="fuRiskPct">Risk per trade (%)</label>
+        <input id="fuRiskPct" type="number" min="0.1" max="1" step="0.05" value="0.375">
+      </div>
+      <div class="field">
+        <label for="fuLeverage">Leverage</label>
+        <input id="fuLeverage" type="number" min="1" max="3" step="1" value="2">
+      </div>
+      <div class="field">
+        <label for="fuSelectivityToggle" title="Minimum confidence 82, minimum R:R 1.5, and every other filter tightened. May take zero trades for long stretches — that's by design.">High Selectivity Mode</label>
+        <label class="toggle-check">
+          <input id="fuSelectivityToggle" type="checkbox">
+          <span>fewer, higher-conviction setups only</span>
+        </label>
+      </div>
+    </div>
+
+    <div id="fuMessages"></div>
+
+    <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);">
+      <div class="ov-card"><span class="ov-label">Market Regime</span><span class="ov-value" id="fuRegime" style="font-size:15px;">—</span></div>
+      <div class="ov-card"><span class="ov-label">Avg. Confidence (approved)</span><span class="ov-value" id="fuConfidenceAvg">—</span></div>
+      <div class="ov-card"><span class="ov-label">Open Positions</span><span class="ov-value" id="fuOpenPositions">0 / 3</span></div>
+      <div class="ov-card"><span class="ov-label">Trades Today</span><span class="ov-value" id="fuTradesToday">0</span></div>
+      <div class="ov-card"><span class="ov-label">Wins</span><span class="ov-value" id="fuWins">0</span></div>
+      <div class="ov-card"><span class="ov-label">Losses</span><span class="ov-value" id="fuLosses">0</span></div>
+      <div class="ov-card ov-highlight"><span class="ov-label">Win Rate</span><span class="ov-value" id="fuWinRate">—</span></div>
+      <div class="ov-card"><span class="ov-label">Profit Factor</span><span class="ov-value" id="fuProfitFactor">—</span></div>
+      <div class="ov-card"><span class="ov-label">Gross P&amp;L</span><span class="ov-value" id="fuGrossPnl">$0.00</span></div>
+      <div class="ov-card"><span class="ov-label">Trading Fees</span><span class="ov-value" id="fuFees">-$0.00</span></div>
+      <div class="ov-card"><span class="ov-label">Funding</span><span class="ov-value" id="fuFunding">-$0.00</span></div>
+      <div class="ov-card"><span class="ov-label">Slippage</span><span class="ov-value" id="fuSlippage">-$0.00</span></div>
+      <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value" id="fuNetPnl">$0.00</span></div>
+      <div class="ov-card"><span class="ov-label">Daily Drawdown</span><span class="ov-value" id="fuDailyDrawdown">0.00%</span></div>
+      <div class="ov-card"><span class="ov-label">Max Drawdown</span><span class="ov-value" id="fuMaxDrawdown">0.00%</span></div>
+    </div>
+
+    <div class="ov-block" style="margin-top:18px;">
+      <div class="ov-block-title">Live Opportunity Scanner</div>
+      <div class="fu-row fu-head">
+        <div>Symbol</div><div>Exch</div><div>Dir</div><div>Setup</div><div>Conf</div><div>Entry</div><div>Stop</div><div>TP1</div>
+        <div>Exp. Gross</div><div>Exp. Net</div><div>R:R</div><div>Liq.</div><div>Regime</div><div>Status</div>
+      </div>
+      <div id="fuScannerRows"><div class="fu-empty">No scan run yet — click Start Paper Engine.</div></div>
+      <div class="ov-block-body" style="margin-top:10px;font-size:12px;color:var(--dim);">Click any row to see the AI's reasoning below.</div>
+      <pre id="fuExplain" class="fu-explain">Click a row above to see why it was approved or rejected.</pre>
+    </div>
+
+    <div class="ov-block" style="margin-top:18px;">
+      <div class="ov-block-title">Trade History (this session)</div>
+      <div class="fu-hrow fu-head">
+        <div>Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div>
+        <div>Gross</div><div>Fees</div><div>Net</div><div>Conf</div><div>Strategy</div><div>Exit Reason</div><div>Duration</div>
+      </div>
+      <div id="fuHistoryRows"><div class="fu-empty">No closed trades yet this session.</div></div>
+    </div>
+
+    <footer>
+      <b>Scope —</b> USDT-margined perpetuals on Binance Futures / Bybit Derivatives only, across BTC/ETH/SOL/BNB/XRP/DOGE. Default risk 0.375% of equity per trade (configurable 0.25–1%), max 3 simultaneous positions, max 1.5% total portfolio risk, max 2% daily loss, pause after 3 consecutive losses — all enforced by the No-Trade Engine before any position opens.<br>
+      <b>Win rate vs. expectancy —</b> the dashboard reports whatever win rate and profit factor the session's trades actually produced. A high win rate with poor expectancy is not something this build is tuned toward, and it will show a losing session honestly if that's what happens against the current (synthetic) price data.<br>
+      <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet — see the architecture notes from the initial assessment. Live order execution additionally requires server-side key storage and an execution/reconciliation service. Paper mode here is running the real decision logic today so it can be validated before either of those is built.<br>
+      This is not financial advice.
     </footer>
   </div>
 

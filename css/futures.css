@@ -1,0 +1,85 @@
+/* =============================================================
+   futures.css — AI Futures Engine tab only. Reuses color/spacing
+   variables already defined in main.css; no variables redefined
+   here so this stays in sync with the rest of the terminal's theme.
+   ============================================================= */
+
+#panelFutures .fu-row,
+#panelFutures .fu-hrow {
+  display: grid;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+#panelFutures .fu-row {
+  grid-template-columns: 1fr 0.7fr 0.6fr 1.3fr 0.6fr 0.9fr 0.9fr 0.9fr 0.9fr 0.9fr 0.6fr 0.6fr 1fr 1fr;
+}
+
+#panelFutures .fu-hrow {
+  grid-template-columns: 0.9fr 0.7fr 0.9fr 0.6fr 0.9fr 0.9fr 0.5fr 0.9fr 0.8fr 0.9fr 0.6fr 1.2fr 1fr 0.7fr;
+}
+
+#panelFutures .fu-row.fu-head,
+#panelFutures .fu-hrow.fu-head {
+  font-weight: 600;
+  color: var(--dim);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid var(--line-soft);
+  cursor: default;
+}
+
+#panelFutures .fu-row:not(.fu-head) {
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+#panelFutures .fu-row:not(.fu-head):hover {
+  background: rgba(255,255,255,0.03);
+}
+
+#panelFutures .fu-row.fu-approved .fu-status-cell { color: var(--green); font-weight: 600; }
+#panelFutures .fu-row.fu-rejected .fu-status-cell { color: var(--dim); }
+#panelFutures .fu-row.fu-rejected { opacity: 0.7; }
+
+#panelFutures .fu-hrow.fu-win { border-left: 2px solid var(--green); }
+#panelFutures .fu-hrow.fu-loss { border-left: 2px solid var(--red); }
+
+#panelFutures .fu-empty {
+  padding: 18px 10px;
+  color: var(--dim);
+  font-size: 13px;
+  text-align: center;
+}
+
+#panelFutures .fu-explain {
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 8px 0 0;
+  color: var(--ink);
+}
+
+@media (max-width: 900px) {
+  #panelFutures .fu-row,
+  #panelFutures .fu-hrow {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  #panelFutures .fu-row.fu-head,
+  #panelFutures .fu-hrow.fu-head {
+    display: none;
+  }
+  #panelFutures .fu-row > div::before,
+  #panelFutures .fu-hrow > div::before {
+    content: attr(data-label);
+  }
+}

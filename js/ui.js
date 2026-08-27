@@ -61,18 +61,19 @@ export function renderOverview(){
     : 'No scan run yet. Open the Cross-Exchange tab and click Scan Markets, or use Run Full Scan above.';
 }
 
-// Single source of truth for tab switching across all 3 panels.
+// Single source of truth for tab switching across all panels.
+const TAB_KEYS = ['overview', 'tri', 'x', 'auto', 'futures'];
+const TAB_BTN_ELS = { overview: 'tabOverviewBtn', tri: 'tabTriBtn', x: 'tabXBtn', auto: 'tabAutoBtn', futures: 'tabFuturesBtn' };
+const TAB_PANEL_ELS = { overview: 'panelOverview', tri: 'panelTri', x: 'panelX', auto: 'panelAuto', futures: 'panelFutures' };
+
 export function switchTabAll(which){
-  els.tabOverviewBtn.classList.toggle('active', which === 'overview');
-  els.tabTriBtn.classList.toggle('active', which === 'tri');
-  els.tabXBtn.classList.toggle('active', which === 'x');
-  els.tabAutoBtn.classList.toggle('active', which === 'auto');
-  els.panelOverview.classList.toggle('active', which === 'overview');
-  els.panelTri.classList.toggle('active', which === 'tri');
-  els.panelX.classList.toggle('active', which === 'x');
-  els.panelAuto.classList.toggle('active', which === 'auto');
-  els.tabOverviewBtn.setAttribute('aria-selected', which === 'overview');
-  els.tabTriBtn.setAttribute('aria-selected', which === 'tri');
-  els.tabXBtn.setAttribute('aria-selected', which === 'x');
-  els.tabAutoBtn.setAttribute('aria-selected', which === 'auto');
+  TAB_KEYS.forEach(key => {
+    const btn = els[TAB_BTN_ELS[key]];
+    const panel = els[TAB_PANEL_ELS[key]];
+    if(!btn || !panel) return; // tolerate a tab whose markup isn't present
+    const active = which === key;
+    btn.classList.toggle('active', active);
+    panel.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active);
+  });
 }
