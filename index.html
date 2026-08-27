@@ -286,12 +286,12 @@
         <input id="atSpendPct" type="number" min="1" max="100" step="1" value="99">
       </div>
       <div class="field" style="grid-column:1 / -1;">
-        <label for="atLiveExecution" title="When ON, Autotrade signs and sends real MARKET orders to the connected exchange account for all three legs of a cycle — spending and receiving real (or, in Demo mode, demo) funds. When OFF (default), Autotrade only simulates the arithmetic against the tracked balance and never contacts the exchange to trade.">
+        <label for="atLiveExecution" title="When ON, Autotrade signs and sends real MARKET orders to the connected exchange account for all three legs of a cycle — spending and receiving real (or, in Demo mode, demo) funds. When OFF (default), Autotrade only simulates the arithmetic against the tracked balance and never contacts the exchange to trade. Combining this with Test mode is only allowed in Demo — it forces a real demo order regardless of profitability, so you can verify the pipeline actually works before trusting it with a profitable Live opportunity.">
           Real order execution <span class="pill" style="margin-left:4px;color:var(--red);border-color:var(--red-line);">places real orders — reversible only by trading back</span>
         </label>
         <label class="toggle-check">
           <input id="atLiveExecution" type="checkbox">
-          <span>sign and send real orders instead of simulating (requires a VERIFIED key; disabled together with Test mode)</span>
+          <span>sign and send real orders instead of simulating (requires a VERIFIED key; combined with Test mode only in Demo)</span>
         </label>
         <div id="atArmRow" style="display:none;margin-top:8px;gap:8px;align-items:center;" class="kv-field">
           <input id="atArmPhrase" type="text" placeholder="Type PLACE REAL ORDERS to arm" style="flex:1;">

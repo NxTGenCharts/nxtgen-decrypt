@@ -595,13 +595,22 @@ els.atModeDemo.addEventListener('click', () => {
   state.autotrade.mode = 'demo'; syncAtModeToggle(); renderBalances();
 });
 
+// Test mode + Real execution together is only meaningful/safe in Demo:
+// it means "place a real order on the exchange's demo account even when
+// it's not profitable" — which is exactly how you'd verify the whole real
+// order pipeline (signing, fills, balance updates) actually works before
+// ever pointing it at a genuinely profitable Live opportunity. In Live
+// mode there is no legitimate reason to deliberately force a real loss,
+// so the exclusion stays absolute there.
+function currentAtMode(){
+  const key = els.atExchange.value;
+  return EXCHANGES[key].demoSupported ? state.autotrade.mode : 'live';
+}
+
 els.atTestMode.addEventListener('change', () => {
   state.autotrade.testMode = els.atTestMode.checked;
-  if(state.autotrade.testMode && state.autotrade.liveExecution){
-    // Mutually exclusive by design (see the check in tick()) — turning one
-    // on always turns the other off rather than letting both sit checked.
+  if(state.autotrade.testMode && state.autotrade.liveExecution && currentAtMode() !== 'demo'){
     state.autotrade.liveExecution = false;
-    els.atLiveExecution.checked = false;
     disarmLiveExecution();
   }
   persist();
@@ -622,10 +631,13 @@ els.atLiveExecution.addEventListener('change', () => {
     persist();
     return;
   }
-  if(state.autotrade.testMode){
-    // Same exclusion from the other direction.
+  if(state.autotrade.testMode && currentAtMode() !== 'live'){
+    showAtMessage('Test mode stays on — in Demo, Real order execution + Test mode together will place real demo orders regardless of profitability, so you can verify the pipeline works.', 'info');
+  } else if(state.autotrade.testMode){
+    // Live mode: the exclusion is absolute — never force a real live loss on purpose.
     els.atTestMode.checked = false;
     state.autotrade.testMode = false;
+    showAtMessage('Test mode was turned off — it cannot be combined with Real order execution in Live mode.', 'error');
   }
   // Checking the box only reveals the arm step — it does NOT arm anything
   // by itself. state.autotrade.liveExecution stays false until the exact
@@ -637,7 +649,7 @@ els.atLiveExecution.addEventListener('change', () => {
 
 els.atArmBtn.addEventListener('click', () => {
   const key = els.atExchange.value;
-  const mode = EXCHANGES[key].demoSupported ? state.autotrade.mode : 'live';
+  const mode = currentAtMode();
   const cred = state.exchangeCreds[key]?.[mode];
   if(els.atArmPhrase.value.trim() !== ARM_PHRASE){
     showAtMessage(`Type exactly "${ARM_PHRASE}" to arm real order execution.`, 'error');
@@ -645,6 +657,10 @@ els.atArmBtn.addEventListener('click', () => {
   }
   if(key === 'bitget' || !cred || !cred.verified){
     showAtMessage(`Real order execution needs a VERIFIED connected key for ${EXCHANGES[key].label} (${mode}) — connect/verify it above first.`, 'error');
+    return;
+  }
+  if(state.autotrade.testMode && mode !== 'demo'){
+    showAtMessage('Cannot arm: Test mode + Real order execution together is only allowed in Demo mode. Switch to Demo, or turn Test mode off first.', 'error');
     return;
   }
   state.autotrade.liveExecution = true;
@@ -706,7 +722,9 @@ function renderCycleLog(){
     const badge = c.real
       ? (c.unwound
           ? ' <span class="pill" style="color:var(--red);border-color:var(--red-line);" title="A later leg failed and this position was unwound back to the anchor with real orders.">UNWOUND</span>'
-          : ' <span class="pill tr-yes" title="Real signed orders were placed on the exchange for all three legs.">REAL</span>')
+          : c.forcedTest
+            ? ' <span class="pill" style="color:var(--red);border-color:var(--red-line);" title="A real order was placed on the exchange regardless of profitability, to verify the execution pipeline.">REAL TEST</span>'
+            : ' <span class="pill tr-yes" title="Real signed orders were placed on the exchange for all three legs.">REAL</span>')
       : (c.testMode ? ' <span class="pill" style="color:var(--red);border-color:var(--red-line);">TEST</span>' : '');
     const balCell = c.balanceAfter != null ? money(c.balanceAfter) : '<span title="Real cycles don\'t compute a local balance — see the refreshed CURRENT BALANCE above instead.">—</span>';
     return `<div class="cycle-log-row"${(c.testMode || c.real) ? ' style="outline:1px solid var(--red-line);"' : ''}>
@@ -748,19 +766,22 @@ async function tick(){
     const best = ranked[0];
     const testMode = !!at.testMode;
     const liveExecution = !!at.liveExecution;
+    const forcedRealDemoTest = testMode && liveExecution && at.mode === 'demo';
 
-    if(testMode && liveExecution){
-      // Should be unreachable — the UI enforces these as mutually exclusive
-      // — but this is exactly the kind of state a real bot must never act
-      // on if it somehow occurs, since "ignore the profit floor" combined
-      // with "place real orders" means deliberately losing real money.
-      showAtMessage('Autotrade stopped: Test mode and Real order execution were both on at once, which should never happen. No order was placed.', 'error');
+    if(testMode && liveExecution && at.mode !== 'demo'){
+      // Should be unreachable outside Demo — the UI enforces this — but a
+      // real bot must never act on this combination if it somehow occurs
+      // anywhere else, since it would mean deliberately placing a real
+      // losing order in Live.
+      showAtMessage('Autotrade stopped: Test mode and Real order execution were both on outside Demo mode, which should never happen. No order was placed.', 'error');
       stopAutotrade();
-    } else if(liveExecution && best && best.profitPct >= minProfitPct){
-      // Real execution NEVER honors Test mode's floor bypass — that bypass
-      // exists purely to exercise the simulated path, and must never touch
-      // an exchange.
-      await executeCycleReal(best, dailyTarget);
+    } else if(liveExecution && best && (forcedRealDemoTest || best.profitPct >= minProfitPct)){
+      // forcedRealDemoTest is the one place Real execution is allowed to
+      // ignore the profit floor — Demo-only, and only because you
+      // explicitly armed both at once specifically to verify the real
+      // order pipeline (signing, fills, balance updates) works before
+      // ever pointing it at a genuinely profitable Live opportunity.
+      await executeCycleReal(best, dailyTarget, forcedRealDemoTest);
     } else if(best && (testMode || best.profitPct >= minProfitPct)){
       executeCycle(best, dailyTarget, testMode);
     } else {
@@ -810,7 +831,7 @@ function reverseLeg(leg, heldAmount){
     : { symbol: leg.symbol, side: 'BUY', amountKind: 'quote', amount: heldAmount };
 }
 
-async function executeCycleReal(cycle, dailyTarget){
+async function executeCycleReal(cycle, dailyTarget, forcedTest){
   const at = state.autotrade;
   const key = at.exchange;
   const mode = at.mode;
@@ -823,6 +844,9 @@ async function executeCycleReal(cycle, dailyTarget){
   if(startBal == null){
     showAtMessage(`Real execution skipped: no known balance for ${EXCHANGES[key].label} (${mode}).`, 'error');
     return;
+  }
+  if(forcedTest){
+    showAtMessage(`⚠ FORCED REAL TEST — placing real ${EXCHANGES[key].label} demo orders for a cycle at ${fmtPct(cycle.profitPct)}, ignoring the profit floor on purpose, to verify the execution pipeline. This is a real demo trade, expected to likely lose a small amount.`, 'error');
   }
 
   const spendPct = Math.min(100, Math.max(1, parseFloat(els.atSpendPct.value) || 99));
@@ -855,10 +879,10 @@ async function executeCycleReal(cycle, dailyTarget){
     const profitPct = spendAmount > 0 ? (profitAmt / spendAmount) * 100 : 0;
     at.cycles.push({
       path: cycle.path, profitPct, profitAmt, balanceAfter: null,
-      time: new Date().toLocaleTimeString(), real: true,
+      time: new Date().toLocaleTimeString(), real: true, forcedTest: !!forcedTest,
       orders: legResults.map(r => ({ symbol: r.leg.symbol, side: r.leg.side, orderId: r.result.orderId, filledBaseQty: r.result.filledBaseQty, filledQuoteQty: r.result.filledQuoteQty, avgPrice: r.result.avgPrice })),
     });
-    showAtMessage(`✅ REAL cycle executed on ${EXCHANGES[key].label} (${mode}): ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(profitPct)} (${money(profitAmt)}). Refreshing balance…`, 'info');
+    showAtMessage(`✅ REAL${forcedTest ? ' (forced test)' : ''} cycle executed on ${EXCHANGES[key].label} (${mode}): ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(profitPct)} (${money(profitAmt)}). Refreshing balance…`, 'info');
   } else if(failedAtLeg === 0){
     // Leg 1 never executed — nothing was spent, nothing to unwind.
     showAtMessage(`⛔ REAL execution stopped before leg 1 on ${EXCHANGES[key].label} (${mode}): ${failMessage}. No funds were moved.`, 'error');
