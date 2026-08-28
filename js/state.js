@@ -58,6 +58,8 @@ export const els = {
   xFilterExBitget: document.getElementById('xFilterExBitget'),
   xFilterExBinance: document.getElementById('xFilterExBinance'),
   xFilterExBybit: document.getElementById('xFilterExBybit'),
+  xFilterExMexc: document.getElementById('xFilterExMexc'),
+  xFilterExGateio: document.getElementById('xFilterExGateio'),
   // --- presentation-layer elements (dashboard, nav, badges) ---
   tabOverviewBtn: document.getElementById('tabOverviewBtn'),
   panelOverview: document.getElementById('panelOverview'),
@@ -73,6 +75,8 @@ export const els = {
   badgeBitget: document.getElementById('badgeBitget'),
   badgeBinance: document.getElementById('badgeBinance'),
   badgeBybit: document.getElementById('badgeBybit'),
+  badgeMexc: document.getElementById('badgeMexc'),
+  badgeGateio: document.getElementById('badgeGateio'),
   // --- Autotrade & Balances tab ---
   tabAutoBtn: document.getElementById('tabAutoBtn'),
   panelAuto: document.getElementById('panelAuto'),
@@ -145,7 +149,7 @@ export const els = {
 export const state = {
   // Cache of the last successful per-exchange pairs fetch, so switching tabs
   // (or re-scanning cross-exchange) doesn't force a redundant round-trip.
-  pairsCache: {}, // { bitget: [...], binance: [...], bybit: [...] }
+  pairsCache: {}, // { bitget: [...], binance: [...], bybit: [...], mexc: [...], gateio: [...] }
 
   // ---- Live Scan state: mirrors main.py's `tracked` dict + NEW/OPEN/CLOSED lifecycle ----
   trackedCycles: new Map(), // canonicalKey -> { number, firstSeen }
@@ -159,7 +163,7 @@ export const state = {
   coinNetworkCache: {},
 
   // Exchange badge + overview dashboard state, fed only by real scan results.
-  exchangeState: { bitget:'idle', binance:'idle', bybit:'idle' },
+  exchangeState: { bitget:'idle', binance:'idle', bybit:'idle', mexc:'idle', gateio:'idle' },
 
   lastTri: null, // populated after each triangular scan from real results
   lastX: null,   // populated after each cross-exchange scan from real results
@@ -184,16 +188,21 @@ export const state = {
     bitget:  { live:null, demo:null },
     binance: { live:null, demo:null },
     bybit:   { live:null, demo:null },
+    mexc:    { live:null, demo:null },
+    gateio:  { live:null, demo:null },
   }, // each slot: { apiKey, connectedAt } — secret is stored but never rendered back
 
-  // ---- Which network each exchange is currently set to. Bitget is always 'live'. ----
-  exchangeMode: { bitget:'live', binance:'live', bybit:'live' },
+  // ---- Which network each exchange is currently set to. Bitget, MEXC and
+  // Gate.io have no public Demo Trading environment, so they're always 'live'. ----
+  exchangeMode: { bitget:'live', binance:'live', bybit:'live', mexc:'live', gateio:'live' },
 
   // ---- Manually-entered balances, per exchange+mode (spot only) ----
   balances: {
     bitget:  { live:null },
     binance: { live:null, demo:null },
     bybit:   { live:null, demo:null },
+    mexc:    { live:null },
+    gateio:  { live:null },
   },
 
   // ---- Autotrade (Triangular-only) simulation state ----
@@ -246,4 +255,4 @@ export const state = {
   },
 };
 
-export const EXCHANGE_BADGE_IDS = { bitget:'badgeBitget', binance:'badgeBinance', bybit:'badgeBybit' };
+export const EXCHANGE_BADGE_IDS = { bitget:'badgeBitget', binance:'badgeBinance', bybit:'badgeBybit', mexc:'badgeMexc', gateio:'badgeGateio' };

@@ -111,10 +111,72 @@ export async function loadBybit(){
   return pairs;
 }
 
+// MEXC's Spot API v3 is intentionally modeled on Binance's — same
+// exchangeInfo/ticker/24hr shape, same bid/ask-on-the-ticker convenience —
+// so this loader mirrors loadBinance() above.
+export async function loadMexc(){
+  const base = 'https://api.mexc.com';
+  const [infoRes, tickerRes] = await Promise.all([
+    fetchJSON(base + '/api/v3/exchangeInfo'),
+    fetchJSON(base + '/api/v3/ticker/24hr'),
+  ]);
+  const tickerMap = new Map();
+  for(const t of tickerRes) tickerMap.set(t.symbol, t);
+
+  const pairs = [];
+  for(const s of infoRes.symbols){
+    if(s.status !== 'ENABLED' && s.status !== '1') continue; // MEXC has used both a text status and a legacy numeric one across API versions
+    const t = tickerMap.get(s.symbol);
+    if(!t || !t.bidPrice || !t.askPrice) continue;
+    const bid = parseFloat(t.bidPrice);
+    const ask = parseFloat(t.askPrice);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.symbol, base:s.baseAsset, quote:s.quoteAsset, bid, ask,
+      last: parseFloat(t.lastPrice) || (bid + ask) / 2,
+      bidQty: parseFloat(t.bidQty) || 0, askQty: parseFloat(t.askQty) || 0,
+      quoteVolume24h: parseFloat(t.quoteVolume) || 0,
+    });
+  }
+  return pairs;
+}
+
+// Gate.io Spot API v4 — currency_pairs for the tradeable list, tickers for
+// live bid/ask + volume. Gate.io uses "BASE_QUOTE" symbols (underscore),
+// unlike the concatenated symbols the other three exchanges use.
+export async function loadGateio(){
+  const base = 'https://api.gateio.ws';
+  const [pairsRes, tickerRes] = await Promise.all([
+    fetchJSON(base + '/api/v4/spot/currency_pairs'),
+    fetchJSON(base + '/api/v4/spot/tickers'),
+  ]);
+  const tickerMap = new Map();
+  for(const t of tickerRes) tickerMap.set(t.currency_pair, t);
+
+  const pairs = [];
+  for(const s of pairsRes){
+    if(s.trade_status !== 'tradable') continue;
+    const t = tickerMap.get(s.id);
+    if(!t || !t.highest_bid || !t.lowest_ask) continue;
+    const bid = parseFloat(t.highest_bid);
+    const ask = parseFloat(t.lowest_ask);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.id, base:s.base, quote:s.quote, bid, ask,
+      last: parseFloat(t.last) || (bid + ask) / 2,
+      bidQty: 0, askQty: 0, // Gate.io's tickers endpoint doesn't publish top-of-book size
+      quoteVolume24h: parseFloat(t.quote_volume) || 0,
+    });
+  }
+  return pairs;
+}
+
 export const EXCHANGES = {
   bitget:  { label:'Bitget',  load:loadBitget, demoSupported:false },
   binance: { label:'Binance', load:loadBinance, demoSupported:true },
   bybit:   { label:'Bybit',   load:loadBybit, demoSupported:true },
+  mexc:    { label:'MEXC',    load:loadMexc, demoSupported:false },
+  gateio:  { label:'Gate.io', load:loadGateio, demoSupported:false },
 };
 
 // Direct spot-trading page for a base/quote pair on each exchange — used by
@@ -130,6 +192,8 @@ export function tradeUrl(exchange, base, quote){
     case 'bitget':  return `https://www.bitget.com/spot/${b}${q}`;
     case 'binance': return `https://www.binance.com/en/trade/${b}_${q}?type=spot`;
     case 'bybit':   return `https://www.bybit.com/en/trade/spot/${b}/${q}`;
+    case 'mexc':    return `https://www.mexc.com/exchange/${b}_${q}`;
+    case 'gateio':  return `https://www.gate.io/trade/${b}_${q}`;
     default: return null;
   }
 }

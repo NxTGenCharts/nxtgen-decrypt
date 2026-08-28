@@ -37,6 +37,13 @@ import { fmtPct, coinIconHtml } from './utils.js';
 const LS_KEY = 'nxtgen_autotrade_v1';
 const MIN_PROFIT_FLOOR = 0.8; // hard floor — autotrade never fires below this, regardless of the field value
 
+// Exchanges that cannot be verified at all from a key+secret pair alone.
+// Bitget's account-read endpoint also requires a passphrase this app never
+// collects, so it's saved format-checked-only and permanently UNVERIFIED.
+// MEXC and Gate.io verify the same way Binance/Bybit do (key+secret is
+// enough), so they are NOT in this set.
+const NO_VERIFY_EXCHANGES = new Set(['bitget']);
+
 function todayKey(){
   return new Date().toDateString();
 }
@@ -53,6 +60,20 @@ async function hmacSha256Hex(secret, message){
   return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2,'0')).join('');
 }
 
+// Gate.io's v4 API signs with SHA-512 (both the body hash and the HMAC
+// itself), unlike everyone else here on SHA-256 — see gate.ioSign below.
+async function sha512Hex(message){
+  const enc = new TextEncoder();
+  const digest = await crypto.subtle.digest('SHA-512', enc.encode(message));
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+async function hmacSha512Hex(secret, message){
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name:'HMAC', hash:'SHA-512' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message));
+  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
 class VerifyRejected extends Error {}
 
 // Base URLs per network. "demo" is Binance/Bybit's separate Demo Trading
@@ -63,6 +84,8 @@ class VerifyRejected extends Error {}
 //   Bybit:   https://bybit-exchange.github.io/docs/v5/demo
 const BINANCE_BASE = { live:'https://api.binance.com', demo:'https://demo-api.binance.com' };
 const BYBIT_BASE = { live:'https://api.bybit.com', demo:'https://api-demo.bybit.com' };
+const MEXC_BASE = { live:'https://api.mexc.com' };     // no public Demo Trading environment
+const GATEIO_BASE = { live:'https://api.gateio.ws' };  // no public Demo Trading environment
 
 // Read-only account/balance checks — no orders, no withdrawals. Uses the
 // exchange's own signed endpoint, so it's the only way to actually confirm
@@ -105,7 +128,47 @@ async function verifyBybit(mode, apiKey, secretKey){
   return { balance: usdt ? parseFloat(usdt.walletBalance) : null };
 }
 
-const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit }; // Bitget needs a passphrase we don't collect — format-check only
+// MEXC's Spot v3 account endpoint is signed exactly like Binance's
+// (query-string HMAC-SHA256, key in a header) — the only difference is the
+// header name, X-MEXC-APIKEY instead of X-MBX-APIKEY.
+async function verifyMexc(mode, apiKey, secretKey){
+  const base = MEXC_BASE.live;
+  const qs = `timestamp=${Date.now()}&recvWindow=5000`;
+  const signature = await hmacSha256Hex(secretKey, qs);
+  const res = await fetch(`${base}/api/v3/account?${qs}&signature=${signature}`, { headers:{ 'X-MEXC-APIKEY': apiKey } });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
+    throw new VerifyRejected(data && data.msg ? data.msg : `HTTP ${res.status}`);
+  }
+  const usdt = (data.balances || []).find(b => b.asset === 'USDT');
+  return { balance: usdt ? parseFloat(usdt.free) + parseFloat(usdt.locked) : null };
+}
+
+// Gate.io v4 signing: SHA-512 hash of the body, then an HMAC-SHA512 over
+// METHOD\nPATH\nQUERY\nBODY_HASH\nTIMESTAMP, sent as KEY/Timestamp/SIGN
+// headers. See https://www.gate.io/docs/developers/apiv4/en/#authentication
+async function gateioSignedGet(path, query, apiKey, secretKey){
+  const base = GATEIO_BASE.live;
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const bodyHash = await sha512Hex('');
+  const signString = `GET\n${path}\n${query}\n${bodyHash}\n${timestamp}`;
+  const sign = await hmacSha512Hex(secretKey, signString);
+  const res = await fetch(`${base}${path}${query ? '?' + query : ''}`, {
+    headers:{ KEY: apiKey, Timestamp: timestamp, SIGN: sign, Accept: 'application/json' },
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok){
+    throw new VerifyRejected(data && data.message ? data.message : `HTTP ${res.status}`);
+  }
+  return data;
+}
+async function verifyGateio(mode, apiKey, secretKey){
+  const accounts = await gateioSignedGet('/api/v4/spot/accounts', '', apiKey, secretKey);
+  const usdt = Array.isArray(accounts) ? accounts.find(a => a.currency === 'USDT') : null;
+  return { balance: usdt ? parseFloat(usdt.available) + parseFloat(usdt.locked || 0) : null };
+}
+
+const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit, mexc: verifyMexc, gateio: verifyGateio }; // Bitget needs a passphrase we don't collect — format-check only
 
 // If a verify proxy is configured (see /server), route through it — it can
 // actually complete the signed request, since CORS only blocks the
@@ -257,7 +320,7 @@ function renderConnectRows(){
       <div class="mode-toggle" role="group" aria-label="${label} network">
         <button type="button" class="mode-btn ${mode==='live'?'active':''}" data-mode="live">Live</button>
         <button type="button" class="mode-btn ${mode==='demo'?'active':''}" data-mode="demo">Demo</button>
-      </div>` : `<div class="mode-toggle mode-toggle--disabled" title="Bitget has no public Demo Trading environment"><span class="mode-btn active">Live only</span></div>`;
+      </div>` : `<div class="mode-toggle mode-toggle--disabled" title="${label} has no public Demo Trading environment"><span class="mode-btn active">Live only</span></div>`;
 
     let statusPill = '';
     if(stored){
@@ -284,7 +347,7 @@ function renderConnectRows(){
       ${stored ? `
         <div class="connect-actions">
           <button class="primary ghost connect-btn" data-action="${connected ? 'disconnect' : 'reconnect'}">${connected ? 'Disconnect' : 'Reconnect'}</button>
-          ${key !== 'bitget' ? `<button class="primary ghost retry-verify-btn" data-action="retry-verify" title="Re-check this key against ${label} right now and pull the latest balance">Refresh Balance</button>` : ''}
+          ${!NO_VERIFY_EXCHANGES.has(key) ? `<button class="primary ghost retry-verify-btn" data-action="retry-verify" title="Re-check this key against ${label} right now and pull the latest balance">Refresh Balance</button>` : ''}
           <button class="primary ghost remove-btn" data-action="remove" title="Permanently remove this saved key">Remove</button>
         </div>
       ` : `
@@ -315,7 +378,7 @@ function maskProxyUrl(url){
 // disconnect/reconnect cycle). Returns true on a successful verified read.
 async function reverifyStoredCred(key, mode, { silent = false } = {}){
   const cred = state.exchangeCreds[key][mode];
-  if(!cred || key === 'bitget') return false; // Bitget can't be verified at all
+  if(!cred || NO_VERIFY_EXCHANGES.has(key)) return false;
   const netLabel = mode === 'demo' ? 'demo' : 'live';
   const usingProxy = !!(state.verifyProxyUrl || '').trim();
   const result = await runVerification(key, mode, cred.apiKey, cred.secretKey);
@@ -354,7 +417,7 @@ async function refreshAllConnectedBalances(){
   balanceRefreshInFlight = true;
   try{
     for(const key of Object.keys(EXCHANGES)){
-      if(key === 'bitget') continue;
+      if(NO_VERIFY_EXCHANGES.has(key)) continue;
       for(const mode of ['live', 'demo']){
         const cred = state.exchangeCreds[key]?.[mode];
         if(cred && cred.connected){
@@ -440,7 +503,7 @@ els.connectRows.addEventListener('click', async (e) => {
   }
   if(action === 'reconnect'){
     state.exchangeCreds[key][mode].connected = true;
-    if(key === 'bitget'){
+    if(NO_VERIFY_EXCHANGES.has(key)){
       persist();
       renderConnectRows();
       renderBalances();
@@ -477,10 +540,10 @@ els.connectRows.addEventListener('click', async (e) => {
 
   const cred = { apiKey, secretKey, connectedAt: new Date().toLocaleString(), connected: true, verified: false, verifyNote: '' };
 
-  if(key === 'bitget'){
-    cred.verifyNote = 'Bitget verification needs a passphrase this app doesn\'t collect — format looks valid, but this hasn\'t been confirmed against the exchange.';
+  if(NO_VERIFY_EXCHANGES.has(key)){
+    cred.verifyNote = `${EXCHANGES[key].label} verification needs a passphrase this app doesn't collect — format looks valid, but this hasn't been confirmed against the exchange.`;
     state.exchangeCreds[key][mode] = cred;
-    showAtMessage(`${EXCHANGES[key].label} key saved (format looks valid). It can't be verified — even the proxy doesn't collect the third Bitget field (passphrase) — so it's marked UNVERIFIED.`, 'info');
+    showAtMessage(`${EXCHANGES[key].label} key saved (format looks valid). It can't be verified — even the proxy doesn't collect the third ${EXCHANGES[key].label} field (passphrase) — so it's marked UNVERIFIED.`, 'info');
   } else {
     const result = await runVerification(key, mode, apiKey, secretKey);
     if(result.rejected){
@@ -655,7 +718,7 @@ els.atArmBtn.addEventListener('click', () => {
     showAtMessage(`Type exactly "${ARM_PHRASE}" to arm real order execution.`, 'error');
     return;
   }
-  if(key === 'bitget' || !cred || !cred.verified){
+  if(NO_VERIFY_EXCHANGES.has(key) || !cred || !cred.verified){
     showAtMessage(`Real order execution needs a VERIFIED connected key for ${EXCHANGES[key].label} (${mode}) — connect/verify it above first.`, 'error');
     return;
   }

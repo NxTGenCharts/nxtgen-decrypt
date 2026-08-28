@@ -1,9 +1,9 @@
 # nxtgen-verify-proxy
 
 A tiny backend with exactly one real job: sign a read-only "what's my
-balance" request to Binance or Bybit on behalf of the Autotrade & Balances
-panel, and hand back the answer. It exists because browsers cannot do this
-themselves — both exchanges reject authenticated requests that come from a
+balance" request to Binance, Bybit, MEXC, or Gate.io on behalf of the
+Autotrade & Balances panel, and hand back the answer. It exists because browsers cannot do this
+themselves — these exchanges reject authenticated requests that come from a
 browser origin (CORS), regardless of whether the key is valid. This is not
 a workaround for that restriction; it's the standard shape of the fix:
 the signing happens server-side, where CORS doesn't apply.
@@ -15,10 +15,11 @@ it's under 120 lines specifically so that's easy to verify yourself.
 
 ## Endpoints
 
-- `POST /api/verify` — body `{ exchange: "binance"|"bybit", mode: "live"|"demo", apiKey, secretKey }`.
-  - `"demo"` is Binance/Bybit's separate Demo Trading environment — a distinct
-    set of keys from a normal Live account, created from each exchange's own
-    Demo Trading UI. It mirrors live market data but trades demo funds only. See:
+- `POST /api/verify` — body `{ exchange: "binance"|"bybit"|"mexc"|"gateio", mode: "live"|"demo", apiKey, secretKey }`.
+  - `"demo"` only applies to Binance/Bybit — MEXC and Gate.io have no public
+    Demo Trading environment, so requests for those two always run against
+    Live. Binance/Bybit's `"demo"` is a distinct set of keys from a normal
+    Live account, created from each exchange's own Demo Trading UI. It mirrors live market data but trades demo funds only. See:
     [Binance](https://developers.binance.com/docs/binance-spot-api-docs/demo-mode/general-info),
     [Bybit](https://bybit-exchange.github.io/docs/v5/demo).
   Returns `{ verified, rejected, balance, message }`.
@@ -38,7 +39,7 @@ npm start                 # listens on :8787 by default
 
 Then, in the app's **Autotrade & Balances → Connect Exchanges** panel, set
 **Verification proxy URL** to `http://localhost:8787` (or wherever you
-deploy it) and reconnect a Binance/Bybit key. Without a proxy URL set, the
+deploy it) and reconnect a Binance/Bybit/MEXC/Gate.io key. Without a proxy URL set, the
 app falls back to trying the browser directly, which will reliably come
 back UNVERIFIED for the CORS reason above — that's expected, not a bug.
 
@@ -51,7 +52,7 @@ serverless function adapted from `server.js`. Whichever you pick:
    open means any other website can route requests through your proxy.
 2. **Serve it over HTTPS.** Keys are in the request body; don't send them
    over plain HTTP.
-3. **Use read-only API keys** on the Binance/Bybit side wherever you can —
+3. **Use read-only API keys** on the exchange side wherever you can —
    this proxy only ever calls read-only endpoints, so a read-only key is
    all it needs, and it means a leaked key can't be used to trade or
    withdraw even in the worst case.

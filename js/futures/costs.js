@@ -8,6 +8,11 @@
 export const DEFAULT_FEE_CONFIG = {
   binance: { makerPct: 0.02, takerPct: 0.05 },
   bybit:   { makerPct: 0.02, takerPct: 0.055 },
+  // MEXC Futures' own published base-tier rate: 0.000% maker / 0.020% taker.
+  // https://www.mexc.com/learn/article/17827791510370
+  mexc:    { makerPct: 0.00, takerPct: 0.02 },
+  // Gate.io Futures' published regular-user rate: 0.01% maker / 0.05% taker.
+  gateio:  { makerPct: 0.01, takerPct: 0.05 },
 };
 
 export const DEFAULT_MIN_NET_PROFIT_PCT = 0.30;

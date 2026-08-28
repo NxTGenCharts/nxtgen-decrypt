@@ -2,7 +2,7 @@
 // server.js — minimal, single-purpose verify/balance proxy.
 //
 // What this is for: the Autotrade & Balances panel needs to confirm a
-// Binance/Bybit key+secret pair is real and read its balance. Doing that
+// Binance/Bybit/MEXC/Gate.io key+secret pair is real and read its balance. Doing that
 // from a browser doesn't work — both exchanges reject cross-origin
 // authenticated requests (CORS), by design, from any static front-end.
 // This tiny server exists only to make that ONE signed, read-only request
@@ -50,6 +50,16 @@ class VerifyRejected extends Error {}
 //   Bybit:   https://bybit-exchange.github.io/docs/v5/demo
 const BINANCE_BASE = { live: 'https://api.binance.com', demo: 'https://demo-api.binance.com' };
 const BYBIT_BASE = { live: 'https://api.bybit.com', demo: 'https://api-demo.bybit.com' };
+// MEXC and Gate.io have no public Demo Trading environment — always 'live'.
+const MEXC_BASE = { live: 'https://api.mexc.com' };
+const GATEIO_BASE = { live: 'https://api.gateio.ws' };
+
+function sha512Hex(message){
+  return crypto.createHash('sha512').update(message).digest('hex');
+}
+function hmacSha512Hex(secret, message){
+  return crypto.createHmac('sha512', secret).update(message).digest('hex');
+}
 
 // ---- Binance: GET /api/v3/account, signed with HMAC-SHA256 ----
 async function binanceAccount(mode, apiKey, secretKey){
@@ -115,10 +125,74 @@ async function bybitAssetBalance(mode, apiKey, secretKey, asset){
   return c ? parseFloat(c.walletBalance) : 0;
 }
 
-const ASSET_BALANCE_GETTERS = { binance: binanceAssetBalance, bybit: bybitAssetBalance };
+// ---- MEXC Spot v3: GET /api/v3/account, signed exactly like Binance's
+// v3 API (MEXC modeled its Spot v3 API on Binance's) — query-string
+// HMAC-SHA256, key in the X-MEXC-APIKEY header instead of X-MBX-APIKEY. ----
+async function mexcAccount(mode, apiKey, secretKey){
+  const base = MEXC_BASE.live;
+  const qs = `timestamp=${Date.now()}&recvWindow=5000`;
+  const signature = hmacSha256Hex(secretKey, qs);
+  const res = await fetch(`${base}/api/v3/account?${qs}&signature=${signature}`, {
+    headers: { 'X-MEXC-APIKEY': apiKey },
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
+    throw new VerifyRejected(data && data.msg ? data.msg : `HTTP ${res.status}`);
+  }
+  return data;
+}
+async function verifyMexc(mode, apiKey, secretKey){
+  const data = await mexcAccount(mode, apiKey, secretKey);
+  const usdt = (data.balances || []).find(b => b.asset === 'USDT');
+  return { balance: usdt ? parseFloat(usdt.free) + parseFloat(usdt.locked) : null };
+}
+async function mexcAssetBalance(mode, apiKey, secretKey, asset){
+  const data = await mexcAccount(mode, apiKey, secretKey);
+  const b = (data.balances || []).find(x => x.asset === asset);
+  return b ? parseFloat(b.free) : 0;
+}
+
+// ---- Gate.io Spot v4: GET /api/v4/spot/accounts, signed with the v4
+// scheme — HMAC-SHA512 over METHOD\nPATH\nQUERY\nSHA512(BODY)\nTIMESTAMP,
+// sent as KEY/Timestamp/SIGN headers. Docs:
+// https://www.gate.io/docs/developers/apiv4/en/#authentication ----
+async function gateioSignedRequest(method, path, query, body, apiKey, secretKey){
+  const base = GATEIO_BASE.live;
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const bodyStr = body ? JSON.stringify(body) : '';
+  const bodyHash = sha512Hex(bodyStr);
+  const signString = `${method}\n${path}\n${query}\n${bodyHash}\n${timestamp}`;
+  const sign = hmacSha512Hex(secretKey, signString);
+  const res = await fetch(`${base}${path}${query ? '?' + query : ''}`, {
+    method,
+    headers: {
+      KEY: apiKey, Timestamp: timestamp, SIGN: sign,
+      Accept: 'application/json',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: bodyStr } : {}),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok){
+    throw new VerifyRejected(data && data.message ? data.message : `HTTP ${res.status}`);
+  }
+  return data;
+}
+async function verifyGateio(mode, apiKey, secretKey){
+  const accounts = await gateioSignedRequest('GET', '/api/v4/spot/accounts', '', null, apiKey, secretKey);
+  const usdt = Array.isArray(accounts) ? accounts.find(a => a.currency === 'USDT') : null;
+  return { balance: usdt ? parseFloat(usdt.available) + parseFloat(usdt.locked || 0) : null };
+}
+async function gateioAssetBalance(mode, apiKey, secretKey, asset){
+  const accounts = await gateioSignedRequest('GET', '/api/v4/spot/accounts', `currency=${asset}`, null, apiKey, secretKey);
+  const a = Array.isArray(accounts) ? accounts.find(x => x.currency === asset) : null;
+  return a ? parseFloat(a.available) : 0;
+}
+
+const ASSET_BALANCE_GETTERS = { binance: binanceAssetBalance, bybit: bybitAssetBalance, mexc: mexcAssetBalance, gateio: gateioAssetBalance };
 
 
-const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit };
+const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit, mexc: verifyMexc, gateio: verifyGateio };
 
 app.post('/api/verify', async (req, res) => {
   const { exchange, mode, apiKey, secretKey } = req.body || {};
@@ -131,7 +205,7 @@ app.post('/api/verify', async (req, res) => {
   }
   const verifier = VERIFIERS[exchange];
   if(!verifier){
-    return res.status(400).json({ verified:false, rejected:false, message:`No verifier for "${exchange}" — only binance and bybit are supported.` });
+    return res.status(400).json({ verified:false, rejected:false, message:`No verifier for "${exchange}" — only binance, bybit, mexc, and gateio are supported.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
 
@@ -237,7 +311,65 @@ async function placeBinanceOrder(mode, apiKey, secretKey, { symbol, side, amount
   };
 }
 
-// ---- Bybit: instrument filters (base/quote precision, minimums) ----
+// ---- MEXC: symbol filters. MEXC's v3 exchangeInfo doesn't populate the
+// Binance-style filters[] array for most symbols — the base-quantity step
+// and minimum notional live directly on the symbol object instead
+// (baseSizePrecision, quoteAmountPrecision). Fall back to Binance-style
+// filters[] first in case a given symbol does have them, since that's the
+// more precise source when present. ----
+async function mexcSymbolFilters(base, symbol){
+  const res = await fetch(`${base}/api/v3/exchangeInfo?symbol=${symbol}`);
+  const data = await res.json().catch(() => null);
+  const s = data?.symbols?.[0];
+  if(!s) throw new Error(`Unknown MEXC symbol ${symbol}`);
+  const lot = (s.filters || []).find(f => f.filterType === 'LOT_SIZE');
+  const notional = (s.filters || []).find(f => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
+  return {
+    stepSize: lot ? parseFloat(lot.stepSize) : parseFloat(s.baseSizePrecision || '0.00000001'),
+    minQty: lot ? parseFloat(lot.minQty) : 0,
+    minNotional: notional ? parseFloat(notional.minNotional) : parseFloat(s.quoteAmountPrecision || '0'),
+  };
+}
+
+// MEXC's Spot v3 order endpoint mirrors Binance's (quoteOrderQty for
+// spend-this-much-quote, quantity for sell-exactly-this-much-base), signed
+// the same way, just under the X-MEXC-APIKEY header.
+async function placeMexcOrder(mode, apiKey, secretKey, { symbol, side, amountKind, amount }){
+  const base = MEXC_BASE.live;
+  const params = new URLSearchParams({ symbol, side, type: 'MARKET', timestamp: String(Date.now()), recvWindow: '5000' });
+
+  if(amountKind === 'quote'){
+    params.set('quoteOrderQty', amount.toString());
+  } else {
+    const filters = await mexcSymbolFilters(base, symbol);
+    const qty = floorToStep(amount, filters.stepSize || 0.00000001);
+    if(qty <= 0 || qty < filters.minQty){
+      throw new VerifyRejected(`Amount ${amount} ${symbol} rounds down to ${qty}, below the exchange minimum (${filters.minQty}) — nothing was sent.`);
+    }
+    params.set('quantity', qty.toString());
+  }
+
+  const signature = hmacSha256Hex(secretKey, params.toString());
+  params.set('signature', signature);
+  const res = await fetch(`${base}/api/v3/order`, {
+    method: 'POST',
+    headers: { 'X-MEXC-APIKEY': apiKey, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
+    throw new VerifyRejected(data && data.msg ? data.msg : `HTTP ${res.status}`);
+  }
+  if(data.status !== 'FILLED'){
+    throw new VerifyRejected(`Order did not fully fill (status: ${data.status}). No further legs will be attempted automatically.`);
+  }
+  return {
+    orderId: data.orderId,
+    filledBaseQty: parseFloat(data.executedQty),
+    filledQuoteQty: parseFloat(data.cummulativeQuoteQty),
+    avgPrice: parseFloat(data.executedQty) > 0 ? parseFloat(data.cummulativeQuoteQty) / parseFloat(data.executedQty) : 0,
+  };
+}
 async function bybitSymbolFilters(base, symbol){
   const res = await fetch(`${base}/v5/market/instruments-info?category=spot&symbol=${symbol}`);
   const data = await res.json().catch(() => null);
@@ -327,7 +459,69 @@ async function placeBybitOrder(mode, apiKey, secretKey, { symbol, side, amountKi
   throw new VerifyRejected(`Order ${orderId} was accepted but did not confirm as Filled within 6s — check Bybit's order history directly before assuming anything about the position.`);
 }
 
-const ORDER_PLACERS = { binance: placeBinanceOrder, bybit: placeBybitOrder };
+// ---- Gate.io: currency pair details (precision, minimum amounts) ----
+async function gateioSymbolFilters(symbol){
+  const res = await fetch(`${GATEIO_BASE.live}/api/v4/spot/currency_pairs/${symbol}`);
+  const s = await res.json().catch(() => null);
+  if(!s || !s.id) throw new Error(`Unknown Gate.io pair ${symbol}`);
+  return {
+    amountPrecision: parseInt(s.amount_precision, 10) || 8,   // base-side decimal places
+    minBaseAmount: parseFloat(s.min_base_amount || '0'),
+    minQuoteAmount: parseFloat(s.min_quote_amount || '0'),
+  };
+}
+
+function floorToDecimals(value, decimals){
+  const factor = Math.pow(10, decimals);
+  return Math.floor(value * factor) / factor;
+}
+
+// Gate.io market orders are IOC (immediate-or-cancel) and take a single
+// "amount" field whose meaning flips with side: for a market BUY, amount is
+// the quote currency to spend (mirrors Binance's quoteOrderQty); for a
+// market SELL, amount is the base currency to sell. There is no separate
+// "quoteOrderQty" parameter the way Binance/MEXC have one, so amountKind
+// here maps straight onto that side-dependent meaning rather than a
+// distinct API field.
+// Docs: https://www.gate.io/docs/developers/apiv4/en/#create-an-order
+async function placeGateioOrder(mode, apiKey, secretKey, { symbol, side, amountKind, amount }){
+  const gateSide = side.toLowerCase(); // 'buy' | 'sell'
+  let sendAmount = amount;
+  if(amountKind === 'base'){
+    const filters = await gateioSymbolFilters(symbol);
+    sendAmount = floorToDecimals(amount, filters.amountPrecision);
+    const floorAgainst = gateSide === 'buy' ? filters.minQuoteAmount : filters.minBaseAmount;
+    if(sendAmount <= 0 || sendAmount < floorAgainst){
+      throw new VerifyRejected(`Amount ${amount} ${symbol} rounds down to ${sendAmount}, below the exchange minimum (${floorAgainst}) — nothing was sent.`);
+    }
+  }
+  // amountKind:'quote' is only ever used for the BUY leg with a plain
+  // quote-currency spend amount, which is exactly what Gate.io's "amount"
+  // already means for a market buy — no rounding needed there, same as
+  // Binance's quoteOrderQty path.
+
+  const created = await gateioSignedRequest('POST', '/api/v4/spot/orders', '', {
+    currency_pair: symbol, side: gateSide, type: 'market',
+    account: 'spot', time_in_force: 'ioc',
+    amount: sendAmount.toString(),
+  }, apiKey, secretKey);
+
+  const orderId = created.id;
+  if(!orderId) throw new VerifyRejected('Gate.io accepted the order but returned no id to confirm the fill with.');
+  if(created.status !== 'closed'){
+    throw new VerifyRejected(`Order did not fully fill (status: ${created.status}). No further legs will be attempted automatically.`);
+  }
+  const filledBaseQty = parseFloat(created.filled_amount || created.amount || '0');
+  const filledQuoteQty = parseFloat(created.filled_total || '0');
+  return {
+    orderId,
+    filledBaseQty,
+    filledQuoteQty,
+    avgPrice: filledBaseQty > 0 ? filledQuoteQty / filledBaseQty : parseFloat(created.avg_deal_price || '0'),
+  };
+}
+
+const ORDER_PLACERS = { binance: placeBinanceOrder, bybit: placeBybitOrder, mexc: placeMexcOrder, gateio: placeGateioOrder };
 
 app.post('/api/order', async (req, res) => {
   const { exchange, mode, apiKey, secretKey, symbol, side, amountKind, amount } = req.body || {};
@@ -336,10 +530,17 @@ app.post('/api/order', async (req, res) => {
   }
   const placer = ORDER_PLACERS[exchange];
   if(!placer){
-    return res.status(400).json({ ok:false, message:`No order placer for "${exchange}" — only binance and bybit are supported.` });
+    return res.status(400).json({ ok:false, message:`No order placer for "${exchange}" — only binance, bybit, mexc, and gateio are supported.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
-  const normalizedSide = exchange === 'binance' ? String(side).toUpperCase() : (String(side)[0].toUpperCase() + String(side).slice(1).toLowerCase());
+  // Binance and MEXC both want 'BUY'/'SELL'; Bybit wants 'Buy'/'Sell';
+  // Gate.io wants lowercase 'buy'/'sell' (placeGateioOrder re-lowercases
+  // regardless, but keep this table honest for the exchanges that DO care).
+  const normalizedSide = (exchange === 'binance' || exchange === 'mexc')
+    ? String(side).toUpperCase()
+    : exchange === 'gateio'
+      ? String(side).toLowerCase()
+      : (String(side)[0].toUpperCase() + String(side).slice(1).toLowerCase());
 
   try{
     const result = await placer(netMode, apiKey, secretKey, { symbol, side: normalizedSide, amountKind, amount: parseFloat(amount) });
@@ -366,7 +567,7 @@ app.post('/api/balance', async (req, res) => {
   }
   const getter = ASSET_BALANCE_GETTERS[exchange];
   if(!getter){
-    return res.status(400).json({ ok:false, message:`No balance getter for "${exchange}" — only binance and bybit are supported.` });
+    return res.status(400).json({ ok:false, message:`No balance getter for "${exchange}" — only binance, bybit, mexc, and gateio are supported.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   try{

@@ -317,7 +317,7 @@ export async function runScan(){
     } else if(ranked.length > 0){
       // Nothing cleared the bar — never leave the screen blank, show the closest cycles instead.
       render(ranked);
-      showMessage(cliNotice + `No cycle cleared your ${minProfit.toFixed(2)}% filter after a ${(feePct*3).toFixed(2)}% round-trip fee across ${keys.length > 1 ? 'all three books' : EXCHANGES[keys[0]].label} — that's a real read of current spreads, not a limitation of the scan. Showing the 20 closest cycles instead (best is ${fmtPct(ranked[0].profitPct)}); lower the filter, drop your fee assumption if you're on a maker/VIP tier, or try "All 3" to widen the search.`, 'info');
+      showMessage(cliNotice + `No cycle cleared your ${minProfit.toFixed(2)}% filter after a ${(feePct*3).toFixed(2)}% round-trip fee across ${keys.length > 1 ? 'all connected books' : EXCHANGES[keys[0]].label} — that's a real read of current spreads, not a limitation of the scan. Showing the 20 closest cycles instead (best is ${fmtPct(ranked[0].profitPct)}); lower the filter, drop your fee assumption if you're on a maker/VIP tier, or try "All 5" to widen the search.`, 'info');
     } else {
       els.results.innerHTML = `<div class="empty">No 3-leg cycles found for this anchor after the fiat/volume filter. Try "All currencies", a different exchange, or a lower min 24h volume.</div>`;
       showMessage(cliNotice, cliNotice ? 'info' : '');

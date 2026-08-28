@@ -268,6 +268,8 @@ function currentFilterSelections(){
       bitget: els.xFilterExBitget ? els.xFilterExBitget.checked : true,
       binance: els.xFilterExBinance ? els.xFilterExBinance.checked : true,
       bybit: els.xFilterExBybit ? els.xFilterExBybit.checked : true,
+      mexc: els.xFilterExMexc ? els.xFilterExMexc.checked : true,
+      gateio: els.xFilterExGateio ? els.xFilterExGateio.checked : true,
     },
   };
 }

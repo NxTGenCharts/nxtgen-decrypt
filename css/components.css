@@ -143,6 +143,8 @@ button.primary.is-scanning .btn-spinner{ display:inline-block; }
 .exch.bitget{ border-color:#2f5b46; color:#8fd6ab; }
 .exch.binance{ border-color:#5a4a1a; color:#f0c14b; }
 .exch.bybit{ border-color:#5a1a2a; color:#f5a3b8; }
+.exch.mexc{ border-color:#1a3a5a; color:#7fb8f0; }
+.exch.gateio{ border-color:#4a1a5a; color:#c98af5; }
 
 .trackbadge{ font-size:8.5px; font-weight:700; letter-spacing:.07em; padding:2px 7px; border-radius:9px; text-transform:uppercase; white-space:nowrap; }
 .trackbadge.new{ color:var(--amber-ink); background:var(--amber); }

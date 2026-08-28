@@ -181,7 +181,7 @@ export function runScanCycle(cfg, dayState){
     });
 
     const row = {
-      symbol, exchange: (cfg.exchange || 'binance').toUpperCase(), direction,
+      symbol, exchange: (cfg.exchange === 'gateio' ? 'GATE.IO' : (cfg.exchange || 'binance').toUpperCase()), direction,
       setup: primary.type, confidence,
       entry: levels.entry, stop: levels.stopPrice, tp1: levels.tp1, tp2: levels.tp2, tp3: levels.tp3,
       expectedGrossPct: levels.tp1Pct, estFeesPct: costs.entryFeePct + costs.exitFeePct,
