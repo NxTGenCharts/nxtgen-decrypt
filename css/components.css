@@ -298,6 +298,22 @@ footer b{ color:#a9bfae; }
 }
 .cycle-log-n{ color:var(--dim); font-family:var(--disp); font-weight:700; }
 .cycle-log-path{ display:flex; align-items:center; gap:4px; flex-wrap:wrap; color:var(--ink-dim); }
-.cycle-log-pct{ color:var(--green); font-weight:700; font-family:var(--disp); }
+.cycle-log-pct{ font-weight:700; font-family:var(--disp); }
+.cycle-log-pct[data-sign="pos"]{ color:var(--green); }
+.cycle-log-pct[data-sign="neg"]{ color:var(--red); }
+.cycle-log-pct[data-sign="zero"]{ color:var(--ink-dim); }
 .cycle-log-amt, .cycle-log-bal{ font-variant-numeric:tabular-nums; color:var(--ink-dim); }
+.cycle-log-amt[data-sign="pos"]{ color:var(--green); }
+.cycle-log-amt[data-sign="neg"]{ color:var(--red); }
+.cycle-log-amt[data-sign="zero"]{ color:var(--ink-dim); }
+
+/* Direction-sensitive overview stat cards (Profit Today / Profit Today ($))
+   — set explicitly via data-sign in JS since these actually flip between
+   profit and loss, unlike the other ov-highlight cards (Best Opportunity,
+   Win Rate) which are always framed positively and stay green by default.
+   !important beats the higher-specificity .ov-card.ov-highlight .ov-value
+   rule so a loss still reads red even on the highlighted card. */
+.ov-value[data-sign="pos"]{ color:var(--green) !important; }
+.ov-value[data-sign="neg"]{ color:var(--red) !important; }
+.ov-value[data-sign="zero"]{ color:var(--ink-dim) !important; }
 .cycle-log-time{ color:var(--dim2); font-size:11px; text-align:right; }

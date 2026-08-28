@@ -694,6 +694,9 @@ function renderAutotradeStatus(){
   els.atStatProfitPct.textContent = fmtPct(at.dayProfitPct || 0);
   els.atStatProfitAmt.textContent = money(at.dayProfitAmt || 0);
   els.atStatCycles.textContent = String(at.cycles.length);
+  const dayProfitSign = at.dayProfitPct > 0 ? 'pos' : (at.dayProfitPct < 0 ? 'neg' : 'zero');
+  els.atStatProfitPct.dataset.sign = dayProfitSign;
+  els.atStatProfitAmt.dataset.sign = dayProfitSign;
 
   const target = parseFloat(els.atDailyTarget.value) || 11;
   const pct = Math.max(0, Math.min(100, (at.dayProfitPct / target) * 100));
@@ -727,11 +730,12 @@ function renderCycleLog(){
             : ' <span class="pill tr-yes" title="Real signed orders were placed on the exchange for all three legs.">REAL</span>')
       : (c.testMode ? ' <span class="pill" style="color:var(--red);border-color:var(--red-line);">TEST</span>' : '');
     const balCell = c.balanceAfter != null ? money(c.balanceAfter) : '<span title="Real cycles don\'t compute a local balance — see the refreshed CURRENT BALANCE above instead.">—</span>';
+    const sign = c.profitPct > 0 ? 'pos' : (c.profitPct < 0 ? 'neg' : 'zero');
     return `<div class="cycle-log-row"${(c.testMode || c.real) ? ' style="outline:1px solid var(--red-line);"' : ''}>
       <div class="cycle-log-n">#${n}${badge}</div>
       <div class="cycle-log-path">${coinIconHtml(A,14)}${A} → ${coinIconHtml(B,14)}${B} → ${coinIconHtml(C,14)}${C} → ${A}</div>
-      <div class="cycle-log-pct">${fmtPct(c.profitPct)}</div>
-      <div class="cycle-log-amt">${money(c.profitAmt)}</div>
+      <div class="cycle-log-pct" data-sign="${sign}">${fmtPct(c.profitPct)}</div>
+      <div class="cycle-log-amt" data-sign="${sign}">${money(c.profitAmt)}</div>
       <div class="cycle-log-bal">${balCell}</div>
       <div class="cycle-log-time">${c.time}</div>
     </div>`;
@@ -763,7 +767,21 @@ async function tick(){
     const adj = buildGraph(pairs, false); // realistic bid/ask + fee — never the theoretical mode for real decisions
     const { results } = findCycles(adj, anchor, feePct, key);
     const ranked = results.filter(r => isFinite(r.profitPct)).sort((a,b) => b.profitPct - a.profitPct);
-    const best = ranked[0];
+
+    // Anti-repeat: a scanner that keeps returning the exact same loop tick
+    // after tick, seconds apart, almost always means one thin/stale-quoted
+    // pair is structurally "winning" the ranking rather than the market
+    // genuinely re-offering the same edge — see the RLUSD run in the
+    // TODAY'S CYCLE SUMMARY log. After 2 consecutive fires on the same
+    // canonicalKey, drop it for one tick and let the next-best distinct
+    // cycle through instead, so autotrade actually diversifies across
+    // opportunities rather than hammering one book every interval.
+    const REPEAT_LIMIT = 2;
+    let best = ranked[0];
+    if(best && at.lastCanonicalKey === best.canonicalKey && at.lastCanonicalStreak >= REPEAT_LIMIT){
+      const alt = ranked.find(r => r.canonicalKey !== best.canonicalKey);
+      if(alt) best = alt;
+    }
     const testMode = !!at.testMode;
     const liveExecution = !!at.liveExecution;
     const forcedRealDemoTest = testMode && liveExecution && at.mode === 'demo';
@@ -860,6 +878,7 @@ function reverseLeg(leg, heldAmount){
 }
 
 async function executeCycleReal(cycle, dailyTarget, forcedTest){
+  trackRepeat(cycle);
   const at = state.autotrade;
   const key = at.exchange;
   const mode = at.mode;
@@ -987,7 +1006,18 @@ async function executeCycleReal(cycle, dailyTarget, forcedTest){
   }
 }
 
+function trackRepeat(cycle){
+  const at = state.autotrade;
+  if(at.lastCanonicalKey === cycle.canonicalKey){
+    at.lastCanonicalStreak++;
+  } else {
+    at.lastCanonicalKey = cycle.canonicalKey;
+    at.lastCanonicalStreak = 1;
+  }
+}
+
 function executeCycle(cycle, dailyTarget, testMode){
+  trackRepeat(cycle);
   const at = state.autotrade;
   const bal = at.currentBalance;
   const profitAmt = bal * (cycle.profitPct / 100);
@@ -1033,6 +1063,8 @@ function startAutotrade(){
   at.dayProfitAmt = 0;
   at.targetReached = false;
   at.cycles = [];
+  at.lastCanonicalKey = null;
+  at.lastCanonicalStreak = 0;
   at.enabled = true;
   at.running = true;
   at.testMode = !!els.atTestMode.checked;

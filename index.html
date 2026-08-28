@@ -244,8 +244,9 @@
       </div>
       <div class="field">
         <label for="atAnchor">Start / anchor currency</label>
-        <select id="atAnchor" title="The currency each cycle starts and ends in">
-          <option selected value="USDT">USDT</option>
+        <select id="atAnchor" title="Which currency each cycle starts and ends in. 'All currencies' searches every possible loop each scan and executes whichever is genuinely most profitable, instead of only ever looking at loops through one fixed currency.">
+          <option selected value="ALL">All currencies (scan for best)</option>
+          <option value="USDT">USDT</option>
           <option value="USDC">USDC</option>
           <option value="BTC">BTC</option>
           <option value="ETH">ETH</option>

@@ -207,6 +207,8 @@ export const state = {
                              // instead of simulating. ALWAYS forced to false on page load and on
                              // any exchange/mode change — see restore() in autotrade.js. Never
                              // persisted as "on" across a refresh, on purpose.
+    lastCanonicalKey: null,  // canonicalKey of the cycle executed on the previous tick — used to
+    lastCanonicalStreak: 0,  // detect "stuck on the same pair" and break the streak (see tick()).
   },
 
   // ---- AI Futures Engine (PAPER MODE only — see js/futures/*.js) ----
