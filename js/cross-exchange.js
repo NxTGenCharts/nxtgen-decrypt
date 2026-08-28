@@ -409,7 +409,7 @@ export async function runXScan(){
     renderOverview();
 
     const ambiguousNote = excludedAmbiguousCount > 0
-      ? ` (excluded ${[...AMBIGUOUS_CROSS_EXCHANGE_TICKERS].join(', ')} from cross-exchange matching — see note above)`
+      ? ` (excluded ${[...AMBIGUOUS_CROSS_EXCHANGE_TICKERS].join(', ')} — this ticker belongs to unrelated projects on different exchanges, so it's dropped from cross-exchange matching to avoid a false gap)`
       : '';
 
     if(filtered.length > 0){
@@ -420,7 +420,7 @@ export async function runXScan(){
     } else if(ranked.length > 0){
       trackWindow(ranked);
       state.lastXScan = { displaySet: ranked, amount, feePct };
-      showXMessage(`No asset cleared your ${minProfit.toFixed(2)}% threshold after a ${(feePct*2).toFixed(2)}% round-trip fee (one taker fee per leg) — showing the closest gaps instead (best is ${fmtPct(ranked[0].profitPct)}). Remember the pre-funded-balance caveat above before treating any of these as capturable.${ambiguousNote}`, 'info');
+      showXMessage(`No asset cleared your ${minProfit.toFixed(2)}% threshold after a ${(feePct*2).toFixed(2)}% round-trip fee (one taker fee per leg) — showing the closest gaps instead (best is ${fmtPct(ranked[0].profitPct)}). Remember this assumes pre-funded balances on both exchanges before treating any of these as capturable.${ambiguousNote}`, 'info');
       applyAdvancedFiltersAndRender();
     } else {
       state.lastXScan = null;
