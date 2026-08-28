@@ -818,6 +818,34 @@ async function placeOrderViaProxy(key, mode, cred, { symbol, side, amountKind, a
   return data; // { ok:true, orderId, filledBaseQty, filledQuoteQty, avgPrice }
 }
 
+// Ground truth for what's actually sitting in the account for one asset —
+// used to size every leg after the first, and every unwind step. A prior
+// order's reported fill (filledBaseQty/filledQuoteQty) is the GROSS traded
+// amount; the exchange's trading fee comes out of the asset you just
+// received, so the wallet ends up holding slightly less than that. Trying
+// to spend/sell the gross figure on the next leg is exactly what produced
+// "Insufficient balance" during unwind. Returns null (rather than
+// throwing) on failure so callers can fall back to the computed amount —
+// a fee-inflated amount that gets rejected is recoverable (the leg just
+// fails and unwind kicks in); silently halting the whole cycle on a
+// transient balance-check failure is worse.
+async function fetchAssetBalance(key, mode, cred, asset){
+  const proxyUrl = (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
+  if(!proxyUrl) return null;
+  try{
+    const res = await fetch(`${proxyUrl}/api/balance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ exchange: key, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, asset }),
+    });
+    const data = await res.json().catch(() => null);
+    if(!data || !data.ok || typeof data.balance !== 'number') return null;
+    return data.balance;
+  }catch(err){
+    return null;
+  }
+}
+
 // The exact reverse of a graph edge: if the edge spent `from` (quote) to
 // buy `to` (base) — a BUY — the reverse sells that same `to` back for
 // `from` — a SELL on the identical symbol, and vice versa. Used to walk
@@ -864,8 +892,18 @@ async function executeCycleReal(cycle, dailyTarget, forcedTest){
     try{
       const result = await placeOrderViaProxy(key, mode, cred, { symbol: leg.symbol, side: leg.side, amountKind, amount: heldAmount });
       legResults.push({ leg, result });
-      heldAmount = leg.side === 'BUY' ? result.filledBaseQty : result.filledQuoteQty;
+      const reportedAmount = leg.side === 'BUY' ? result.filledBaseQty : result.filledQuoteQty;
       heldCurrency = leg.to;
+      // Ground-truth check before the NEXT leg spends this — the reported
+      // fill is gross, before whatever fee the exchange took out of
+      // heldCurrency itself. Skip this after the last leg; nothing spends
+      // it further.
+      if(i < cycle.legs.length - 1){
+        const actual = await fetchAssetBalance(key, mode, cred, heldCurrency);
+        heldAmount = actual != null ? Math.min(reportedAmount, actual) : reportedAmount;
+      } else {
+        heldAmount = reportedAmount;
+      }
     }catch(err){
       failedAtLeg = i;
       failMessage = err.message;
@@ -899,7 +937,15 @@ async function executeCycleReal(cycle, dailyTarget, forcedTest){
     for(let i = failedAtLeg - 1; i >= 0; i--){
       const leg = cycle.legs[i];
       try{
-        const unwind = reverseLeg(leg, heldAmount);
+        // Same ground-truth check as the forward loop, and the actual fix
+        // for the failure in this screenshot: heldAmount coming out of the
+        // failed leg (or the previous unwind hop) is gross, before fees.
+        // Querying the real wallet balance for heldCurrency first is what
+        // stops the unwind sell from being rejected as "Insufficient
+        // balance" for an amount the account never actually held.
+        const actual = await fetchAssetBalance(key, mode, cred, heldCurrency);
+        const sellAmount = actual != null ? Math.min(heldAmount, actual) : heldAmount;
+        const unwind = reverseLeg(leg, sellAmount);
         const unwindResult = await placeOrderViaProxy(key, mode, cred, unwind);
         unwindOrders.push({ symbol: unwind.symbol, side: unwind.side, orderId: unwindResult.orderId, unwind: true });
         heldAmount = unwind.side === 'BUY' ? unwindResult.filledBaseQty : unwindResult.filledQuoteQty;

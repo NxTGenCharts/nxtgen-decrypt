@@ -52,7 +52,7 @@ const BINANCE_BASE = { live: 'https://api.binance.com', demo: 'https://demo-api.
 const BYBIT_BASE = { live: 'https://api.bybit.com', demo: 'https://api-demo.bybit.com' };
 
 // ---- Binance: GET /api/v3/account, signed with HMAC-SHA256 ----
-async function verifyBinance(mode, apiKey, secretKey){
+async function binanceAccount(mode, apiKey, secretKey){
   const base = BINANCE_BASE[mode] || BINANCE_BASE.live;
   const qs = `timestamp=${Date.now()}&recvWindow=5000`;
   const signature = hmacSha256Hex(secretKey, qs);
@@ -63,12 +63,25 @@ async function verifyBinance(mode, apiKey, secretKey){
   if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
     throw new VerifyRejected(data && data.msg ? data.msg : `HTTP ${res.status}`);
   }
+  return data;
+}
+async function verifyBinance(mode, apiKey, secretKey){
+  const data = await binanceAccount(mode, apiKey, secretKey);
   const usdt = (data.balances || []).find(b => b.asset === 'USDT');
   return { balance: usdt ? parseFloat(usdt.free) + parseFloat(usdt.locked) : null };
 }
+// Actual spendable/sellable balance of one asset right now — used to size
+// every leg after the first, and every unwind step, instead of trusting
+// the previous order's reported fill (which is gross, before whatever fee
+// the exchange took out of the asset you just received).
+async function binanceAssetBalance(mode, apiKey, secretKey, asset){
+  const data = await binanceAccount(mode, apiKey, secretKey);
+  const b = (data.balances || []).find(x => x.asset === asset);
+  return b ? parseFloat(b.free) : 0;
+}
 
 // ---- Bybit v5: GET /v5/account/wallet-balance, signed with HMAC-SHA256 ----
-async function verifyBybit(mode, apiKey, secretKey){
+async function bybitWalletBalance(mode, apiKey, secretKey){
   const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
   const timestamp = String(Date.now());
   const recvWindow = '5000';
@@ -87,10 +100,23 @@ async function verifyBybit(mode, apiKey, secretKey){
   if(!res.ok || !data || data.retCode !== 0){
     throw new VerifyRejected(data && data.retMsg ? data.retMsg : `HTTP ${res.status}`);
   }
-  const coins = data.result?.list?.[0]?.coin || [];
+  return data.result?.list?.[0]?.coin || [];
+}
+async function verifyBybit(mode, apiKey, secretKey){
+  const coins = await bybitWalletBalance(mode, apiKey, secretKey);
   const usdt = coins.find(c => c.coin === 'USDT');
   return { balance: usdt ? parseFloat(usdt.walletBalance) : null };
 }
+async function bybitAssetBalance(mode, apiKey, secretKey, asset){
+  const coins = await bybitWalletBalance(mode, apiKey, secretKey);
+  const c = coins.find(x => x.coin === asset);
+  // walletBalance, not equity — equity includes unrealized PnL on
+  // derivatives that spot can't actually spend.
+  return c ? parseFloat(c.walletBalance) : 0;
+}
+
+const ASSET_BALANCE_GETTERS = { binance: binanceAssetBalance, bybit: bybitAssetBalance };
+
 
 const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit };
 
@@ -327,6 +353,32 @@ app.post('/api/order', async (req, res) => {
 });
 
 app.get('/api/health', (req, res) => res.json({ ok:true }));
+
+// ---- Actual current balance of ONE asset — ground truth for sizing any
+// leg after the first, and any unwind step. Never re-derive from a prior
+// order's reported fill; fees come out of the asset you just received and
+// the previous leg's response doesn't tell you that. ----
+app.use('/api/balance', rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
+app.post('/api/balance', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, asset } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !asset){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey, secretKey and asset are all required.' });
+  }
+  const getter = ASSET_BALANCE_GETTERS[exchange];
+  if(!getter){
+    return res.status(400).json({ ok:false, message:`No balance getter for "${exchange}" — only binance and bybit are supported.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const balance = await getter(netMode, apiKey, secretKey, asset);
+    return res.json({ ok:true, balance });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not fetch ${asset} balance on ${exchange}: ${err.message}` });
+  }
+});
 
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err.message); // never log req.body here
