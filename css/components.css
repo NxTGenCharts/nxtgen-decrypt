@@ -169,7 +169,7 @@ button.primary.is-scanning .btn-spinner{ display:inline-block; }
 /* -------------------- 10 & 12. Cross-exchange scanner / tables -------------------- */
 .xrow{
   background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg); padding:14px 18px;
-  display:grid; grid-template-columns:32px 1fr 1fr 1fr 0.9fr 0.85fr 0.95fr 1fr auto; gap:14px; align-items:center;
+  display:grid; grid-template-columns:32px 1fr 1fr 1fr 0.9fr 0.85fr 0.95fr auto; gap:14px; align-items:center;
   margin-bottom:8px; cursor:pointer; transition:border-color .15s, background .15s;
 }
 .xrow:hover{ border-color:#33443a; background:var(--panel-hi); }
@@ -192,9 +192,37 @@ button.primary.is-scanning .btn-spinner{ display:inline-block; }
 .pill.liq-high{ color:var(--green); border-color:var(--green-line); background:var(--green-soft); }
 .pill.liq-medium{ color:var(--amber); border-color:#5a4a1a; background:rgba(240,180,41,.09); }
 .pill.liq-low{ color:var(--red); border-color:var(--red-line); background:var(--red-soft); }
-.pill.tr-yes{ color:var(--green); border-color:var(--green-line); background:var(--green-soft); }
-.pill.tr-no{ color:var(--red); border-color:var(--red-line); background:var(--red-soft); }
-.pill.tr-unknown{ color:var(--dim); border-color:var(--line); }
+
+/* ---- D/W (deposit/withdraw) mini badges — real check/cross for Bitget legs,
+   a neutral "?" for Binance/Bybit legs where that status isn't publicly
+   verifiable without an authenticated account. ---- */
+.dw-pair{ display:inline-flex; gap:3px; margin-top:2px; }
+.dw-ic{
+  display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px;
+  border-radius:4px; font-size:9px; font-weight:700; font-family:var(--disp); border:1px solid var(--line);
+  cursor:default;
+}
+.dw-ic.dw-yes{ color:var(--green); border-color:var(--green-line); background:var(--green-soft); }
+.dw-ic.dw-no{ color:var(--red); border-color:var(--red-line); background:var(--red-soft); }
+.dw-ic.dw-unknown{ color:var(--dim2); border-color:var(--line); }
+
+/* ---- Link-out icon — opens that exchange's own spot trade page for the pair. ---- */
+.xlink{
+  display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px;
+  border-radius:4px; font-size:10px; color:var(--dim); border:1px solid var(--line); margin-left:4px;
+  text-decoration:none; vertical-align:middle;
+}
+.xlink:hover{ color:var(--amber); border-color:var(--amber-dim); background:rgba(240,180,41,.08); }
+
+/* ---- Advanced Filters panel (Cross-Exchange tab) ---- */
+.xfilters-row{ display:flex; align-items:center; gap:12px; margin-bottom:10px; flex-wrap:wrap; }
+.xfilters-summary{ font-size:11px; color:var(--dim); }
+.xfilters{
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px 16px;
+  align-items:end; background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
+  padding:14px 16px; margin-bottom:14px;
+}
+.xfilters .toggle-check{ align-self:end; }
 
 .coin-icon{
   position:relative; display:inline-flex; align-items:center; justify-content:center;

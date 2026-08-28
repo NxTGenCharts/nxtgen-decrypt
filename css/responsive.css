@@ -17,7 +17,7 @@
 
   .xrow{ grid-template-columns:32px 1fr 1fr 1fr auto; row-gap:8px; }
   .xrow.head{ display:none; }
-  .xrow > .xwindow, .xrow > .xliquidity, .xrow > .xtransfer{ grid-column:2 / -1; }
+  .xrow > .xwindow, .xrow > .xliquidity{ grid-column:2 / -1; }
   .xdetail{ grid-template-columns:1fr; }
 }
 
@@ -100,7 +100,6 @@
   .xrow > .xfinal{ grid-column:1 / -1; grid-row:4; }
   .xrow > .xwindow{ grid-column:1; grid-row:5; }
   .xrow > .xliquidity{ grid-column:2; grid-row:5; }
-  .xrow > .xtransfer{ grid-column:1 / -1; grid-row:6; }
   .xrow > .xdetail{ grid-column:1 / -1; }
   .xside::before{ content:attr(data-label); display:block; font-size:9px; text-transform:uppercase; letter-spacing:.07em; color:var(--dim2); margin-bottom:2px; }
   .xfinal::before{ content:attr(data-label); display:block; font-size:9px; text-transform:uppercase; letter-spacing:.07em; color:var(--dim2); margin-bottom:2px; }

@@ -190,10 +190,46 @@
       </div>
     </div>
 
+    <div class="xfilters-row">
+      <button class="primary ghost" id="xFiltersToggleBtn" type="button" aria-expanded="false" aria-controls="xFiltersPanel">Advanced Filters ▾</button>
+      <span class="xfilters-summary" id="xFiltersSummary"></span>
+    </div>
+    <div class="xfilters" id="xFiltersPanel" hidden>
+      <div class="field">
+        <label for="xFilterLiquidity">Min liquidity</label>
+        <select id="xFilterLiquidity" title="Only show rows at or above this liquidity level">
+          <option value="any">Any</option>
+          <option value="medium">Medium &amp; above</option>
+          <option value="high">High only</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="xFilterWindow">Window</label>
+        <select id="xFilterWindow" title="Filter by how long this session has continuously seen the gap">
+          <option value="any">Any</option>
+          <option value="fresh">Just opened only</option>
+          <option value="aged">Aged only</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="xFilterQuote">Quote asset</label>
+        <select id="xFilterQuote" title="Restrict to a specific quote currency">
+          <option value="any">Any</option>
+          <option value="usdt">USDT only</option>
+        </select>
+      </div>
+      <label class="toggle-check" title="Only show routes where Bitget's public data confirms withdraw is enabled on the buy exchange and deposit is enabled on the sell exchange">
+        <input type="checkbox" id="xFilterDwVerified"> D/W confirmed only
+      </label>
+      <label class="toggle-check"><input type="checkbox" id="xFilterExBitget" checked> Bitget</label>
+      <label class="toggle-check"><input type="checkbox" id="xFilterExBinance" checked> Binance</label>
+      <label class="toggle-check"><input type="checkbox" id="xFilterExBybit" checked> Bybit</label>
+    </div>
+
     <div id="xMessages"></div>
     <div class="xrow head">
       <div></div><div>Asset</div><div>Buy on</div><div>Sell on</div><div>Final amount</div>
-      <div>Window</div><div>Liquidity</div><div>Transfer</div><div style="text-align:right;">Profit</div>
+      <div>Window</div><div>Liquidity</div><div style="text-align:right;">Profit</div>
     </div>
     <div class="xresults-wrap" id="xResults">
       <div class="skeleton-row"></div>
@@ -203,8 +239,10 @@
 
     <footer>
       <b>How this works —</b> for every asset traded on 2+ of the selected exchanges, this finds the lowest ask (buy side) and the highest bid (sell side) and computes the spread after two taker fees. It requires the buy and sell exchange to be different — a gap on one exchange against itself isn't arbitrage.<br>
-      <b>Window, Liquidity, Transfer —</b> Window is how long this session's scanner has continuously seen the gap ("just opened" under ~90s). Liquidity compares top-of-book depth and 24h volume on both sides against your trade amount. Transfer is anchored to Bitget's public coin/network status: if Bitget is one leg and has withdrawals or deposits disabled for that coin, it's flagged "Not transferable." Binance and Bybit don't expose network status without an authenticated account, so pairs between just those two show "Unverified" rather than a guess.<br>
-      <b>Read before trading —</b> a live spread here is not automatically capturable — see the banner above. Transfer time, withdrawal fees/limits, and the spread closing before you move funds are the main reasons a real gap this size rarely survives long enough to execute risk-free. This is not financial advice.
+      <b>Window, Liquidity —</b> Window is how long this session's scanner has continuously seen the gap ("just opened" under ~90s). Liquidity compares top-of-book depth and 24h volume on both sides against your trade amount.<br>
+      <b>D/W icons —</b> the small D and W badges next to each exchange show whether this coin is Depositable / Withdrawable on that specific exchange. This is anchored to Bitget's public coin/network status: a green check or red cross next to a Bitget leg is a real, verified answer. Binance and Bybit don't expose network status without an authenticated account, so their D/W badges show a grey "?" ("unverified") rather than a guess — use the ↗ link next to each exchange to check directly on their site before moving funds.<br>
+      <b>Advanced Filters —</b> narrows what's currently displayed (liquidity, window, quote asset, exchanges included, and a "D/W confirmed only" toggle for routes Bitget's data confirms are transferable) without re-scanning the exchanges.<br>
+      <b>Read before trading —</b> a live spread here is not automatically capturable — see the banner above. Transfer time, withdrawal fees/limits, and the spread closing before you move funds are the main reasons a real gap this size rarely survives long enough to execute risk-free. Cost Breakdown's slippage and gas figures are estimates, not quotes. This is not financial advice.
     </footer>
   </div>
 

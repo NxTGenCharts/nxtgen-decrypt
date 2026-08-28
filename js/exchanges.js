@@ -117,6 +117,23 @@ export const EXCHANGES = {
   bybit:   { label:'Bybit',   load:loadBybit, demoSupported:true },
 };
 
+// Direct spot-trading page for a base/quote pair on each exchange — used by
+// the Cross-Exchange table's "open on exchange" links. These mirror each
+// exchange's documented public URL pattern for a spot pair page (not an API
+// call), so a listing/rename on their end could occasionally break one; the
+// link still opens the exchange's own trade UI either way, which is where
+// the user needed to end up anyway.
+export function tradeUrl(exchange, base, quote){
+  if(!base || !quote) return null;
+  const b = encodeURIComponent(base), q = encodeURIComponent(quote);
+  switch(exchange){
+    case 'bitget':  return `https://www.bitget.com/spot/${b}${q}`;
+    case 'binance': return `https://www.binance.com/en/trade/${b}_${q}?type=spot`;
+    case 'bybit':   return `https://www.bybit.com/en/trade/spot/${b}/${q}`;
+    default: return null;
+  }
+}
+
 // National fiat currency codes. Exchanges sometimes list fiat on/off-ramp
 // markets (e.g. USDT/TRY, USDC/IDR) as regular spot pairs, but these are
 // frequently thin, region-restricted, or otherwise not really tradeable the

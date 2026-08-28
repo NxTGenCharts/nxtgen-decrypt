@@ -4,7 +4,7 @@
 // is unchanged from the original monolithic file.
 // =============================================================
 import { els, state } from './state.js';
-import { EXCHANGES, loadBitgetCoinInfo } from './exchanges.js';
+import { EXCHANGES, loadBitgetCoinInfo, tradeUrl } from './exchanges.js';
 import { coinIconHtml, fmtPct, fmtPrice } from './utils.js';
 import { setStatus, showXMessage, updateExchangeBadge, renderOverview } from './ui.js';
 
@@ -101,33 +101,71 @@ function liquidityPill(o, amount){
   return { label:'Low liquidity', cls:'liq-low' };
 }
 
-// ---- Transfer: is moving the coin between these two specific exchanges realistic? ----
-// Only Bitget publishes per-chain withdraw/deposit status without authentication, so this
-// is Bitget-anchored: if Bitget is one leg and has withdrawals/deposits disabled for the
-// coin, that's a hard "not transferable". Otherwise, if Bitget isn't in the pair at all
-// (Binance <-> Bybit), we don't have a public data source to confirm either way.
-function transferPill(o){
-  const info = state.coinNetworkCache.bitget ? state.coinNetworkCache.bitget.get(o.base) : null;
-  const buyIsBitget = o.buyEntry.exchange === 'bitget';
-  const sellIsBitget = o.sellEntry.exchange === 'bitget';
-
-  if(!buyIsBitget && !sellIsBitget){
-    return { label:'Unverified', cls:'tr-unknown' };
-  }
-  if(!info){
-    return { label:'Unverified', cls:'tr-unknown' };
-  }
-  if(buyIsBitget && !info.withdrawable) return { label:'Not transferable', cls:'tr-no' };
-  if(sellIsBitget && !info.rechargeable) return { label:'Not transferable', cls:'tr-no' };
-  return { label:'Transferable', cls:'tr-yes' };
+// ---- Deposit/Withdraw (D/W): is this specific coin depositable/withdrawable
+// on this specific exchange? Only Bitget publishes per-chain withdraw/deposit
+// status without authentication (Binance and Bybit only expose this to a
+// signed, authenticated request), so this is Bitget-anchored: real
+// true/false for Bitget legs, and `null` ("unverified") for Binance/Bybit
+// legs rather than a guess. ----
+function dwStatus(exchange, base){
+  if(exchange !== 'bitget') return { deposit:null, withdraw:null };
+  const info = state.coinNetworkCache.bitget ? state.coinNetworkCache.bitget.get(base) : null;
+  if(!info) return { deposit:null, withdraw:null };
+  return { deposit: info.rechargeable, withdraw: info.withdrawable };
 }
 
-function renderCross(opps, amount){
+function dwIcon(ok, letter, label, exLabel){
+  if(ok === null) return `<span class="dw-ic dw-unknown" title="${label} on ${exLabel}: not publicly verifiable without an authenticated account">${letter}</span>`;
+  return ok
+    ? `<span class="dw-ic dw-yes" title="${label} on ${exLabel}: enabled">${letter}</span>`
+    : `<span class="dw-ic dw-no" title="${label} on ${exLabel}: disabled">${letter}</span>`;
+}
+
+function dwIconsHtml(exchange, base, exLabel){
+  const s = dwStatus(exchange, base);
+  return `<span class="dw-pair">${dwIcon(s.deposit,'D','Deposit', exLabel)}${dwIcon(s.withdraw,'W','Withdraw', exLabel)}</span>`;
+}
+
+// For the "D/W confirmed only" advanced filter — true only when both the
+// specific legs this trade needs (withdraw off the buy exchange, deposit
+// onto the sell exchange) are confirmed enabled by Bitget's public data.
+function isRouteConfirmedTransferable(o){
+  const buyW = dwStatus(o.buyEntry.exchange, o.base).withdraw;
+  const sellD = dwStatus(o.sellEntry.exchange, o.base).deposit;
+  return buyW === true && sellD === true;
+}
+
+// ---- Execution cost breakdown (Spread / Fees / Est. Slippage / Gas / Net
+// Profit) for the expandable detail panel. Slippage is a heuristic — trade
+// size vs. top-of-book depth on the thinner side — since no public ticker
+// endpoint exposes a real slippage figure to query; gas is a flat
+// illustrative estimate, since actual on-chain cost depends on the specific
+// network used to move the coin, which isn't known from spot ticker data
+// alone. Neither is a guarantee — see the banners above the table. ----
+const FLAT_GAS_ESTIMATE_USD = 0.50;
+function estimateSlippagePct(o, amount){
+  const buyTopNotional = o.buyEntry.askQty * o.buyEntry.ask;
+  const sellTopNotional = o.sellEntry.bidQty * o.sellEntry.bid;
+  const thinnest = Math.min(buyTopNotional, sellTopNotional);
+  if(!thinnest) return 0.50; // no depth data at all — fall back to a conservative flat estimate
+  const ratio = amount / thinnest;
+  return Math.min(5, Math.max(0.05, ratio * 0.5));
+}
+function costBreakdown(o, amount, feePct){
+  const spreadPct = (o.sellEntry.bid / o.buyEntry.ask - 1) * 100;
+  const feesPct = feePct * 2;
+  const slippagePct = estimateSlippagePct(o, amount);
+  const gasPctOfAmount = amount > 0 ? (FLAT_GAS_ESTIMATE_USD / amount) * 100 : 0;
+  const netPct = spreadPct - feesPct - slippagePct - gasPctOfAmount;
+  const netUsd = amount * (netPct / 100);
+  return { spreadPct, feesPct, slippagePct, gasUsd:FLAT_GAS_ESTIMATE_USD, netPct, netUsd };
+}
+
+function renderCross(opps, amount, feePct){
   if(opps.length === 0){
     els.xResults.innerHTML = `<div class="empty">No cross-exchange gaps found right now. Try lowering the profit threshold.</div>`;
     return;
   }
-  trackWindow(opps);
   const top = opps.slice(0, 20);
   els.xResults.innerHTML = top.map((o, i) => {
     const label = o.quote === 'USDT' ? o.base : `${o.base}/${o.quote}`;
@@ -137,32 +175,41 @@ function renderCross(opps, amount){
     const sellExLabel = EXCHANGES[o.sellEntry.exchange] ? EXCHANGES[o.sellEntry.exchange].label : o.sellEntry.exchange;
     const win = windowPill(o);
     const liq = liquidityPill(o, amount);
-    const tr = transferPill(o);
+    const buyLink = tradeUrl(o.buyEntry.exchange, o.base, o.quote);
+    const sellLink = tradeUrl(o.sellEntry.exchange, o.base, o.quote);
+    const linkIcon = (url, exLabel, side) => url
+      ? `<a class="xlink" href="${url}" target="_blank" rel="noopener noreferrer" title="Open ${exLabel} spot ${side} for ${label}">↗</a>`
+      : '';
+
+    const cost = costBreakdown(o, amount, feePct);
 
     // Execution-detail panel: purely a re-presentation of the same o.* values
     // already used for the row above (no new calculation happens here).
-    const feesTaken = amount - finalAmt;
     const detailHtml = `<div class="xdetail">
       <div class="xdetail-col">
         <h4>Buy Leg</h4>
-        <div class="xdetail-leg-ex">${buyExLabel} · BUY</div>
+        <div class="xdetail-leg-ex">${buyExLabel} · BUY ${linkIcon(buyLink, buyExLabel, 'buy')}</div>
         <div class="xdetail-line"><span>Ask price</span><b>${fmtPrice(o.buyEntry.ask)}</b></div>
         <div class="xdetail-line"><span>Ask depth (top of book)</span><b>${o.buyEntry.askQty ? o.buyEntry.askQty.toFixed(4) : '–'}</b></div>
         <div class="xdetail-line"><span>24h volume</span><b>${o.buyEntry.quoteVolume24h ? o.buyEntry.quoteVolume24h.toLocaleString(undefined,{maximumFractionDigits:0}) : '–'} ${o.quote}</b></div>
+        <div class="xdetail-line"><span>Deposit / Withdraw</span><b>${dwIconsHtml(o.buyEntry.exchange, o.base, buyExLabel)}</b></div>
       </div>
       <div class="xdetail-col">
         <h4>Sell Leg</h4>
-        <div class="xdetail-leg-ex">${sellExLabel} · SELL</div>
+        <div class="xdetail-leg-ex">${sellExLabel} · SELL ${linkIcon(sellLink, sellExLabel, 'sell')}</div>
         <div class="xdetail-line"><span>Bid price</span><b>${fmtPrice(o.sellEntry.bid)}</b></div>
         <div class="xdetail-line"><span>Bid depth (top of book)</span><b>${o.sellEntry.bidQty ? o.sellEntry.bidQty.toFixed(4) : '–'}</b></div>
         <div class="xdetail-line"><span>24h volume</span><b>${o.sellEntry.quoteVolume24h ? o.sellEntry.quoteVolume24h.toLocaleString(undefined,{maximumFractionDigits:0}) : '–'} ${o.quote}</b></div>
+        <div class="xdetail-line"><span>Deposit / Withdraw</span><b>${dwIconsHtml(o.sellEntry.exchange, o.base, sellExLabel)}</b></div>
       </div>
       <div class="xdetail-col">
-        <h4>Calculation</h4>
-        <div class="xdetail-line"><span>Starting amount</span><b>${amount.toFixed(2)} ${o.quote}</b></div>
-        <div class="xdetail-line"><span>Fees taken (2 legs)</span><b>${feesTaken.toFixed(4)} ${o.quote}</b></div>
-        <div class="xdetail-line total"><span>Estimated final amount</span><b>${finalAmt.toFixed(4)} ${o.quote}</b></div>
-        <div class="xdetail-line"><span>Net profit</span><b class="${o.profitPct<0?'':'mono-num'}" style="color:${o.profitPct<0?'var(--red)':'var(--green)'}">${fmtPct(o.profitPct)}</b></div>
+        <h4>Cost Breakdown</h4>
+        <div class="xdetail-line"><span>Spread</span><b>${fmtPct(cost.spreadPct)}</b></div>
+        <div class="xdetail-line"><span>Fees (${feePct.toFixed(2)}% × 2)</span><b style="color:var(--red)">-${cost.feesPct.toFixed(2)}%</b></div>
+        <div class="xdetail-line"><span>Est. Slippage</span><b style="color:var(--red)">-${cost.slippagePct.toFixed(2)}%</b></div>
+        <div class="xdetail-line"><span>Gas (flat est.)</span><b style="color:var(--red)">~$${cost.gasUsd.toFixed(2)}</b></div>
+        <div class="xdetail-line total"><span>Net Profit</span><b class="mono-num" style="color:${cost.netPct<0?'var(--red)':'var(--green)'}">${fmtPct(cost.netPct)}</b></div>
+        <div class="xdetail-line"><span>(on ${amount.toFixed(0)} ${o.quote} trade)</span><b class="mono-num" style="color:${cost.netUsd<0?'var(--red)':'var(--green)'}">${cost.netUsd>=0?'+':''}${cost.netUsd.toFixed(2)} ${o.quote}</b></div>
       </div>
     </div>`;
 
@@ -170,17 +217,18 @@ function renderCross(opps, amount){
       <div class="rank ${i===0?'top1':''}">#${i+1}</div>
       <div class="xasset">${coinIconHtml(o.base,20)}<span>${label}</span></div>
       <div class="xside" data-label="Buy on">
-        <span class="exch ${o.buyEntry.exchange}">${buyExLabel}</span>
+        <span class="exch ${o.buyEntry.exchange}">${buyExLabel}</span>${linkIcon(buyLink, buyExLabel, 'buy')}
         <span class="price">ask ${fmtPrice(o.buyEntry.ask)}</span>
+        ${dwIconsHtml(o.buyEntry.exchange, o.base, buyExLabel)}
       </div>
       <div class="xside" data-label="Sell on">
-        <span class="exch ${o.sellEntry.exchange}">${sellExLabel}</span>
+        <span class="exch ${o.sellEntry.exchange}">${sellExLabel}</span>${linkIcon(sellLink, sellExLabel, 'sell')}
         <span class="price">bid ${fmtPrice(o.sellEntry.bid)}</span>
+        ${dwIconsHtml(o.sellEntry.exchange, o.base, sellExLabel)}
       </div>
       <div class="xfinal" data-label="Final amount">${finalAmt.toFixed(2)} ${o.quote}</div>
       <div class="xwindow"><span class="pill ${win.cls}">${win.label}</span></div>
       <div class="xliquidity"><span class="pill ${liq.cls}">${liq.label}</span></div>
-      <div class="xtransfer"><span class="pill ${tr.cls}">${tr.label}</span></div>
       <div class="${profitClass} xprofit">${fmtPct(o.profitPct)}</div>
       ${detailHtml}
     </div>`;
@@ -188,7 +236,10 @@ function renderCross(opps, amount){
 }
 
 // Expand/collapse the execution-detail panel on click (presentation only).
+// Clicks on the "open exchange" link should just open the link, not also
+// toggle the row.
 els.xResults.addEventListener('click', (e) => {
+  if(e.target.closest('.xlink')) return;
   const row = e.target.closest('.xrow');
   if(!row || row.classList.contains('head')) return;
   const open = row.classList.toggle('xrow--open');
@@ -202,6 +253,74 @@ els.xResults.addEventListener('keydown', (e) => {
   const open = row.classList.toggle('xrow--open');
   row.setAttribute('aria-expanded', open ? 'true' : 'false');
 });
+
+// ---- Advanced filters: a display-only narrowing layer on top of whatever
+// the last scan already found. Re-applying these never re-fetches from the
+// exchanges — it just re-filters/re-renders state.lastXScan.displaySet, so
+// toggling a checkbox is instant. ----
+function currentFilterSelections(){
+  return {
+    minLiquidity: els.xFilterLiquidity ? els.xFilterLiquidity.value : 'any',   // 'any' | 'medium' | 'high'
+    window: els.xFilterWindow ? els.xFilterWindow.value : 'any',                // 'any' | 'fresh' | 'aged'
+    quote: els.xFilterQuote ? els.xFilterQuote.value : 'any',                   // 'any' | 'usdt'
+    dwVerifiedOnly: els.xFilterDwVerified ? els.xFilterDwVerified.checked : false,
+    exchanges: {
+      bitget: els.xFilterExBitget ? els.xFilterExBitget.checked : true,
+      binance: els.xFilterExBinance ? els.xFilterExBinance.checked : true,
+      bybit: els.xFilterExBybit ? els.xFilterExBybit.checked : true,
+    },
+  };
+}
+
+function passesAdvancedFilters(o, f, amount){
+  if(f.quote === 'usdt' && o.quote !== 'USDT') return false;
+  if(!f.exchanges[o.buyEntry.exchange] || !f.exchanges[o.sellEntry.exchange]) return false;
+  if(f.minLiquidity !== 'any'){
+    const liq = liquidityPill(o, amount);
+    if(f.minLiquidity === 'high' && liq.cls !== 'liq-high') return false;
+    if(f.minLiquidity === 'medium' && liq.cls === 'liq-low') return false;
+  }
+  if(f.window !== 'any'){
+    const win = windowPill(o);
+    if(f.window === 'fresh' && win.cls !== 'win-fresh') return false;
+    if(f.window === 'aged' && win.cls !== 'win-aged') return false;
+  }
+  if(f.dwVerifiedOnly && !isRouteConfirmedTransferable(o)) return false;
+  return true;
+}
+
+export function applyAdvancedFiltersAndRender(){
+  if(!state.lastXScan) return;
+  const { displaySet, amount, feePct } = state.lastXScan;
+  const f = currentFilterSelections();
+  const narrowed = displaySet.filter(o => passesAdvancedFilters(o, f, amount));
+
+  if(els.xFiltersSummary){
+    els.xFiltersSummary.textContent = narrowed.length === displaySet.length
+      ? ''
+      : `Advanced filters: showing ${narrowed.length} of ${displaySet.length} opportunities.`;
+  }
+  if(narrowed.length === 0){
+    els.xResults.innerHTML = displaySet.length > 0
+      ? `<div class="empty">No opportunities match your advanced filters. Try relaxing them.</div>`
+      : `<div class="empty">No cross-exchange gaps found right now. Try lowering the profit threshold.</div>`;
+    return;
+  }
+  renderCross(narrowed, amount, feePct);
+}
+
+function initXFilters(){
+  if(!els.xFiltersToggleBtn || !els.xFiltersPanel) return;
+  els.xFiltersToggleBtn.addEventListener('click', () => {
+    const open = els.xFiltersPanel.hasAttribute('hidden') ? true : false;
+    if(open){ els.xFiltersPanel.removeAttribute('hidden'); } else { els.xFiltersPanel.setAttribute('hidden',''); }
+    els.xFiltersToggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    els.xFiltersToggleBtn.textContent = open ? 'Advanced Filters ▴' : 'Advanced Filters ▾';
+  });
+  const controls = [els.xFilterLiquidity, els.xFilterWindow, els.xFilterQuote, els.xFilterDwVerified, els.xFilterExBitget, els.xFilterExBinance, els.xFilterExBybit];
+  controls.forEach(el => { if(el) el.addEventListener('change', applyAdvancedFiltersAndRender); });
+}
+initXFilters();
 
 export async function runXScan(){
   const startedAt = Date.now();
@@ -240,7 +359,7 @@ export async function runXScan(){
     }
 
     // Fetch Bitget's public coin/network directory once per session — powers the
-    // "Transfer" column. Non-fatal if it fails; those rows just show "Unverified".
+    // D/W badges on Bitget legs. Non-fatal if it fails; those rows just show "?" (unverified).
     if(!state.coinNetworkCache.bitget){
       try{
         state.coinNetworkCache.bitget = await loadBitgetCoinInfo();
@@ -294,12 +413,17 @@ export async function runXScan(){
       : '';
 
     if(filtered.length > 0){
-      renderCross(filtered, amount);
+      trackWindow(filtered);
+      state.lastXScan = { displaySet: filtered, amount, feePct };
       showXMessage((failed.length ? `${failed.join(', ')} couldn't be reached this scan — comparison below uses whichever exchanges responded.` : '') + ambiguousNote, (failed.length || excludedAmbiguousCount) ? 'info' : '');
+      applyAdvancedFiltersAndRender();
     } else if(ranked.length > 0){
-      renderCross(ranked, amount);
+      trackWindow(ranked);
+      state.lastXScan = { displaySet: ranked, amount, feePct };
       showXMessage(`No asset cleared your ${minProfit.toFixed(2)}% threshold after a ${(feePct*2).toFixed(2)}% round-trip fee (one taker fee per leg) — showing the closest gaps instead (best is ${fmtPct(ranked[0].profitPct)}). Remember the pre-funded-balance caveat above before treating any of these as capturable.${ambiguousNote}`, 'info');
+      applyAdvancedFiltersAndRender();
     } else {
+      state.lastXScan = null;
       els.xResults.innerHTML = `<div class="empty">No shared assets found across the responding exchanges.</div>`;
       showXMessage(ambiguousNote ? ambiguousNote.replace(/^\s*\(/, '(') : '', ambiguousNote ? 'info' : '');
     }

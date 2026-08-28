@@ -48,6 +48,16 @@ export const els = {
   xStatAssets: document.getElementById('xStatAssets'),
   xStatBest: document.getElementById('xStatBest'),
   xStatAvg: document.getElementById('xStatAvg'),
+  xFiltersToggleBtn: document.getElementById('xFiltersToggleBtn'),
+  xFiltersPanel: document.getElementById('xFiltersPanel'),
+  xFiltersSummary: document.getElementById('xFiltersSummary'),
+  xFilterLiquidity: document.getElementById('xFilterLiquidity'),
+  xFilterWindow: document.getElementById('xFilterWindow'),
+  xFilterQuote: document.getElementById('xFilterQuote'),
+  xFilterDwVerified: document.getElementById('xFilterDwVerified'),
+  xFilterExBitget: document.getElementById('xFilterExBitget'),
+  xFilterExBinance: document.getElementById('xFilterExBinance'),
+  xFilterExBybit: document.getElementById('xFilterExBybit'),
   // --- presentation-layer elements (dashboard, nav, badges) ---
   tabOverviewBtn: document.getElementById('tabOverviewBtn'),
   panelOverview: document.getElementById('panelOverview'),
@@ -153,6 +163,7 @@ export const state = {
 
   lastTri: null, // populated after each triangular scan from real results
   lastX: null,   // populated after each cross-exchange scan from real results
+  lastXScan: null, // { displaySet, amount, feePct } snapshot the Advanced Filters panel re-filters/re-renders without re-scanning
 
   // ---- Window: how long each gap has been visible across scans (client-side, this session) ----
   xFirstSeen: new Map(), // "base|quote|buyExch|sellExch" -> timestamp first observed
