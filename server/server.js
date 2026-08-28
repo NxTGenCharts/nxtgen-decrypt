@@ -219,6 +219,7 @@ async function bybitSymbolFilters(base, symbol){
   if(!s) throw new Error(`Unknown Bybit symbol ${symbol}`);
   return {
     basePrecisionStep: parseFloat(s.lotSizeFilter?.basePrecision || '0.00000001'),
+    quotePrecisionStep: parseFloat(s.lotSizeFilter?.quotePrecision || '0.00000001'),
     minOrderQty: parseFloat(s.lotSizeFilter?.minOrderQty || '0'),
     minOrderAmt: parseFloat(s.lotSizeFilter?.minOrderAmt || '0'),
   };
@@ -248,12 +249,23 @@ async function bybitSignedRequest(base, apiKey, secretKey, method, path, bodyOrQ
 
 async function placeBybitOrder(mode, apiKey, secretKey, { symbol, side, amountKind, amount }){
   const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  // Bybit rejects a market order's qty ("Market order amount decimal too
+  // long") if it has more decimal places than the symbol's precision for
+  // whichever side you're specifying — basePrecision when qty means base
+  // coin, quotePrecision when qty means quote coin (amountKind:'quote').
+  // The base-side rounding below was already handled; the quote side was
+  // being sent as a raw, unrounded float, which is what was failing here.
+  const filters = await bybitSymbolFilters(base, symbol);
   let qty = amount;
   if(amountKind === 'base'){
-    const filters = await bybitSymbolFilters(base, symbol);
     qty = floorToStep(amount, filters.basePrecisionStep || 0.00000001);
     if(qty <= 0 || qty < filters.minOrderQty){
       throw new VerifyRejected(`Amount ${amount} ${symbol} rounds down to ${qty}, below the exchange minimum (${filters.minOrderQty}) — nothing was sent.`);
+    }
+  } else {
+    qty = floorToStep(amount, filters.quotePrecisionStep || 0.00000001);
+    if(qty <= 0 || qty < filters.minOrderAmt){
+      throw new VerifyRejected(`Amount ${amount} ${symbol} rounds down to ${qty}, below the exchange minimum order amount (${filters.minOrderAmt}) — nothing was sent.`);
     }
   }
   const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
