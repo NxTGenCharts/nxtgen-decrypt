@@ -262,7 +262,7 @@
       </div>
       <div class="field">
         <label for="atMinProfit" title="Autotrade never fires below 0.8% regardless of this value">Min profit to autotrade (%)</label>
-        <input id="atMinProfit" type="number" min="0.8" max="10" step="0.05" value="0.8">
+        <input id="atMinProfit" type="number" min="0.8" max="10" step="0.05" value="1.2">
       </div>
       <div class="field">
         <label for="atTestMode" title="Executes the best cycle found on every scan, even if it's break-even or a loss — bypasses the 0.8% floor entirely. This is for confirming the execute → log → balance-update path works end-to-end; it will make genuinely bad trades on purpose, so only use it in Demo mode, and turn it off before running for real.">Test mode <span class="pill" style="margin-left:4px;color:var(--red);border-color:var(--red-line);">forces unprofitable trades</span></label>
