@@ -1,11 +1,67 @@
 // =============================================================
-// exchanges.js — Bitget / Binance / Bybit loaders and
-// exchange-specific normalization. Logic unchanged from the
-// original monolithic file.
+// exchanges.js — Bitget / Binance / Bybit / MEXC / Gate.io loaders
+// and exchange-specific normalization.
+//
+// Market data is fetched from ONE place: this app's own backend (see
+// /server, same server that already signs verify/balance/order calls),
+// which fetches all five exchanges server-side and hands back one merged
+// response. That's what actually fixes the "connects on some devices,
+// takes minutes on others" problem — it wasn't a per-device setting, it
+// was every browser independently hitting five exchanges whose public
+// endpoints are reachable inconsistently depending on the caller's
+// network/ISP/VPN/region, one after another, so a single slow/blocked
+// exchange stalled everything queued behind it. Routing through a fixed
+// server means every device gets the exact same fast, already-cached
+// answer, with nothing to configure — same pattern Genesis Arbitrage
+// (or any site that "just works") uses under the hood.
+//
+// If the backend is ever unreachable, each loader below falls back to
+// the original direct-from-browser call so the app keeps working (with
+// the old variability) rather than going fully dark.
 // =============================================================
 import { fetchJSON } from './api.js';
+import { DEFAULT_VERIFY_PROXY_URL } from './state.js';
 
-export async function loadBitget(){
+const MARKET_PROXY_BASE = DEFAULT_VERIFY_PROXY_URL;
+const MARKET_CACHE_MS = 2000; // matches the server's own cache window
+
+let marketCache = { data: null, at: 0 };
+let marketInFlight = null;
+
+// One shared request feeds all five loaders below. Whichever loader is
+// called first in a given scan triggers the real network request; the
+// other four (called moments later in the same pass) just read the
+// already-resolved result — so a "load every exchange" pass is one round
+// trip to our server, not five round trips to five different exchanges.
+async function fetchMergedMarkets(){
+  const now = Date.now();
+  if(marketCache.data && (now - marketCache.at) < MARKET_CACHE_MS) return marketCache.data;
+  if(marketInFlight) return marketInFlight;
+  marketInFlight = (async () => {
+    const data = await fetchJSON(MARKET_PROXY_BASE + '/api/markets');
+    marketCache = { data, at: Date.now() };
+    return data;
+  })();
+  try{
+    return await marketInFlight;
+  } finally {
+    marketInFlight = null;
+  }
+}
+
+async function loadViaProxy(key, directLoader){
+  try{
+    const merged = await fetchMergedMarkets();
+    const entry = merged && merged[key];
+    if(entry && entry.ok && Array.isArray(entry.pairs)) return entry.pairs;
+    throw new Error((entry && entry.error) || `market proxy returned no ${key} data`);
+  }catch(proxyErr){
+    console.warn(`Market proxy unavailable for ${key} (${proxyErr.message}) — falling back to a direct call.`);
+    return directLoader();
+  }
+}
+
+async function loadBitgetDirect(){
   const [symbolsRes, tickersRes] = await Promise.all([
     fetchJSON('https://api.bitget.com/api/v2/spot/public/symbols'),
     fetchJSON('https://api.bitget.com/api/v2/spot/market/tickers'),
@@ -39,7 +95,7 @@ export async function loadBitget(){
 
 // Public coin/network directory — used to flag when Bitget itself has withdrawals
 // or deposits disabled for a coin (a hard, verifiable "not transferable" signal).
-export async function loadBitgetCoinInfo(){
+async function loadBitgetCoinInfoDirect(){
   const res = await fetchJSON('https://api.bitget.com/api/v2/spot/public/coins');
   if(res.code !== '00000') throw new Error('coins: ' + res.msg);
   const map = new Map();
@@ -54,7 +110,7 @@ export async function loadBitgetCoinInfo(){
   return map;
 }
 
-export async function loadBinance(){
+async function loadBinanceDirect(){
   const base = 'https://api.binance.com';
   const [infoRes, tickerRes] = await Promise.all([
     fetchJSON(base + '/api/v3/exchangeInfo'),
@@ -81,7 +137,7 @@ export async function loadBinance(){
   return pairs;
 }
 
-export async function loadBybit(){
+async function loadBybitDirect(){
   const base = 'https://api.bybit.com';
   const [infoRes, tickerRes] = await Promise.all([
     fetchJSON(base + '/v5/market/instruments-info?category=spot'),
@@ -114,7 +170,7 @@ export async function loadBybit(){
 // MEXC's Spot API v3 is intentionally modeled on Binance's — same
 // exchangeInfo/ticker/24hr shape, same bid/ask-on-the-ticker convenience —
 // so this loader mirrors loadBinance() above.
-export async function loadMexc(){
+async function loadMexcDirect(){
   const base = 'https://api.mexc.com';
   const [infoRes, tickerRes] = await Promise.all([
     fetchJSON(base + '/api/v3/exchangeInfo'),
@@ -144,7 +200,7 @@ export async function loadMexc(){
 // Gate.io Spot API v4 — currency_pairs for the tradeable list, tickers for
 // live bid/ask + volume. Gate.io uses "BASE_QUOTE" symbols (underscore),
 // unlike the concatenated symbols the other three exchanges use.
-export async function loadGateio(){
+async function loadGateioDirect(){
   const base = 'https://api.gateio.ws';
   const [pairsRes, tickerRes] = await Promise.all([
     fetchJSON(base + '/api/v4/spot/currency_pairs'),
@@ -169,6 +225,25 @@ export async function loadGateio(){
     });
   }
   return pairs;
+}
+
+export async function loadBitget(){ return loadViaProxy('bitget', loadBitgetDirect); }
+export async function loadBinance(){ return loadViaProxy('binance', loadBinanceDirect); }
+export async function loadBybit(){ return loadViaProxy('bybit', loadBybitDirect); }
+export async function loadMexc(){ return loadViaProxy('mexc', loadMexcDirect); }
+export async function loadGateio(){ return loadViaProxy('gateio', loadGateioDirect); }
+
+export async function loadBitgetCoinInfo(){
+  try{
+    const res = await fetchJSON(MARKET_PROXY_BASE + '/api/markets/bitget-coins');
+    if(!res.ok || !Array.isArray(res.coins)) throw new Error(res.error || 'malformed response');
+    const map = new Map();
+    for(const c of res.coins) map.set(c.coin, { withdrawable: c.withdrawable, rechargeable: c.rechargeable });
+    return map;
+  }catch(proxyErr){
+    console.warn(`Market proxy unavailable for bitget coin info (${proxyErr.message}) — falling back to a direct call.`);
+    return loadBitgetCoinInfoDirect();
+  }
 }
 
 export const EXCHANGES = {

@@ -553,6 +553,240 @@ app.post('/api/order', async (req, res) => {
   }
 });
 
+// =============================================================
+// Market data — Bitget/Binance/Bybit/MEXC/Gate.io tickers, fetched
+// server-side and merged into one response.
+//
+// Why this exists: the front-end used to call each exchange's public
+// REST API directly from the browser, one after another. Two problems
+// came from that: (1) sequential requests meant one slow exchange
+// stalled every exchange queued behind it, and (2) Binance/MEXC's
+// public endpoints are reachable inconsistently depending on the
+// caller's network/ISP/VPN/region — so "connected" behaved differently
+// on every device. Doing the fetch here instead means it always runs
+// from the same server, in parallel, regardless of which device or
+// network the person is on — the front-end just asks this one endpoint
+// and gets a consistent answer every time.
+// =============================================================
+async function fetchJSON(url, timeoutMs = 10_000){
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try{
+    const res = await fetch(url, { signal: ctrl.signal });
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchBitgetMarkets(){
+  const [symbolsRes, tickersRes] = await Promise.all([
+    fetchJSON('https://api.bitget.com/api/v2/spot/public/symbols'),
+    fetchJSON('https://api.bitget.com/api/v2/spot/market/tickers'),
+  ]);
+  if(symbolsRes.code !== '00000') throw new Error('symbols: ' + symbolsRes.msg);
+  if(tickersRes.code !== '00000') throw new Error('tickers: ' + tickersRes.msg);
+  const tickerMap = new Map();
+  for(const t of tickersRes.data) tickerMap.set(t.symbol, t);
+  const pairs = [];
+  for(const s of symbolsRes.data){
+    if(s.status !== 'online') continue;
+    const t = tickerMap.get(s.symbol);
+    if(!t || !t.bidPr || !t.askPr) continue;
+    const bid = parseFloat(t.bidPr), ask = parseFloat(t.askPr);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.symbol, base:s.baseCoin, quote:s.quoteCoin, bid, ask,
+      last: parseFloat(t.close) || (bid + ask) / 2,
+      bidQty: parseFloat(t.bidSz) || 0, askQty: parseFloat(t.askSz) || 0,
+      quoteVolume24h: parseFloat(t.quoteVolume) || 0,
+    });
+  }
+  return pairs;
+}
+
+async function fetchBinanceMarkets(){
+  const base = 'https://api.binance.com';
+  const [infoRes, tickerRes] = await Promise.all([
+    fetchJSON(base + '/api/v3/exchangeInfo'),
+    fetchJSON(base + '/api/v3/ticker/24hr'),
+  ]);
+  const tickerMap = new Map();
+  for(const t of tickerRes) tickerMap.set(t.symbol, t);
+  const pairs = [];
+  for(const s of infoRes.symbols){
+    if(s.status !== 'TRADING') continue;
+    const t = tickerMap.get(s.symbol);
+    if(!t || !t.bidPrice || !t.askPrice) continue;
+    const bid = parseFloat(t.bidPrice), ask = parseFloat(t.askPrice);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.symbol, base:s.baseAsset, quote:s.quoteAsset, bid, ask,
+      last: parseFloat(t.lastPrice) || (bid + ask) / 2,
+      bidQty: parseFloat(t.bidQty) || 0, askQty: parseFloat(t.askQty) || 0,
+      quoteVolume24h: parseFloat(t.quoteVolume) || 0,
+    });
+  }
+  return pairs;
+}
+
+async function fetchBybitMarkets(){
+  const base = 'https://api.bybit.com';
+  const [infoRes, tickerRes] = await Promise.all([
+    fetchJSON(base + '/v5/market/instruments-info?category=spot'),
+    fetchJSON(base + '/v5/market/tickers?category=spot'),
+  ]);
+  if(infoRes.retCode !== 0) throw new Error('instruments: ' + infoRes.retMsg);
+  if(tickerRes.retCode !== 0) throw new Error('tickers: ' + tickerRes.retMsg);
+  const tickerMap = new Map();
+  for(const t of tickerRes.result.list) tickerMap.set(t.symbol, t);
+  const pairs = [];
+  for(const s of infoRes.result.list){
+    if(s.status !== 'Trading') continue;
+    const t = tickerMap.get(s.symbol);
+    if(!t || !t.bid1Price || !t.ask1Price) continue;
+    const bid = parseFloat(t.bid1Price), ask = parseFloat(t.ask1Price);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.symbol, base:s.baseCoin, quote:s.quoteCoin, bid, ask,
+      last: parseFloat(t.lastPrice) || (bid + ask) / 2,
+      bidQty: parseFloat(t.bid1Size) || 0, askQty: parseFloat(t.ask1Size) || 0,
+      quoteVolume24h: parseFloat(t.turnover24h) || 0,
+    });
+  }
+  return pairs;
+}
+
+async function fetchMexcMarkets(){
+  const base = 'https://api.mexc.com';
+  const [infoRes, tickerRes] = await Promise.all([
+    fetchJSON(base + '/api/v3/exchangeInfo'),
+    fetchJSON(base + '/api/v3/ticker/24hr'),
+  ]);
+  const tickerMap = new Map();
+  for(const t of tickerRes) tickerMap.set(t.symbol, t);
+  const pairs = [];
+  for(const s of infoRes.symbols){
+    if(s.status !== 'ENABLED' && s.status !== '1') continue;
+    const t = tickerMap.get(s.symbol);
+    if(!t || !t.bidPrice || !t.askPrice) continue;
+    const bid = parseFloat(t.bidPrice), ask = parseFloat(t.askPrice);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.symbol, base:s.baseAsset, quote:s.quoteAsset, bid, ask,
+      last: parseFloat(t.lastPrice) || (bid + ask) / 2,
+      bidQty: parseFloat(t.bidQty) || 0, askQty: parseFloat(t.askQty) || 0,
+      quoteVolume24h: parseFloat(t.quoteVolume) || 0,
+    });
+  }
+  return pairs;
+}
+
+async function fetchGateioMarkets(){
+  const base = 'https://api.gateio.ws';
+  const [pairsRes, tickerRes] = await Promise.all([
+    fetchJSON(base + '/api/v4/spot/currency_pairs'),
+    fetchJSON(base + '/api/v4/spot/tickers'),
+  ]);
+  const tickerMap = new Map();
+  for(const t of tickerRes) tickerMap.set(t.currency_pair, t);
+  const pairs = [];
+  for(const s of pairsRes){
+    if(s.trade_status !== 'tradable') continue;
+    const t = tickerMap.get(s.id);
+    if(!t || !t.highest_bid || !t.lowest_ask) continue;
+    const bid = parseFloat(t.highest_bid), ask = parseFloat(t.lowest_ask);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.id, base:s.base, quote:s.quote, bid, ask,
+      last: parseFloat(t.last) || (bid + ask) / 2,
+      bidQty: 0, askQty: 0,
+      quoteVolume24h: parseFloat(t.quote_volume) || 0,
+    });
+  }
+  return pairs;
+}
+
+const MARKET_LOADERS = {
+  bitget: fetchBitgetMarkets, binance: fetchBinanceMarkets, bybit: fetchBybitMarkets,
+  mexc: fetchMexcMarkets, gateio: fetchGateioMarkets,
+};
+
+// Shared, in-memory, short-lived cache — every device hitting this server
+// within the TTL gets the same already-fetched data instead of triggering
+// its own round trip to five exchanges. inFlight coalesces concurrent
+// requests that land while a fetch is already running, so a burst of
+// simultaneous callers still only ever causes one upstream fetch per exchange.
+const MARKET_CACHE_TTL_MS = 3000;
+let marketCache = { data: null, at: 0 };
+let marketInFlight = null;
+
+async function getMarketsCached(){
+  const now = Date.now();
+  if(marketCache.data && (now - marketCache.at) < MARKET_CACHE_TTL_MS) return marketCache.data;
+  if(marketInFlight) return marketInFlight;
+  marketInFlight = (async () => {
+    const keys = Object.keys(MARKET_LOADERS);
+    const settled = await Promise.allSettled(keys.map(k => MARKET_LOADERS[k]()));
+    const out = { fetchedAt: Date.now() };
+    keys.forEach((k, i) => {
+      const r = settled[i];
+      out[k] = r.status === 'fulfilled'
+        ? { ok: true, pairs: r.value }
+        : { ok: false, error: String((r.reason && r.reason.message) || r.reason) };
+    });
+    marketCache = { data: out, at: Date.now() };
+    return out;
+  })();
+  try{
+    return await marketInFlight;
+  } finally {
+    marketInFlight = null;
+  }
+}
+
+app.use('/api/markets', rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
+app.get('/api/markets', async (req, res) => {
+  try{
+    const data = await getMarketsCached();
+    res.set('Cache-Control', 'public, max-age=2');
+    res.json(data);
+  }catch(err){
+    res.status(502).json({ error: 'Could not fetch market data: ' + err.message });
+  }
+});
+
+// Bitget's coin/network directory (withdraw/deposit flags for D/W badges).
+// Changes rarely, so this gets a much longer cache TTL than tickers.
+const COININFO_CACHE_TTL_MS = 10 * 60 * 1000;
+let coinInfoCache = { data: null, at: 0 };
+async function getBitgetCoinInfoCached(){
+  const now = Date.now();
+  if(coinInfoCache.data && (now - coinInfoCache.at) < COININFO_CACHE_TTL_MS) return coinInfoCache.data;
+  const res = await fetchJSON('https://api.bitget.com/api/v2/spot/public/coins');
+  if(res.code !== '00000') throw new Error('coins: ' + res.msg);
+  const list = res.data.map(c => {
+    let withdrawable = false, rechargeable = false;
+    for(const ch of (c.chains || [])){
+      if(ch.withdrawable === 'true') withdrawable = true;
+      if(ch.rechargeable === 'true') rechargeable = true;
+    }
+    return { coin: c.coin, withdrawable, rechargeable };
+  });
+  coinInfoCache = { data: list, at: Date.now() };
+  return list;
+}
+app.get('/api/markets/bitget-coins', async (req, res) => {
+  try{
+    const list = await getBitgetCoinInfoCached();
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json({ ok: true, coins: list });
+  }catch(err){
+    res.status(502).json({ ok: false, error: 'Could not fetch coin info: ' + err.message });
+  }
+});
+
 app.get('/api/health', (req, res) => res.json({ ok:true }));
 
 // ---- Actual current balance of ONE asset — ground truth for sizing any

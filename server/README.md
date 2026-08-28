@@ -1,12 +1,22 @@
 # nxtgen-verify-proxy
 
-A tiny backend with exactly one real job: sign a read-only "what's my
-balance" request to Binance, Bybit, MEXC, or Gate.io on behalf of the
-Autotrade & Balances panel, and hand back the answer. It exists because browsers cannot do this
-themselves — these exchanges reject authenticated requests that come from a
-browser origin (CORS), regardless of whether the key is valid. This is not
-a workaround for that restriction; it's the standard shape of the fix:
-the signing happens server-side, where CORS doesn't apply.
+A small backend with two jobs:
+
+1. Sign a read-only "what's my balance" request to Binance, Bybit, MEXC,
+   or Gate.io on behalf of the Autotrade & Balances panel, and hand back
+   the answer. Browsers cannot do this themselves — these exchanges
+   reject authenticated requests that come from a browser origin (CORS),
+   regardless of whether the key is valid. This is not a workaround for
+   that restriction; it's the standard shape of the fix: the signing
+   happens server-side, where CORS doesn't apply.
+2. Fetch public market data (Bitget/Binance/Bybit/MEXC/Gate.io tickers)
+   for the Overview, Cross-Exchange, and Triangular Arbitrage screens, and
+   hand back one merged, cached response — see `/api/markets` below. This
+   is what makes "connected" behave the same on every device: instead of
+   each browser independently calling five exchanges (whose public
+   endpoints are reachable inconsistently depending on the caller's own
+   network/ISP/VPN/region), this one server does it, from the same place,
+   every time, and every device just asks it.
 
 **This proxy never places an order, never withdraws or moves funds, and
 never stores a key.** Each request signs and forwards, in memory, for the
@@ -26,6 +36,15 @@ it's under 120 lines specifically so that's easy to verify yourself.
   - `verified: true` — the exchange confirmed the key and returned a balance.
   - `rejected: true` — the exchange explicitly said the key/secret is invalid. Trust this.
   - both `false` — couldn't reach the exchange (network hiccup, outage). Not a verdict on the key.
+- `GET /api/markets` — public market data for all five exchanges, fetched
+  server-side in parallel and cached for 3 seconds. Returns
+  `{ fetchedAt, bitget: { ok, pairs }, binance: {...}, bybit: {...}, mexc: {...}, gateio: {...} }`;
+  an exchange that failed to respond comes back as `{ ok:false, error }`
+  instead of failing the whole request. The front-end already points at
+  this automatically (see `DEFAULT_VERIFY_PROXY_URL` in `js/state.js`) —
+  nothing to configure per device.
+- `GET /api/markets/bitget-coins` — Bitget's withdraw/deposit-enabled coin
+  directory, cached for 10 minutes.
 - `GET /api/health` — liveness check, returns `{ ok: true }`.
 
 ## Run it locally
