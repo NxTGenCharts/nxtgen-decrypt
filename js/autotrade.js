@@ -994,8 +994,22 @@ async function executeCycleReal(cycle, dailyTarget, forcedTest){
   }
 
   if(failedAtLeg === -1){
-    // All three legs filled — heldAmount is now back in the anchor currency.
-    const profitAmt = heldAmount - spendAmount;
+    // All three legs filled. reportedAmount from the last leg is gross —
+    // before that leg's own trading fee comes out of the anchor currency
+    // it just landed in — and unlike every leg before it, there's nothing
+    // further to spend it on, so there was never a ground-truth check to
+    // catch that. The fix isn't to re-read "current anchor balance" the
+    // way intermediate legs do, though: by now that balance also includes
+    // whatever was sitting idle before this cycle (unspent capital, prior
+    // cycles' proceeds), not just this cycle's result. What actually
+    // isolates this cycle's real, fee-inclusive P&L is the CHANGE in
+    // anchor-currency balance across the whole cycle — startBal (already
+    // read before leg 1) versus one fresh read right now. That's the same
+    // measurement the daily total below is grounded in, so the two always
+    // agree instead of the daily number quietly drifting further negative
+    // than the sum of the rows above it.
+    const endAnchorBal = await fetchAssetBalance(key, mode, cred, cycle.path[0]);
+    const profitAmt = endAnchorBal != null ? (endAnchorBal - startBal) : (heldAmount - spendAmount);
     const profitPct = spendAmount > 0 ? (profitAmt / spendAmount) * 100 : 0;
     at.cycles.push({
       path: cycle.path, profitPct, profitAmt, balanceAfter: null,
@@ -1040,7 +1054,11 @@ async function executeCycleReal(cycle, dailyTarget, forcedTest){
       }
     }
     if(unwindOk){
-      const profitAmt = heldAmount - spendAmount; // almost always a loss — this is a failed cycle, not a profitable one
+      // Same fix as the successful-cycle branch above: measure the real
+      // change in anchor-currency balance across the whole attempt rather
+      // than trusting the last unwind leg's gross reported fill.
+      const endAnchorBal = await fetchAssetBalance(key, mode, cred, cycle.path[0]);
+      const profitAmt = endAnchorBal != null ? (endAnchorBal - startBal) : (heldAmount - spendAmount); // almost always a loss — this is a failed cycle, not a profitable one
       const profitPct = spendAmount > 0 ? (profitAmt / spendAmount) * 100 : 0;
       at.cycles.push({
         path: cycle.path, profitPct, profitAmt, balanceAfter: null,
