@@ -131,6 +131,10 @@
         <input id="minVolume" type="number" min="0" step="1000" value="10000" title="Filters out any leg whose 24h quote-currency volume is below this. Thin markets can show a spread that looks profitable on paper but can't really be filled — same filter the CLI scanner uses.">
       </div>
       <div class="field">
+        <label for="resultsLimit">Results to show</label>
+        <input id="resultsLimit" type="number" min="5" max="50" step="1" value="20" title="How many cycles to list, best first. 5–50.">
+      </div>
+      <div class="field">
         <label for="scanInterval">Live interval (s)</label>
         <input id="scanInterval" type="number" min="5" max="300" step="1" value="20" title="How often Live Scan re-scans while running">
       </div>
@@ -177,6 +181,10 @@
       <div class="field">
         <label for="xMinProfit">Profit threshold (%)</label>
         <input id="xMinProfit" type="number" min="-5" max="10" step="0.01" value="0.10" title="Only show assets at or above this net spread">
+      </div>
+      <div class="field">
+        <label for="xResultsLimit">Results to show</label>
+        <input id="xResultsLimit" type="number" min="5" max="50" step="1" value="20" title="How many gaps to list, best first. 5–50.">
       </div>
       <div class="btn-row">
         <button class="primary" id="xScanBtn"><span class="btn-spinner"></span><span class="btn-label">Scan Markets</span></button>

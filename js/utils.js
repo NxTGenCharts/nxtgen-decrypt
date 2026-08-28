@@ -35,3 +35,16 @@ export function fmtPrice(x){
   const s = x.toFixed(10).replace(/0+$/, '');
   return s;
 }
+
+// Every results list in the app (Triangular, Cross-Exchange) is user-
+// configurable via a "Results to show" selector but hard-capped at 50 —
+// rendering an unbounded table gets slow and the extra rows past that
+// point are rarely useful anyway. Pass the raw <select> value in; get
+// back a safe integer to slice() with.
+export const MIN_RESULTS_LIMIT = 5;
+export const MAX_RESULTS_LIMIT = 50;
+export function resultsLimitFrom(rawValue, fallback = 20){
+  const n = parseInt(rawValue, 10);
+  if(!Number.isFinite(n)) return fallback;
+  return Math.min(MAX_RESULTS_LIMIT, Math.max(MIN_RESULTS_LIMIT, n));
+}

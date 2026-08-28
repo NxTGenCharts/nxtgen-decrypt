@@ -5,7 +5,7 @@
 // =============================================================
 import { els, state } from './state.js';
 import { EXCHANGES, loadBitgetCoinInfo, tradeUrl } from './exchanges.js';
-import { coinIconHtml, fmtPct, fmtPrice } from './utils.js';
+import { coinIconHtml, fmtPct, fmtPrice, resultsLimitFrom } from './utils.js';
 import { setStatus, showXMessage, updateExchangeBadge, renderOverview } from './ui.js';
 
 // Ticker symbols reused by unrelated projects on different exchanges — the
@@ -166,7 +166,7 @@ function renderCross(opps, amount, feePct){
     els.xResults.innerHTML = `<div class="empty">No cross-exchange gaps found right now. Try lowering the profit threshold.</div>`;
     return;
   }
-  const top = opps.slice(0, 20);
+  const top = opps.slice(0, resultsLimitFrom(els.xResultsLimit && els.xResultsLimit.value));
   els.xResults.innerHTML = top.map((o, i) => {
     const label = o.quote === 'USDT' ? o.base : `${o.base}/${o.quote}`;
     const finalAmt = amount * o.netMult;
@@ -391,10 +391,11 @@ export async function runXScan(){
     els.lastUpdate.textContent = 'Last update — ' + new Date().toLocaleTimeString();
 
     const showSet = filtered.length > 0 ? filtered : ranked;
+    const displayLimit = resultsLimitFrom(els.xResultsLimit && els.xResultsLimit.value);
     let avgPct = null;
     if(showSet.length > 0){
       els.xStatBest.textContent = fmtPct(showSet[0].profitPct);
-      avgPct = showSet.slice(0,20).reduce((s,o) => s+o.profitPct, 0) / Math.min(20, showSet.length);
+      avgPct = showSet.slice(0,displayLimit).reduce((s,o) => s+o.profitPct, 0) / Math.min(displayLimit, showSet.length);
       els.xStatAvg.textContent = fmtPct(avgPct);
     } else {
       els.xStatBest.textContent = '–';

@@ -6,7 +6,7 @@
 // =============================================================
 import { els, state } from './state.js';
 import { EXCHANGES, filterTriPairs } from './exchanges.js';
-import { coinIconHtml, fmtPct } from './utils.js';
+import { coinIconHtml, fmtPct, resultsLimitFrom } from './utils.js';
 import { setStatus, showMessage, updateExchangeBadge, renderOverview } from './ui.js';
 
 export function buildGraph(pairs, useLastPriceNoSpread){
@@ -133,7 +133,7 @@ function render(cycles){
     els.results.innerHTML = `<div class="empty">No cycles cleared your min-profit filter right now. Markets move fast — try lowering the filter or scanning again.</div>`;
     return;
   }
-  const top = cycles.slice(0, 20);
+  const top = cycles.slice(0, resultsLimitFrom(els.resultsLimit && els.resultsLimit.value));
   els.results.innerHTML = top.map((c, i) => {
     const [A,B,C] = c.path;
     const loopHtml = `
@@ -317,7 +317,8 @@ export async function runScan(){
     } else if(ranked.length > 0){
       // Nothing cleared the bar — never leave the screen blank, show the closest cycles instead.
       render(ranked);
-      showMessage(cliNotice + `No cycle cleared your ${minProfit.toFixed(2)}% filter after a ${(feePct*3).toFixed(2)}% round-trip fee across ${keys.length > 1 ? 'all connected books' : EXCHANGES[keys[0]].label} — that's a real read of current spreads, not a limitation of the scan. Showing the 20 closest cycles instead (best is ${fmtPct(ranked[0].profitPct)}); lower the filter, drop your fee assumption if you're on a maker/VIP tier, or try "All 5" to widen the search.`, 'info');
+      const shownCount = Math.min(ranked.length, resultsLimitFrom(els.resultsLimit && els.resultsLimit.value));
+      showMessage(cliNotice + `No cycle cleared your ${minProfit.toFixed(2)}% filter after a ${(feePct*3).toFixed(2)}% round-trip fee across ${keys.length > 1 ? 'all connected books' : EXCHANGES[keys[0]].label} — that's a real read of current spreads, not a limitation of the scan. Showing the ${shownCount} closest cycles instead (best is ${fmtPct(ranked[0].profitPct)}); lower the filter, drop your fee assumption if you're on a maker/VIP tier, or try "All 5" to widen the search.`, 'info');
     } else {
       els.results.innerHTML = `<div class="empty">No 3-leg cycles found for this anchor after the fiat/volume filter. Try "All currencies", a different exchange, or a lower min 24h volume.</div>`;
       showMessage(cliNotice, cliNotice ? 'info' : '');
