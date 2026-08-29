@@ -5,10 +5,10 @@
 // =============================================================
 
 export const RISK_DEFAULTS = {
-  riskPctPerTrade: 0.375,      // default within the 0.25-0.50% band
-  maxRiskPctPerTrade: 1.0,
+  riskPctPerTrade: 1.0,        // default risk per trade, as a % of simulation equity
+  maxRiskPctPerTrade: 2.0,
   maxSimultaneousPositions: 3,
-  maxPortfolioRiskPct: 1.5,
+  maxPortfolioRiskPct: 3.0,    // scales with riskPctPerTrade so 3 positions at the default 1% still fit
   defaultLeverage: 2,
   maxLeverage: 3,
   maintenanceMarginRate: 0.5,  // % — rough cross-margin estimate for liquidation distance

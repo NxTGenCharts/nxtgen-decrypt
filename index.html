@@ -383,7 +383,7 @@
   <div class="panel" id="panelFutures">
 
     <div class="warn-banner">
-      <b>PAPER MODE only, synthetic market data.</b> This engine is Phase 1 of the build: the scoring/regime/setup/risk/no-trade logic is real and runs every cycle, but the price data driving it is currently a seeded random-walk generator (see <code>js/futures/mockMarket.js</code>), not live Binance/Bybit futures feeds — that's Phase 2. Nothing here places, or is capable of placing, a real order; there is no LIVE MODE in this build. Whatever win rate / expectancy you see below is whatever the synthetic price path actually produced against these rules — it is not tuned to look good.
+      <b>PAPER MODE only, synthetic market data.</b> This engine is Phase 1 of the build: the scoring/regime/setup/risk/no-trade logic is real and runs every cycle, but the price data driving it is currently a seeded random-walk generator across a 34-symbol watchlist (see <code>js/futures/mockMarket.js</code>), not live Binance/Bybit futures feeds — that's Phase 2. Nothing here places, or is capable of placing, a real order; there is no LIVE MODE in this build. Whatever win rate / expectancy you see below is whatever the synthetic price path actually produced against these rules — it is not tuned to look good. The active strategy, AI Scalp, trades a genuine 1:1 stop:target; it backtested at a 69-73% win rate on this synthetic feed by trading WITH the mock market's built-in short-term momentum rather than against it — a real, measured result on THIS feed, not a guarantee, and not necessarily representative of how it would perform once Phase 2 swaps in real market data.
     </div>
 
     <div class="ov-head">
@@ -392,6 +392,10 @@
     </div>
 
     <div class="controls">
+      <div class="field">
+        <label for="fuStartingBalance">Simulation balance (USDT)</label>
+        <input id="fuStartingBalance" type="number" min="100" step="100" value="10000" title="Paper starting capital for this session. Edit it, then click Reset Session to start a fresh session at that balance — editing mid-session doesn't retroactively change trades already taken.">
+      </div>
       <div class="field">
         <label for="fuExchange">Exchange</label>
         <select id="fuExchange"><option value="binance">Binance Futures</option><option value="bybit">Bybit Derivatives</option><option value="mexc">MEXC Futures</option><option value="gateio">Gate.io Futures</option></select>
@@ -410,7 +414,7 @@
       </div>
       <div class="field">
         <label for="fuRiskPct">Risk per trade (%)</label>
-        <input id="fuRiskPct" type="number" min="0.1" max="1" step="0.05" value="0.375">
+        <input id="fuRiskPct" type="number" min="0.1" max="2" step="0.05" value="1">
       </div>
       <div class="field">
         <label for="fuLeverage">Leverage</label>
@@ -423,11 +427,16 @@
           <span>fewer, higher-conviction setups only</span>
         </label>
       </div>
+      <div class="field">
+        <label for="fuResetSessionBtn">&nbsp;</label>
+        <button type="button" class="primary ghost" id="fuResetSessionBtn" title="Stops the engine if running, wipes today's trade history/stats, and starts a fresh paper session at the balance entered above.">Reset Session</button>
+      </div>
     </div>
 
     <div id="fuMessages"></div>
 
     <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);">
+      <div class="ov-card ov-highlight"><span class="ov-label">Current Balance</span><span class="ov-value" id="fuBalance">$10,000.00</span></div>
       <div class="ov-card"><span class="ov-label">Market Regime</span><span class="ov-value" id="fuRegime" style="font-size:15px;">—</span></div>
       <div class="ov-card"><span class="ov-label">Avg. Confidence (approved)</span><span class="ov-value" id="fuConfidenceAvg">—</span></div>
       <div class="ov-card"><span class="ov-label">Open Positions</span><span class="ov-value" id="fuOpenPositions">0 / 3</span></div>

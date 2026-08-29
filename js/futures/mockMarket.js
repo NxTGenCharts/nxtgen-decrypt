@@ -17,12 +17,38 @@
 // price action actually produced, not a fabricated number.
 // =============================================================
 
-const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT'];
+// A broad USDT-M perpetual watchlist instead of six large-caps — large
+// caps, majors, and higher-beta alt/meme names so the scanner isn't
+// structurally confined to the same handful of symbols every cycle.
+// Base prices/volumes are illustrative synthetic seeds (this whole file
+// is a placeholder data source, see header above), not live quotes.
+const SYMBOLS = [
+  'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT',
+  'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT', 'LTCUSDT', 'TRXUSDT',
+  'NEARUSDT', 'APTUSDT', 'ARBUSDT', 'OPUSDT', 'SUIUSDT', 'INJUSDT',
+  'TIAUSDT', 'SEIUSDT', 'ATOMUSDT', 'FILUSDT', 'ETCUSDT', 'UNIUSDT',
+  'AAVEUSDT', 'PEPEUSDT', 'WIFUSDT', 'SHIBUSDT', 'BONKUSDT', 'ORDIUSDT',
+  'TONUSDT', 'ICPUSDT', 'HBARUSDT', 'RENDERUSDT', 'RUNEUSDT',
+];
 const SEED_MINUTES = 4000;    // ~2.8 days of 1m backstory generated on load
 const MAX_CANDLES_KEPT = 6500; // rolling window kept after seeding, comfortably above what H1x60 aggregation needs
 
-const BASE_PRICE = { BTCUSDT: 64000, ETHUSDT: 3400, SOLUSDT: 148, BNBUSDT: 590, XRPUSDT: 0.62, DOGEUSDT: 0.14 };
-const BASE_VOL_24H_USD = { BTCUSDT: 2.1e9, ETHUSDT: 9.4e8, SOLUSDT: 3.1e8, BNBUSDT: 1.6e8, XRPUSDT: 2.4e8, DOGEUSDT: 1.7e8 };
+const BASE_PRICE = {
+  BTCUSDT: 64000, ETHUSDT: 3400, SOLUSDT: 148, BNBUSDT: 590, XRPUSDT: 0.62, DOGEUSDT: 0.14,
+  ADAUSDT: 0.58, AVAXUSDT: 34, LINKUSDT: 14.5, DOTUSDT: 6.4, LTCUSDT: 84, TRXUSDT: 0.16,
+  NEARUSDT: 5.8, APTUSDT: 9.2, ARBUSDT: 0.78, OPUSDT: 1.9, SUIUSDT: 3.6, INJUSDT: 22,
+  TIAUSDT: 5.1, SEIUSDT: 0.41, ATOMUSDT: 7.3, FILUSDT: 4.9, ETCUSDT: 26, UNIUSDT: 8.1,
+  AAVEUSDT: 165, PEPEUSDT: 0.0000165, WIFUSDT: 2.1, SHIBUSDT: 0.0000185, BONKUSDT: 0.0000225,
+  ORDIUSDT: 38, TONUSDT: 5.4, ICPUSDT: 9.8, HBARUSDT: 0.075, RENDERUSDT: 6.2, RUNEUSDT: 4.4,
+};
+const BASE_VOL_24H_USD = {
+  BTCUSDT: 2.1e9, ETHUSDT: 9.4e8, SOLUSDT: 3.1e8, BNBUSDT: 1.6e8, XRPUSDT: 2.4e8, DOGEUSDT: 1.7e8,
+  ADAUSDT: 1.4e8, AVAXUSDT: 1.3e8, LINKUSDT: 1.1e8, DOTUSDT: 8.5e7, LTCUSDT: 9.2e7, TRXUSDT: 7.8e7,
+  NEARUSDT: 7.1e7, APTUSDT: 6.4e7, ARBUSDT: 6.9e7, OPUSDT: 5.8e7, SUIUSDT: 8.8e7, INJUSDT: 5.2e7,
+  TIAUSDT: 4.6e7, SEIUSDT: 3.9e7, ATOMUSDT: 4.8e7, FILUSDT: 4.1e7, ETCUSDT: 5.5e7, UNIUSDT: 5.9e7,
+  AAVEUSDT: 3.6e7, PEPEUSDT: 2.9e8, WIFUSDT: 1.2e8, SHIBUSDT: 1.5e8, BONKUSDT: 9.4e7,
+  ORDIUSDT: 3.3e7, TONUSDT: 9.6e7, ICPUSDT: 4.4e7, HBARUSDT: 5.1e7, RENDERUSDT: 6.6e7, RUNEUSDT: 3.7e7,
+};
 
 function mulberry32(seed){
   return function(){

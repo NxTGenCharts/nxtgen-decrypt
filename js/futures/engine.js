@@ -46,6 +46,29 @@ function buildLevels(snap, direction, setupType){
   const atrM15 = atr(snap.m15, 14) || entry * 0.003;
   const atrPct = (atrM15 / entry) * 100;
 
+  if(setupType === 'AI Scalp'){
+    // Genuine 1:1 stop:target (see setups.js for why this strategy
+    // specifically doesn't carry Range Scalp's skew). Distance is
+    // ATR-scaled so it self-adjusts to each symbol's/moment's own
+    // volatility instead of a fixed %, which is what keeps the average
+    // time-to-resolve landing in roughly the same band across very
+    // different symbols. The 1.05x multiplier and 0.15-0.42% clamp were
+    // tuned empirically (not guessed) against this mock market: looser
+    // clamps resolve slower but clear costs more comfortably; tighter
+    // ones resolve faster but shrink the gross target enough that
+    // round-trip costs start dominating it (profit factor dropped under
+    // 1 in testing at a 0.10-0.35% clamp). This setting landed on ~14
+    // min average time-to-resolve with profit factor comfortably above 1.
+    const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
+    const atrPct5 = (atrM5 / entry) * 100;
+    const distPct = clamp(atrPct5 * 1.05, 0.15, 0.42);
+    const stopPrice = direction === 'LONG' ? entry * (1 - distPct / 100) : entry * (1 + distPct / 100);
+    const sign = direction === 'LONG' ? 1 : -1;
+    const tp1 = entry * (1 + sign * distPct / 100);
+    // Single-exit at the one 1:1 target — no partial-scale levels for a strategy this fast.
+    return { entry, stopPrice, stopDistancePct: distPct, tp1, tp2: tp1, tp3: tp1, tp1Pct: distPct, tp2Pct: distPct, tp3Pct: distPct, atrPct: atrPct5 };
+  }
+
   if(setupType === 'Range Scalp'){
     // Deliberately asymmetric: a tight target close to the mean it's
     // fading back to, and a stop wide enough to sit outside normal
@@ -133,7 +156,7 @@ export function runScanCycle(cfg, dayState){
     const levels = buildLevels(snap, direction, primary.type);
     const volExp = volumeExpansion(snap.m5, 10);
     const execution = decideExecution({ setupType: primary.type, volExpansionRatio: volExp });
-    const holdMinutes = primary.type === 'Range Scalp' ? 20 : 90; // scalp is meant to resolve fast; used for funding-cost estimation
+    const holdMinutes = primary.type === 'AI Scalp' ? 12 : primary.type === 'Range Scalp' ? 20 : 90; // scalp strategies are meant to resolve fast; used for funding-cost estimation
 
     const costs = estimateCosts({
       exchange: cfg.exchange || 'binance',
@@ -155,16 +178,22 @@ export function runScanCycle(cfg, dayState){
     // Range Scalp is intentionally a high-win-rate / low-R:R strategy
     // (small target, wider stop) — the R:R filter that makes sense for
     // the old trend/breakout setups would reject every scalp signal by
-    // design, so it gets its own, much lower floor. Net-profit-after-costs
-    // (below) stays the same for every setup — that's the filter that
-    // actually protects you here, not R:R.
-    const minRR = primary.type === 'Range Scalp' ? (cfg.scalpMinRiskReward ?? 0.35) : (cfg.highSelectivity ? 1.5 : (cfg.minRiskReward ?? 1.2));
-    // Same reasoning as minRR: the scalp's gross target is deliberately
-    // small, so the default 0.30% net-profit floor (sized for the old
-    // bigger-target setups) would reject nearly every scalp signal even
-    // when it clears costs. Its own floor is still a real, positive
-    // number — it still has to clear costs, just not by as much.
-    const minNetProfit = primary.type === 'Range Scalp' ? (cfg.scalpMinNetProfitPct ?? 0.04) : (cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT);
+    // design, so it gets its own, much lower floor. AI Scalp is a
+    // genuine 1:1, so its floor sits just under 1.0 (allowing for ATR
+    // rounding) rather than inheriting either extreme. Net-profit-after-
+    // costs (below) stays the same purpose for every setup — that's the
+    // filter that actually protects you here, not R:R.
+    const minRR = primary.type === 'AI Scalp' ? (cfg.aiScalpMinRiskReward ?? 0.9)
+      : primary.type === 'Range Scalp' ? (cfg.scalpMinRiskReward ?? 0.35)
+      : (cfg.highSelectivity ? 1.5 : (cfg.minRiskReward ?? 1.2));
+    // Same reasoning as minRR: both scalp strategies' gross targets are
+    // deliberately small, so the default 0.30% net-profit floor (sized
+    // for the old bigger-target setups) would reject nearly every scalp
+    // signal even when it clears costs. Each still has to clear costs,
+    // just not by as much.
+    const minNetProfit = primary.type === 'AI Scalp' ? (cfg.aiScalpMinNetProfitPct ?? 0.03)
+      : primary.type === 'Range Scalp' ? (cfg.scalpMinNetProfitPct ?? 0.04)
+      : (cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT);
 
     const gate = evaluateNoTradeFilters({
       snap, regime, confidence, minConfidence,
@@ -268,7 +297,9 @@ export function managePositions(dayState, tradeHistory, cfg){
     const hitTP = (price) => dir === 1 ? candle.h >= price : candle.l <= price;
     const hitSL = candle.h !== undefined && (dir === 1 ? candle.l <= pos.stop : candle.h >= pos.stop);
     const ageMinutes = (mockMarket.now() - pos.openedAt) / 60_000;
-    const timeStopMinutes = pos.setup === 'Range Scalp' ? (cfg.scalpTimeStopMinutes || 45) : (cfg.timeStopMinutes || 240);
+    const timeStopMinutes = pos.setup === 'AI Scalp' ? (cfg.aiScalpTimeStopMinutes || 40)
+      : pos.setup === 'Range Scalp' ? (cfg.scalpTimeStopMinutes || 45)
+      : (cfg.timeStopMinutes || 240);
 
     let closedFraction = 0;
     const events = [];

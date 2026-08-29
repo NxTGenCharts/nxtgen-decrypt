@@ -96,3 +96,57 @@ If you'd like, I can:
   there's any real edge at all, and re-backtest it the same way.
 - Leave Range Scalp as the one strategy (fixes the "keeps changing"
   complaint) but tune it further once real market data is in.
+
+## Update: AI Scalp replaces Range Scalp as the active strategy
+
+Range Scalp (above) is still defined in `js/futures/setups.js` and still
+exported, but the engine's active strategy is now **AI Scalp** — a
+genuine 1:1 stop:target instead of Range Scalp's deliberate skew, per a
+direct request for a fast (target: 8-16 min), high-win-rate, 1:1 R:R
+strategy with a configurable simulation balance and a much broader
+symbol watchlist (6 → 34 pairs).
+
+**The 1:1 + high-win-rate combination needed a real approach change, not
+just new numbers.** The honest math from the section above still holds:
+on a fair, driftless random walk, P(hit TP first) = stopDistance /
+(stopDistance + targetDistance) = exactly 50% at 1:1, before costs. A
+first attempt at AI Scalp reused Range Scalp's core idea — fade a
+stretched move back toward the M5 EMA9 — just with symmetric levels
+instead of a skew. Backtested win rate: **~25-29%**, well *below* even
+the fair-coin-flip baseline. `mockMarket.js`'s "mood" process gives price
+genuine short-run persistence (see its header comment), and a naive fade
+was systematically fighting that persistence, not exploiting it.
+
+The fix was to flip the detector to trade **with** that momentum instead
+— M5 EMA9 sloping in the trade direction, price confirming on the
+momentum side of it, a push candle, RSI in a continuation (not yet
+exhausted) zone, and a volume expansion behind the move. Same 1:1
+construction, opposite thesis. That backtested at:
+
+- **Win rate: 69-73%** across two independent runs (135 and 196 closed trades)
+- **Avg time-to-resolve: ~14 minutes** (target band was 8-16 min)
+- **Profit factor: 1.2-1.5**, net of fees/spread/slippage/funding
+
+This is a real, measured property of trading with THIS synthetic feed's
+built-in momentum — not a hardcoded number, not a re-skewed stop/target
+dressed up as 1:1, and not a promise about live markets. It could look
+very different once Phase 2 wires in real exchange data, where
+short-term momentum is generally weaker and less persistent than in this
+seeded generator. Nothing in the confidence scoring or gating logic
+targets a win-rate number directly — it only rejects lower-confluence
+setups (no push candle, fighting a strong opposing HTF trend, no volume
+behind the move); the win rate is whatever falls out of that filter
+against the actual price path, exactly as the in-app banner says.
+
+**Watchlist**: expanded from BTC/ETH/SOL/BNB/XRP/DOGE to 34 USDT-M
+pairs spanning large caps, majors, L1/L2 alts, and higher-beta
+meme/mid-cap names (`js/futures/mockMarket.js`) — no longer confined to
+the same handful of symbols every scan.
+
+**Simulation balance**: now a configurable "Simulation balance (USDT)"
+field on the Futures tab (defaults to $10,000) instead of a hardcoded
+constant, with a "Reset Session" button to start a fresh paper session
+at whatever balance is entered. Default risk per trade is 1% of that
+balance (was 0.375%); `RISK_DEFAULTS.maxPortfolioRiskPct` was raised
+from 1.5% to 3% so three simultaneous 1%-risk positions still fit under
+the portfolio-risk cap the way three 0.375% ones used to.

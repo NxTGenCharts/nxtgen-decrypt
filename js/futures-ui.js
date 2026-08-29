@@ -23,7 +23,7 @@ function fu(){ return state.futures; }
 
 function ensureDayState(){
   if(fu().dayState) return fu().dayState;
-  const startingEquity = 10000;
+  const startingEquity = readStartingBalance();
   fu().dayState = {
     equity: startingEquity, startingEquity, peakEquity: startingEquity,
     trades: 0, wins: 0, losses: 0, consecutiveLosses: 0, lastLossAt: null,
@@ -32,6 +32,32 @@ function ensureDayState(){
     openPositions: 0, openRiskPct: 0, positions: [],
   };
   return fu().dayState;
+}
+
+// Reads the "Simulation balance" field, clamped to something sane. This
+// is only consulted when a dayState doesn't exist yet (fresh load) or
+// when Reset Session explicitly asks for a new one — editing the field
+// mid-session doesn't retroactively rewrite trades already taken.
+function readStartingBalance(){
+  const n = els.fuStartingBalance ? Number(els.fuStartingBalance.value) : NaN;
+  if(!Number.isFinite(n) || n <= 0) return 10000;
+  return Math.min(10_000_000, Math.max(100, n));
+}
+
+function resetSession(){
+  const f = fu();
+  if(f.running) toggleRunning(); // stop the engine first — never leaves it running against a wiped dayState
+  const startingEquity = readStartingBalance();
+  f.dayState = {
+    equity: startingEquity, startingEquity, peakEquity: startingEquity,
+    trades: 0, wins: 0, losses: 0, consecutiveLosses: 0, lastLossAt: null,
+    dailyPnlPct: 0, maxDrawdownPct: 0,
+    realizedGrossUsd: 0, realizedNetUsd: 0, feesUsd: 0, fundingUsd: 0, slippageUsd: 0,
+    openPositions: 0, openRiskPct: 0, positions: [],
+  };
+  f.tradeHistory = [];
+  f.lastRows = [];
+  render();
 }
 
 function fmtUsd(x){
@@ -45,7 +71,7 @@ function readSettingsFromInputs(){
   if(els.fuMinConfidence) f.minConfidence = Number(els.fuMinConfidence.value) || 60;
   if(els.fuMinRR) f.minRiskReward = Number(els.fuMinRR.value) || 1.2;
   if(els.fuMinNetProfit) f.minNetProfitPct = Number(els.fuMinNetProfit.value) || 0.30;
-  if(els.fuRiskPct) f.riskPctPerTrade = Number(els.fuRiskPct.value) || 0.375;
+  if(els.fuRiskPct) f.riskPctPerTrade = Number(els.fuRiskPct.value) || 1.0;
   if(els.fuLeverage) f.leverage = Number(els.fuLeverage.value) || 2;
   f.highSelectivity = !!(els.fuSelectivityToggle && els.fuSelectivityToggle.checked);
 }
@@ -86,6 +112,7 @@ function render(){
   const d = ensureDayState();
 
   if(els.fuStatus) els.fuStatus.textContent = f.running ? 'ACTIVE · PAPER' : 'PAUSED · PAPER';
+  if(els.fuBalance) els.fuBalance.textContent = '$' + d.equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const approved = f.lastRows.filter(r => r.status === 'APPROVED');
   const avgConf = approved.length ? Math.round(approved.reduce((a, r) => a + r.confidence, 0) / approved.length) : 0;
@@ -193,6 +220,8 @@ function toggleRunning(){
 
 export function initFuturesEngine(){
   ensureDayState();
+  if(els.fuStartingBalance) els.fuStartingBalance.value = String(fu().dayState.startingEquity);
   if(els.fuModeBtn) els.fuModeBtn.addEventListener('click', toggleRunning);
+  if(els.fuResetSessionBtn) els.fuResetSessionBtn.addEventListener('click', resetSession);
   render();
 }
