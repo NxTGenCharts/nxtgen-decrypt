@@ -251,7 +251,7 @@ export const EXCHANGES = {
   binance: { label:'Binance', load:loadBinance, demoSupported:true },
   bybit:   { label:'Bybit',   load:loadBybit, demoSupported:true },
   mexc:    { label:'MEXC',    load:loadMexc, demoSupported:false },
-  gateio:  { label:'Gate.io', load:loadGateio, demoSupported:false },
+  gateio:  { label:'Gate.io', load:loadGateio, demoSupported:true },
 };
 
 // Direct spot-trading page for a base/quote pair on each exchange — used by

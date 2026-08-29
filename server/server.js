@@ -42,17 +42,21 @@ function hmacSha256Hex(secret, message){
 
 class VerifyRejected extends Error {}
 
-// Base URLs per network. "demo" is Binance/Bybit's separate Demo Trading
-// environment (realistic live-mirrored data, demo funds only, keys created
-// from each exchange's own Demo Trading UI) — a distinct set of keys from a
-// normal Live account. See each exchange's docs for how to generate one:
+// Base URLs per network. "demo" is each exchange's own separate sandbox
+// environment (its own keys, created from that exchange's own Demo/Testnet
+// UI) — never the same account as Live. See each exchange's docs:
 //   Binance: https://developers.binance.com/docs/binance-spot-api-docs/demo-mode/general-info
 //   Bybit:   https://bybit-exchange.github.io/docs/v5/demo
+//   Gate.io: https://www.gate.com/docs/developers/apiv4/en/ ("TestNet trading" base URL)
 const BINANCE_BASE = { live: 'https://api.binance.com', demo: 'https://demo-api.binance.com' };
 const BYBIT_BASE = { live: 'https://api.bybit.com', demo: 'https://api-demo.bybit.com' };
-// MEXC and Gate.io have no public Demo Trading environment — always 'live'.
+const GATEIO_BASE = { live: 'https://api.gateio.ws', demo: 'https://api-testnet.gateapi.io' };
+// MEXC has no public Demo Trading environment — always 'live'. (Bitget does
+// have one, but it's part of their newer Unified Trading Account system —
+// different endpoints, a required passphrase this app doesn't collect yet,
+// and a header-based demo flag rather than a separate host — so it isn't
+// wired up here; Bitget verification is format-check only, live or demo.)
 const MEXC_BASE = { live: 'https://api.mexc.com' };
-const GATEIO_BASE = { live: 'https://api.gateio.ws' };
 
 function sha512Hex(message){
   return crypto.createHash('sha512').update(message).digest('hex');
@@ -156,8 +160,8 @@ async function mexcAssetBalance(mode, apiKey, secretKey, asset){
 // scheme — HMAC-SHA512 over METHOD\nPATH\nQUERY\nSHA512(BODY)\nTIMESTAMP,
 // sent as KEY/Timestamp/SIGN headers. Docs:
 // https://www.gate.io/docs/developers/apiv4/en/#authentication ----
-async function gateioSignedRequest(method, path, query, body, apiKey, secretKey){
-  const base = GATEIO_BASE.live;
+async function gateioSignedRequest(method, path, query, body, apiKey, secretKey, mode){
+  const base = GATEIO_BASE[mode] || GATEIO_BASE.live;
   const timestamp = String(Math.floor(Date.now() / 1000));
   const bodyStr = body ? JSON.stringify(body) : '';
   const bodyHash = sha512Hex(bodyStr);
@@ -179,12 +183,12 @@ async function gateioSignedRequest(method, path, query, body, apiKey, secretKey)
   return data;
 }
 async function verifyGateio(mode, apiKey, secretKey){
-  const accounts = await gateioSignedRequest('GET', '/api/v4/spot/accounts', '', null, apiKey, secretKey);
+  const accounts = await gateioSignedRequest('GET', '/api/v4/spot/accounts', '', null, apiKey, secretKey, mode);
   const usdt = Array.isArray(accounts) ? accounts.find(a => a.currency === 'USDT') : null;
   return { balance: usdt ? parseFloat(usdt.available) + parseFloat(usdt.locked || 0) : null };
 }
 async function gateioAssetBalance(mode, apiKey, secretKey, asset){
-  const accounts = await gateioSignedRequest('GET', '/api/v4/spot/accounts', `currency=${asset}`, null, apiKey, secretKey);
+  const accounts = await gateioSignedRequest('GET', '/api/v4/spot/accounts', `currency=${asset}`, null, apiKey, secretKey, mode);
   const a = Array.isArray(accounts) ? accounts.find(x => x.currency === asset) : null;
   return a ? parseFloat(a.available) : 0;
 }
@@ -460,8 +464,8 @@ async function placeBybitOrder(mode, apiKey, secretKey, { symbol, side, amountKi
 }
 
 // ---- Gate.io: currency pair details (precision, minimum amounts) ----
-async function gateioSymbolFilters(symbol){
-  const res = await fetch(`${GATEIO_BASE.live}/api/v4/spot/currency_pairs/${symbol}`);
+async function gateioSymbolFilters(base, symbol){
+  const res = await fetch(`${base}/api/v4/spot/currency_pairs/${symbol}`);
   const s = await res.json().catch(() => null);
   if(!s || !s.id) throw new Error(`Unknown Gate.io pair ${symbol}`);
   return {
@@ -485,10 +489,11 @@ function floorToDecimals(value, decimals){
 // distinct API field.
 // Docs: https://www.gate.io/docs/developers/apiv4/en/#create-an-order
 async function placeGateioOrder(mode, apiKey, secretKey, { symbol, side, amountKind, amount }){
+  const base = GATEIO_BASE[mode] || GATEIO_BASE.live;
   const gateSide = side.toLowerCase(); // 'buy' | 'sell'
   let sendAmount = amount;
   if(amountKind === 'base'){
-    const filters = await gateioSymbolFilters(symbol);
+    const filters = await gateioSymbolFilters(base, symbol);
     sendAmount = floorToDecimals(amount, filters.amountPrecision);
     const floorAgainst = gateSide === 'buy' ? filters.minQuoteAmount : filters.minBaseAmount;
     if(sendAmount <= 0 || sendAmount < floorAgainst){
@@ -504,7 +509,7 @@ async function placeGateioOrder(mode, apiKey, secretKey, { symbol, side, amountK
     currency_pair: symbol, side: gateSide, type: 'market',
     account: 'spot', time_in_force: 'ioc',
     amount: sendAmount.toString(),
-  }, apiKey, secretKey);
+  }, apiKey, secretKey, mode);
 
   const orderId = created.id;
   if(!orderId) throw new VerifyRejected('Gate.io accepted the order but returned no id to confirm the fill with.');

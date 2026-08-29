@@ -26,12 +26,21 @@ it's under 120 lines specifically so that's easy to verify yourself.
 ## Endpoints
 
 - `POST /api/verify` — body `{ exchange: "binance"|"bybit"|"mexc"|"gateio", mode: "live"|"demo", apiKey, secretKey }`.
-  - `"demo"` only applies to Binance/Bybit — MEXC and Gate.io have no public
-    Demo Trading environment, so requests for those two always run against
-    Live. Binance/Bybit's `"demo"` is a distinct set of keys from a normal
-    Live account, created from each exchange's own Demo Trading UI. It mirrors live market data but trades demo funds only. See:
+  - `"demo"` applies to Binance, Bybit, and Gate.io — each is a distinct set
+    of keys from a normal Live account, created from that exchange's own
+    Demo Trading / Testnet UI, mirroring live-like market data but trading
+    demo funds only. MEXC has no public Demo Trading environment, so
+    requests for it always run against Live regardless of `mode`. See:
     [Binance](https://developers.binance.com/docs/binance-spot-api-docs/demo-mode/general-info),
-    [Bybit](https://bybit-exchange.github.io/docs/v5/demo).
+    [Bybit](https://bybit-exchange.github.io/docs/v5/demo),
+    [Gate.io](https://www.gate.com/docs/developers/apiv4/en/) (the "TestNet trading" base URL — keys are created at [testnet.gate.com](https://testnet.gate.com), not gate.com).
+  - Bitget is not in this list at all — it currently has no working
+    verifier (format-check only). Bitget does have its own demo trading,
+    but it's part of their newer Unified Trading Account system: different
+    endpoints, a required passphrase this app doesn't collect yet, and a
+    request-header flag rather than a separate host. Wiring it up means
+    building real Bitget verification (live and demo) from scratch, not
+    just adding a mode switch to something that already works.
   Returns `{ verified, rejected, balance, message }`.
   - `verified: true` — the exchange confirmed the key and returned a balance.
   - `rejected: true` — the exchange explicitly said the key/secret is invalid. Trust this.
