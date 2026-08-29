@@ -104,7 +104,7 @@ exported, but the engine's active strategy is now **AI Scalp** — a
 genuine 1:1 stop:target instead of Range Scalp's deliberate skew, per a
 direct request for a fast (target: 8-16 min), high-win-rate, 1:1 R:R
 strategy with a configurable simulation balance and a much broader
-symbol watchlist (6 → 34 pairs).
+symbol watchlist (6 → 35 pairs).
 
 **The 1:1 + high-win-rate combination needed a real approach change, not
 just new numbers.** The honest math from the section above still holds:
@@ -138,7 +138,7 @@ setups (no push candle, fighting a strong opposing HTF trend, no volume
 behind the move); the win rate is whatever falls out of that filter
 against the actual price path, exactly as the in-app banner says.
 
-**Watchlist**: expanded from BTC/ETH/SOL/BNB/XRP/DOGE to 34 USDT-M
+**Watchlist**: expanded from BTC/ETH/SOL/BNB/XRP/DOGE to 35 USDT-M
 pairs spanning large caps, majors, L1/L2 alts, and higher-beta
 meme/mid-cap names (`js/futures/mockMarket.js`) — no longer confined to
 the same handful of symbols every scan.
