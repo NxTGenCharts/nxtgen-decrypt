@@ -380,7 +380,19 @@ function closeTrade(pos, exitPrice, pnl, exitReason, dayState, tradeHistory, ext
   if(pos.finalNetUsd > 0){ dayState.wins++; dayState.consecutiveLosses = 0; }
   else { dayState.losses++; dayState.consecutiveLosses++; dayState.lastLossAt = mockMarket.now(); }
 
-  dayState.equity += pnl.netUsd;
+  // Same bug class the comment above already fixed for win/loss and the
+  // trade-history row: this was `+= pnl.netUsd` (only the slice that
+  // closed the trade), silently dropping any TP1/TP2 partial P&L from the
+  // balance itself even though it WAS correctly counted in realizedNetUsd
+  // above and in pos.finalNetUsd. Any trade with 2+ partial exits before
+  // its final close — which for AI Scalp is nearly every winning trade,
+  // since TP1/TP2/TP3 share the same price and fire back-to-back in one
+  // candle — was crediting equity with only the last 25-50% of its actual
+  // profit. That's why Current Balance could end up BELOW the starting
+  // balance in the same session Net P&L reports a genuine profit: the P&L
+  // stat was already correct (it's summed straight from realizedNetUsd),
+  // it was equity that was under-crediting winners.
+  dayState.equity += pos.finalNetUsd;
   dayState.dailyPnlPct = ((dayState.equity - dayState.startingEquity) / dayState.startingEquity) * 100;
   dayState.peakEquity = Math.max(dayState.peakEquity, dayState.equity);
   dayState.maxDrawdownPct = Math.max(dayState.maxDrawdownPct, ((dayState.peakEquity - dayState.equity) / dayState.peakEquity) * 100);

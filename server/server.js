@@ -1,17 +1,20 @@
 // =============================================================
-// server.js — minimal, single-purpose verify/balance proxy.
+// server.js — the backend for the Autotrade & Balances panel.
 //
-// What this is for: the Autotrade & Balances panel needs to confirm a
-// Binance/Bybit/MEXC/Gate.io key+secret pair is real and read its balance. Doing that
-// from a browser doesn't work — both exchanges reject cross-origin
-// authenticated requests (CORS), by design, from any static front-end.
-// This tiny server exists only to make that ONE signed, read-only request
-// on the front-end's behalf and hand back the result.
+// What this is for: confirming a Binance/Bybit/MEXC/Gate.io/Bitget
+// key+secret(+passphrase for Bitget) pair is real, reading its balance,
+// and placing the actual orders when Autotrade's real-order-execution
+// switch is armed. A browser can't do any of this itself — every one of
+// these exchanges rejects cross-origin authenticated requests (CORS), by
+// design, from a static front-end. This server exists to make those
+// signed requests on the front-end's behalf and hand back the result. It
+// also serves the public market-data proxy (see /api/markets below).
 //
-// What this is NOT: it does not place orders, does not move funds, does
-// not persist keys anywhere (no database, no file, no log line contains a
-// key or secret), and only exposes two routes. Treat it as infrastructure,
-// not a product — see README.md before you deploy it.
+// What this is NOT: a product, or something that persists keys anywhere
+// (no database, no file, no log line contains a key/secret/passphrase).
+// It DOES move funds once real order execution is armed client-side —
+// treat it as the security-sensitive core of this app, not incidental
+// infrastructure, and read this whole file before deploying it.
 // =============================================================
 import express from 'express';
 import cors from 'cors';
@@ -39,6 +42,11 @@ app.use('/api/verify', rateLimit({ windowMs: 60_000, max: 20, standardHeaders: t
 function hmacSha256Hex(secret, message){
   return crypto.createHmac('sha256', secret).update(message).digest('hex');
 }
+// Bitget signs with the same HMAC-SHA256 algorithm as Binance/Bybit, but
+// base64-encodes the result instead of hex — see bitgetSignedRequest below.
+function hmacSha256Base64(secret, message){
+  return crypto.createHmac('sha256', secret).update(message).digest('base64');
+}
 
 class VerifyRejected extends Error {}
 
@@ -48,14 +56,15 @@ class VerifyRejected extends Error {}
 //   Binance: https://developers.binance.com/docs/binance-spot-api-docs/demo-mode/general-info
 //   Bybit:   https://bybit-exchange.github.io/docs/v5/demo
 //   Gate.io: https://www.gate.com/docs/developers/apiv4/en/ ("TestNet trading" base URL)
+// Bitget is the odd one out: same host as Live, no separate base URL at
+// all — demo mode is a request header (paptrading: 1) sent alongside a
+// Demo API Key created from Bitget's own Demo Trading UI. See
+// bitgetSignedRequest below for where that header gets added.
 const BINANCE_BASE = { live: 'https://api.binance.com', demo: 'https://demo-api.binance.com' };
 const BYBIT_BASE = { live: 'https://api.bybit.com', demo: 'https://api-demo.bybit.com' };
 const GATEIO_BASE = { live: 'https://api.gateio.ws', demo: 'https://api-testnet.gateapi.io' };
-// MEXC has no public Demo Trading environment — always 'live'. (Bitget does
-// have one, but it's part of their newer Unified Trading Account system —
-// different endpoints, a required passphrase this app doesn't collect yet,
-// and a header-based demo flag rather than a separate host — so it isn't
-// wired up here; Bitget verification is format-check only, live or demo.)
+const BITGET_BASE = 'https://api.bitget.com';
+// MEXC has no public Demo Trading environment — always 'live'.
 const MEXC_BASE = { live: 'https://api.mexc.com' };
 
 function sha512Hex(message){
@@ -193,13 +202,53 @@ async function gateioAssetBalance(mode, apiKey, secretKey, asset){
   return a ? parseFloat(a.available) : 0;
 }
 
-const ASSET_BALANCE_GETTERS = { binance: binanceAssetBalance, bybit: bybitAssetBalance, mexc: mexcAssetBalance, gateio: gateioAssetBalance };
+// ---- Bitget Spot v2: GET /api/v2/spot/account/assets, signed with
+// Bitget's own scheme — base64(HMAC-SHA256(secretKey, timestamp + METHOD +
+// requestPath + "?" + queryString + body)), sent as ACCESS-KEY/ACCESS-SIGN/
+// ACCESS-TIMESTAMP/ACCESS-PASSPHRASE headers. Bitget requires a third
+// credential (a passphrase set when the API key was created) that none of
+// the other four exchanges use — see js/exchanges.js `needsPassphrase`.
+// Demo mode adds one header (paptrading: 1) to a Demo API Key's requests;
+// see BITGET_BASE above for why there's no separate demo host to switch to.
+// Docs: https://www.bitget.com/api-doc/common/signature ----
+async function bitgetSignedRequest(method, path, query, body, apiKey, secretKey, passphrase, mode){
+  const timestamp = String(Date.now());
+  const bodyStr = body ? JSON.stringify(body) : '';
+  const prehash = `${timestamp}${method.toUpperCase()}${path}${query ? '?' + query : ''}${bodyStr}`;
+  const sign = hmacSha256Base64(secretKey, prehash);
+  const headers = {
+    'ACCESS-KEY': apiKey, 'ACCESS-SIGN': sign, 'ACCESS-TIMESTAMP': timestamp,
+    'ACCESS-PASSPHRASE': passphrase, 'Content-Type': 'application/json', locale: 'en-US',
+  };
+  if(mode === 'demo') headers.paptrading = '1';
+  const res = await fetch(`${BITGET_BASE}${path}${query ? '?' + query : ''}`, {
+    method, headers, ...(body ? { body: bodyStr } : {}),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || !data || data.code !== '00000'){
+    throw new VerifyRejected(data && (data.msg || data.message) ? (data.msg || data.message) : `HTTP ${res.status}`);
+  }
+  return data.data;
+}
+async function verifyBitget(mode, apiKey, secretKey, passphrase){
+  const data = await bitgetSignedRequest('GET', '/api/v2/spot/account/assets', 'coin=USDT', null, apiKey, secretKey, passphrase, mode);
+  const usdt = Array.isArray(data) ? data.find(c => String(c.coin || '').toUpperCase() === 'USDT') : null;
+  const balance = usdt ? parseFloat(usdt.available || '0') + parseFloat(usdt.frozen || '0') + parseFloat(usdt.locked || '0') : null;
+  return { balance };
+}
+async function bitgetAssetBalance(mode, apiKey, secretKey, asset, passphrase){
+  const data = await bitgetSignedRequest('GET', '/api/v2/spot/account/assets', `coin=${asset}`, null, apiKey, secretKey, passphrase, mode);
+  const c = Array.isArray(data) ? data.find(x => String(x.coin || '').toUpperCase() === asset.toUpperCase()) : null;
+  return c ? parseFloat(c.available || '0') : 0;
+}
+
+const ASSET_BALANCE_GETTERS = { binance: binanceAssetBalance, bybit: bybitAssetBalance, mexc: mexcAssetBalance, gateio: gateioAssetBalance, bitget: bitgetAssetBalance };
 
 
-const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit, mexc: verifyMexc, gateio: verifyGateio };
+const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit, mexc: verifyMexc, gateio: verifyGateio, bitget: verifyBitget };
 
 app.post('/api/verify', async (req, res) => {
-  const { exchange, mode, apiKey, secretKey } = req.body || {};
+  const { exchange, mode, apiKey, secretKey, passphrase } = req.body || {};
 
   // Keys live only in this function's local variables for the lifetime of
   // this one request. Nothing here writes them to disk, a database, or a
@@ -207,14 +256,17 @@ app.post('/api/verify', async (req, res) => {
   if(!exchange || !apiKey || !secretKey){
     return res.status(400).json({ verified:false, rejected:false, message:'exchange, apiKey and secretKey are all required.' });
   }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ verified:false, rejected:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
   const verifier = VERIFIERS[exchange];
   if(!verifier){
-    return res.status(400).json({ verified:false, rejected:false, message:`No verifier for "${exchange}" — only binance, bybit, mexc, and gateio are supported.` });
+    return res.status(400).json({ verified:false, rejected:false, message:`No verifier for "${exchange}" — only binance, bybit, mexc, gateio, and bitget are supported.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
 
   try{
-    const result = await verifier(netMode, apiKey, secretKey);
+    const result = await verifier(netMode, apiKey, secretKey, passphrase);
     return res.json({ verified:true, rejected:false, balance: result.balance, message:`Confirmed with ${exchange}.` });
   }catch(err){
     if(err instanceof VerifyRejected){
@@ -526,29 +578,108 @@ async function placeGateioOrder(mode, apiKey, secretKey, { symbol, side, amountK
   };
 }
 
-const ORDER_PLACERS = { binance: placeBinanceOrder, bybit: placeBybitOrder, mexc: placeMexcOrder, gateio: placeGateioOrder };
+// ---- Bitget: symbol precision (base-side decimal places, minimum trade
+// amount, minimum USDT notional). Same endpoint the market-data proxy
+// already uses (fetchBitgetMarkets below) — public, live-only, no mode
+// needed since Bitget's demo mode shares Live's host and market data. ----
+async function bitgetSymbolFilters(symbol){
+  const res = await fetch(`${BITGET_BASE}/api/v2/spot/public/symbols?symbol=${symbol}`);
+  const data = await res.json().catch(() => null);
+  const s = data && Array.isArray(data.data) ? data.data[0] : null;
+  if(!s) throw new Error(`Unknown Bitget pair ${symbol}`);
+  return {
+    quantityPrecision: parseInt(s.quantityPrecision, 10) || 6,
+    minTradeAmount: parseFloat(s.minTradeAmount || '0'),
+    minTradeUSDT: parseFloat(s.minTradeUSDT || '0'),
+  };
+}
+
+// Bitget's market orders follow the same side-dependent "size" convention
+// as Binance/MEXC/Gate.io: for a market BUY, size is the quote amount to
+// spend; for a market SELL, size is the base amount to sell.
+//
+// The one genuinely different thing about Bitget here: place-order's
+// response is just `{orderId, clientOid}` — no fill data at all, unlike
+// every other exchange in this file, which return executed
+// quantity/price synchronously. Bitget's own Best Practices Guide says as
+// much: "the order may not have reached the matching system yet, and
+// users need to further check the order status for confirmation." So
+// this polls GET /api/v2/spot/trade/orderInfo after placing until it
+// reports filled (or we give up) — a market order on a liquid pair
+// should resolve in well under a second, but there is a real, new-to-
+// this-exchange failure mode here that the other four don't have: an
+// order that filled but hasn't been confirmed as such within the poll
+// window comes back as a thrown error, which the caller (executeCycleReal)
+// treats as a failed leg and attempts to unwind. That's the safe
+// direction to fail in — but a genuinely slow confirmation could trigger
+// an unwind against an order that actually did fill, worth knowing before
+// trusting this with real size.
+async function placeBitgetOrder(mode, apiKey, secretKey, { symbol, side, amountKind, amount }, passphrase){
+  const bgSide = side.toLowerCase(); // 'buy' | 'sell'
+  let sendSize = amount;
+  if(amountKind === 'base'){
+    const filters = await bitgetSymbolFilters(symbol);
+    sendSize = floorToDecimals(amount, filters.quantityPrecision);
+    if(sendSize <= 0 || sendSize < filters.minTradeAmount){
+      throw new VerifyRejected(`Amount ${amount} ${symbol} rounds down to ${sendSize}, below the exchange minimum (${filters.minTradeAmount}) — nothing was sent.`);
+    }
+  }
+  // amountKind:'quote' (the BUY leg) is exactly what Bitget's market-buy
+  // "size" already means — no rounding needed there.
+
+  const placed = await bitgetSignedRequest('POST', '/api/v2/spot/trade/place-order', '', {
+    symbol, side: bgSide, orderType: 'market', force: 'gtc', size: sendSize.toString(),
+  }, apiKey, secretKey, passphrase, mode);
+  const orderId = placed && placed.orderId;
+  if(!orderId) throw new VerifyRejected('Bitget accepted the order but returned no id to confirm the fill with.');
+
+  const POLL_ATTEMPTS = 6, POLL_DELAY_MS = 400;
+  let info = null;
+  for(let i = 0; i < POLL_ATTEMPTS; i++){
+    await new Promise(r => setTimeout(r, POLL_DELAY_MS));
+    const orderInfoData = await bitgetSignedRequest('GET', '/api/v2/spot/trade/orderInfo', `orderId=${orderId}`, null, apiKey, secretKey, passphrase, mode);
+    info = Array.isArray(orderInfoData) ? orderInfoData[0] : orderInfoData;
+    if(info && (info.status === 'filled' || info.status === 'cancelled' || info.status === 'rejected')) break;
+  }
+  if(!info || info.status !== 'filled'){
+    throw new VerifyRejected(`Order placed (id ${orderId}) but did not confirm as filled within ${(POLL_ATTEMPTS * POLL_DELAY_MS / 1000).toFixed(1)}s (status: ${info ? info.status : 'unknown'}). No further legs will be attempted automatically.`);
+  }
+  const filledBaseQty = parseFloat(info.baseVolume || '0');
+  const filledQuoteQty = parseFloat(info.quoteVolume || '0');
+  return {
+    orderId,
+    filledBaseQty,
+    filledQuoteQty,
+    avgPrice: filledBaseQty > 0 ? filledQuoteQty / filledBaseQty : parseFloat(info.priceAvg || '0'),
+  };
+}
+
+const ORDER_PLACERS = { binance: placeBinanceOrder, bybit: placeBybitOrder, mexc: placeMexcOrder, gateio: placeGateioOrder, bitget: placeBitgetOrder };
 
 app.post('/api/order', async (req, res) => {
-  const { exchange, mode, apiKey, secretKey, symbol, side, amountKind, amount } = req.body || {};
+  const { exchange, mode, apiKey, secretKey, symbol, side, amountKind, amount, passphrase } = req.body || {};
   if(!exchange || !apiKey || !secretKey || !symbol || !side || !amountKind || !amount){
     return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, symbol, side, amountKind and amount are all required.' });
   }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
   const placer = ORDER_PLACERS[exchange];
   if(!placer){
-    return res.status(400).json({ ok:false, message:`No order placer for "${exchange}" — only binance, bybit, mexc, and gateio are supported.` });
+    return res.status(400).json({ ok:false, message:`No order placer for "${exchange}" — only binance, bybit, mexc, gateio, and bitget are supported.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   // Binance and MEXC both want 'BUY'/'SELL'; Bybit wants 'Buy'/'Sell';
-  // Gate.io wants lowercase 'buy'/'sell' (placeGateioOrder re-lowercases
+  // Gate.io and Bitget want lowercase 'buy'/'sell' (both re-lowercase
   // regardless, but keep this table honest for the exchanges that DO care).
   const normalizedSide = (exchange === 'binance' || exchange === 'mexc')
     ? String(side).toUpperCase()
-    : exchange === 'gateio'
+    : (exchange === 'gateio' || exchange === 'bitget')
       ? String(side).toLowerCase()
       : (String(side)[0].toUpperCase() + String(side).slice(1).toLowerCase());
 
   try{
-    const result = await placer(netMode, apiKey, secretKey, { symbol, side: normalizedSide, amountKind, amount: parseFloat(amount) });
+    const result = await placer(netMode, apiKey, secretKey, { symbol, side: normalizedSide, amountKind, amount: parseFloat(amount) }, passphrase);
     return res.json({ ok:true, ...result });
   }catch(err){
     if(err instanceof VerifyRejected){
@@ -800,17 +931,17 @@ app.get('/api/health', (req, res) => res.json({ ok:true }));
 // the previous leg's response doesn't tell you that. ----
 app.use('/api/balance', rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
 app.post('/api/balance', async (req, res) => {
-  const { exchange, mode, apiKey, secretKey, asset } = req.body || {};
+  const { exchange, mode, apiKey, secretKey, asset, passphrase } = req.body || {};
   if(!exchange || !apiKey || !secretKey || !asset){
     return res.status(400).json({ ok:false, message:'exchange, apiKey, secretKey and asset are all required.' });
   }
   const getter = ASSET_BALANCE_GETTERS[exchange];
   if(!getter){
-    return res.status(400).json({ ok:false, message:`No balance getter for "${exchange}" — only binance, bybit, mexc, and gateio are supported.` });
+    return res.status(400).json({ ok:false, message:`No balance getter for "${exchange}" — only binance, bybit, mexc, gateio, and bitget are supported.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   try{
-    const balance = await getter(netMode, apiKey, secretKey, asset);
+    const balance = await getter(netMode, apiKey, secretKey, asset, passphrase);
     return res.json({ ok:true, balance });
   }catch(err){
     if(err instanceof VerifyRejected){

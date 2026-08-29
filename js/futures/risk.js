@@ -18,14 +18,47 @@ export const RISK_DEFAULTS = {
 };
 
 // Position size from account equity + stop distance — NOT a fixed dollar amount.
-export function positionSize({ equity, riskPct, entryPrice, stopPrice, leverage }){
+export function positionSize({ equity, riskPct, entryPrice, stopPrice, leverage, maxMarginUtilizationPct }){
   const stopDistancePct = Math.abs((entryPrice - stopPrice) / entryPrice);
   if(stopDistancePct <= 0) return null;
   const riskAmountUsd = equity * (riskPct / 100);
-  const notionalUsd = riskAmountUsd / stopDistancePct;
+  const riskBasedNotionalUsd = riskAmountUsd / stopDistancePct;
+
+  // A real exchange caps notional by available margin, not just by how
+  // much you're willing to lose on the trade — you cannot actually open a
+  // position whose required margin (notional / leverage) exceeds what the
+  // account has. A tight stop otherwise produces a number that's
+  // "correct" in pure risk-% terms but not achievable in practice: e.g. a
+  // 0.15% stop at 1% risk on $10,000 equity implies $66,667 of notional,
+  // which needs $33,333 of margin at 2x leverage — more than triple the
+  // whole account. Every real exchange would reject that outright as
+  // insufficient margin. Cap notional at what leverage x equity can
+  // actually support (with a utilization buffer so one position doesn't
+  // try to consume literally all available margin, leaving room for the
+  // other simultaneous positions this engine allows), and let the ACTUAL
+  // dollar amount at risk fall below the nominal target on trades where
+  // the stop is this tight — that's what a real leveraged account does
+  // too, not something to paper over by pretending the bigger, unaffordable
+  // position was actually opened. This also directly fixes fees/funding
+  // looking disproportionately large relative to the stated risk: both are
+  // charged on notional, and notional was the thing inflating unchecked.
+  const utilization = maxMarginUtilizationPct ?? 0.9;
+  const maxNotionalByMargin = equity * leverage * utilization;
+  const notionalUsd = Math.min(riskBasedNotionalUsd, maxNotionalByMargin);
+  const marginCapped = notionalUsd < riskBasedNotionalUsd;
+
   const qty = notionalUsd / entryPrice;
   const marginRequiredUsd = notionalUsd / Math.max(1, leverage);
-  return { riskAmountUsd, notionalUsd, qty, marginRequiredUsd, stopDistancePct: stopDistancePct * 100 };
+  // The dollar amount actually at risk given the (possibly capped)
+  // notional — this is what feeds the daily risk-control gate below, not
+  // the nominal target, since the nominal figure may not reflect a
+  // position that could actually be opened.
+  const actualRiskUsd = notionalUsd * stopDistancePct;
+  return {
+    riskAmountUsd: actualRiskUsd, nominalRiskAmountUsd: riskAmountUsd,
+    notionalUsd, qty, marginRequiredUsd, marginCapped,
+    stopDistancePct: stopDistancePct * 100,
+  };
 }
 
 // Rough liquidation price for an isolated-style position at given leverage.

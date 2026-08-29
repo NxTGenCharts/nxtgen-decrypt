@@ -3,26 +3,26 @@
 // the Autotrade engine for the Triangular tab only.
 //
 // IMPORTANT — what this actually does:
-// This module does NOT place real orders or move funds on any exchange.
-// On Connect, it makes exactly one read-only signed request straight from
-// the browser to Binance/Bybit's own account endpoint, to confirm the
-// key/secret pair is real and to read the balance — nothing more. That
-// single verify call is a reasonable thing to do client-side (it can only
-// read your account, and the exchange itself is the one confirming it).
-// Live order placement is a different story: browser JS has no safe way to
-// sign a continuous stream of trading requests without the secret key
-// sitting exposed in devtools/network traffic the whole session, so that
-// part stays a simulation. Real auto-execution belongs behind a server you
-// control that holds the keys and signs requests — this file is the
-// decision engine you'd point at that server.
+// Connect verifies a key/secret(/passphrase) pair and reads its balance
+// via a signed request — either straight from the browser (works for
+// exchanges whose account endpoints allow it) or through the verify proxy
+// in /server (needed for exchanges that reject cross-origin signed
+// requests — see runVerification below for which path actually runs).
+// Autotrade itself defaults to simulation: it watches live order books for
+// triangular cycles and paper-trades the best one, compounding a running
+// "today" balance. Separately, "Real order execution" (see the Arm/Place
+// Real Orders controls) can be explicitly armed to have the SAME cycles
+// place actual signed orders through /server's /api/order — that's real
+// money movement once armed, not a simulation; see server/server.js and
+// server/README.md for how that signing actually happens and why it has
+// to be server-side rather than in this browser file.
 //
 // What it DOES do:
-// - Lets you connect an exchange: format-checks the key, then verifies it
-//   against the exchange (Binance/Bybit) and pulls your balance. Bitget
-//   can't be verified in-browser (needs a passphrase this app doesn't
-//   collect) and is saved as unverified.
+// - Lets you connect an exchange: format-checks the key (and passphrase,
+//   for Bitget), then verifies it against the exchange and pulls your
+//   balance — all five exchanges now verify for real.
 // - Keeps saved keys across Disconnect — only "Remove" deletes them — with
-//   a SHOW/HIDE toggle to reveal a saved key or secret on demand.
+//   a SHOW/HIDE toggle to reveal a saved key, secret, or passphrase on demand.
 // - Watches the selected exchange's live order books for triangular
 //   cycles, same math as the Triangular tab, and — when Autotrade is
 //   ON — paper-trades (simulates) the single highest-profit cycle that
@@ -37,12 +37,11 @@ import { fmtPct, coinIconHtml } from './utils.js';
 const LS_KEY = 'nxtgen_autotrade_v1';
 const MIN_PROFIT_FLOOR = 0.8; // hard floor — autotrade never fires below this, regardless of the field value
 
-// Exchanges that cannot be verified at all from a key+secret pair alone.
-// Bitget's account-read endpoint also requires a passphrase this app never
-// collects, so it's saved format-checked-only and permanently UNVERIFIED.
-// MEXC and Gate.io verify the same way Binance/Bybit do (key+secret is
-// enough), so they are NOT in this set.
-const NO_VERIFY_EXCHANGES = new Set(['bitget']);
+// No longer used by any exchange — Bitget (the only one that ever needed
+// this) now has real verification via the proxy, see verifyBitget in
+// server.js. Left in place, empty, as the mechanism for a future exchange
+// that can't be verified at all rather than ripping out every .has() guard.
+const NO_VERIFY_EXCHANGES = new Set([]);
 
 function todayKey(){
   return new Date().toDateString();
@@ -168,20 +167,26 @@ async function verifyGateio(mode, apiKey, secretKey){
   return { balance: usdt ? parseFloat(usdt.available) + parseFloat(usdt.locked || 0) : null };
 }
 
-const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit, mexc: verifyMexc, gateio: verifyGateio }; // Bitget needs a passphrase we don't collect — format-check only
+const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit, mexc: verifyMexc, gateio: verifyGateio };
+// Bitget has no entry here — it needs a passphrase and a different (base64
+// HMAC-SHA256) signing scheme, and this local map only exists as a
+// best-effort fallback for when no proxy is configured, which almost never
+// happens (DEFAULT_VERIFY_PROXY_URL is always set by default). Not worth
+// duplicating client-side for a path that's already CORS-doomed for every
+// other exchange here too; Bitget verification always goes through the proxy.
 
 // If a verify proxy is configured (see /server), route through it — it can
 // actually complete the signed request, since CORS only blocks the
 // browser-to-exchange hop, not server-to-exchange. Returns the same shape
 // either way: { verified, rejected, balance, message }.
-async function runVerification(key, mode, apiKey, secretKey){
+async function runVerification(key, mode, apiKey, secretKey, passphrase){
   const proxyUrl = (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
   if(proxyUrl){
     try{
       const res = await fetch(proxyUrl + '/api/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ exchange: key, mode, apiKey, secretKey }),
+        body: JSON.stringify({ exchange: key, mode, apiKey, secretKey, passphrase }),
       });
       const data = await res.json().catch(() => null);
       if(!data) return { verified:false, rejected:false, balance:null, message:`Proxy returned an unreadable response (HTTP ${res.status}).` };
@@ -195,7 +200,7 @@ async function runVerification(key, mode, apiKey, secretKey){
   // Binance/Bybit this will almost always come back "couldn't reach" due
   // to CORS on their authenticated endpoints; that's expected, not a bug.
   const verifier = VERIFIERS[key];
-  if(!verifier) return { verified:false, rejected:false, balance:null, message:'' }; // Bitget — no verifier at all
+  if(!verifier) return { verified:false, rejected:false, balance:null, message:'' }; // Bitget — no local fallback verifier, see above
   try{
     const result = await verifier(mode, apiKey, secretKey);
     return { verified:true, rejected:false, balance:result.balance, message:`Confirmed with ${EXCHANGES[key].label}.` };
@@ -207,10 +212,13 @@ async function runVerification(key, mode, apiKey, secretKey){
 
 // Loose per-exchange format sanity check — catches empty/garbage input
 // immediately. It cannot confirm a key is real; only runVerification() can.
-function formatLooksValid(key, apiKey, secretKey){
+function formatLooksValid(key, apiKey, secretKey, passphrase){
   const clean = s => /^[A-Za-z0-9\-_]+$/.test(s);
   if(apiKey.length < 10 || secretKey.length < 10) return false;
   if(!clean(apiKey) || !clean(secretKey)) return false;
+  // Passphrase is user-chosen at key-creation time, so no character-class
+  // check — just require something non-trivial was actually entered.
+  if(EXCHANGES[key].needsPassphrase && (!passphrase || passphrase.trim().length < 6)) return false;
   return true;
 }
 function persist(){
@@ -246,6 +254,7 @@ function normalizeCred(c){
   return {
     apiKey: c.apiKey,
     secretKey: c.secretKey || '',
+    passphrase: c.passphrase || '', // only meaningful for exchanges where EXCHANGES[key].needsPassphrase is true (currently just Bitget)
     connectedAt: c.connectedAt || new Date().toLocaleString(),
     connected: c.connected !== false, // default true for old saves that had no such flag
     verified: c.verified || false,
@@ -332,8 +341,9 @@ function renderConnectRows(){
       ? ' <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">DEMO</span>'
       : '';
     const placeholderPrefix = mode === 'demo' ? 'demo ' : '';
+    const needsPass = !!EXCHANGES[key].needsPassphrase;
 
-    return `<div class="connect-row" data-exchange="${key}" data-mode="${mode}">
+    return `<div class="connect-row${needsPass ? ' connect-row--passphrase' : ''}" data-exchange="${key}" data-mode="${mode}">
       <div class="connect-label">${label}${modePillHtml}${statusPill ? ' '+statusPill : ''}</div>
       ${modeToggle}
       <div class="kv-field">
@@ -344,6 +354,11 @@ function renderConnectRows(){
         <input class="ck-secret" type="password" placeholder="Enter ${placeholderPrefix}secret key" value="${stored ? cred.secretKey : ''}" ${stored ? 'disabled' : ''}>
         ${stored ? `<button type="button" class="reveal-btn" data-field="secret" title="Show/hide">SHOW</button>` : ''}
       </div>
+      ${needsPass ? `
+      <div class="kv-field">
+        <input class="ck-passphrase" type="password" placeholder="Enter ${placeholderPrefix}passphrase" value="${stored ? cred.passphrase : ''}" ${stored ? 'disabled' : ''}>
+        ${stored ? `<button type="button" class="reveal-btn" data-field="passphrase" title="Show/hide">SHOW</button>` : ''}
+      </div>` : ''}
       ${stored ? `
         <div class="connect-actions">
           <button class="primary ghost connect-btn" data-action="${connected ? 'disconnect' : 'reconnect'}">${connected ? 'Disconnect' : 'Reconnect'}</button>
@@ -381,7 +396,7 @@ async function reverifyStoredCred(key, mode, { silent = false } = {}){
   if(!cred || NO_VERIFY_EXCHANGES.has(key)) return false;
   const netLabel = mode === 'demo' ? 'demo' : 'live';
   const usingProxy = !!(state.verifyProxyUrl || '').trim();
-  const result = await runVerification(key, mode, cred.apiKey, cred.secretKey);
+  const result = await runVerification(key, mode, cred.apiKey, cred.secretKey, cred.passphrase);
   if(result.rejected){
     cred.verified = false;
     cred.verifyNote = result.message;
@@ -438,7 +453,8 @@ els.connectRows.addEventListener('click', async (e) => {
   const revealBtn = e.target.closest('.reveal-btn');
   if(revealBtn){
     const row = e.target.closest('.connect-row');
-    const input = row.querySelector(revealBtn.dataset.field === 'key' ? '.ck-key' : '.ck-secret');
+    const fieldClass = revealBtn.dataset.field === 'key' ? '.ck-key' : revealBtn.dataset.field === 'passphrase' ? '.ck-passphrase' : '.ck-secret';
+    const input = row.querySelector(fieldClass);
     const showing = input.type === 'text';
     input.type = showing ? 'password' : 'text';
     revealBtn.textContent = showing ? 'SHOW' : 'HIDE';
@@ -524,12 +540,16 @@ els.connectRows.addEventListener('click', async (e) => {
   // action === 'connect' — brand new key entry
   const apiKey = row.querySelector('.ck-key').value.trim();
   const secretKey = row.querySelector('.ck-secret').value.trim();
-  if(!apiKey || !secretKey){
-    showAtMessage('Enter both an API key and a secret key before connecting.', 'error');
+  const needsPass = !!EXCHANGES[key].needsPassphrase;
+  const passphrase = needsPass ? row.querySelector('.ck-passphrase').value.trim() : '';
+  if(!apiKey || !secretKey || (needsPass && !passphrase)){
+    showAtMessage(needsPass
+      ? `Enter an API key, secret key, and passphrase before connecting.`
+      : 'Enter both an API key and a secret key before connecting.', 'error');
     return;
   }
-  if(!formatLooksValid(key, apiKey, secretKey)){
-    showAtMessage(`That doesn't look like a valid ${EXCHANGES[key].label} key/secret pair (wrong length or characters) — double-check it and try again.`, 'error');
+  if(!formatLooksValid(key, apiKey, secretKey, passphrase)){
+    showAtMessage(`That doesn't look like a valid ${EXCHANGES[key].label} key${needsPass ? '/secret/passphrase' : '/secret'} combination (wrong length or characters) — double-check it and try again.`, 'error');
     return;
   }
 
@@ -538,14 +558,10 @@ els.connectRows.addEventListener('click', async (e) => {
   const netLabel = mode === 'demo' ? 'demo' : 'live';
   const usingProxy = !!(state.verifyProxyUrl || '').trim();
 
-  const cred = { apiKey, secretKey, connectedAt: new Date().toLocaleString(), connected: true, verified: false, verifyNote: '' };
+  const cred = { apiKey, secretKey, passphrase, connectedAt: new Date().toLocaleString(), connected: true, verified: false, verifyNote: '' };
 
-  if(NO_VERIFY_EXCHANGES.has(key)){
-    cred.verifyNote = `${EXCHANGES[key].label} verification needs a passphrase this app doesn't collect — format looks valid, but this hasn't been confirmed against the exchange.`;
-    state.exchangeCreds[key][mode] = cred;
-    showAtMessage(`${EXCHANGES[key].label} key saved (format looks valid). It can't be verified — even the proxy doesn't collect the third ${EXCHANGES[key].label} field (passphrase) — so it's marked UNVERIFIED.`, 'info');
-  } else {
-    const result = await runVerification(key, mode, apiKey, secretKey);
+  {
+    const result = await runVerification(key, mode, apiKey, secretKey, passphrase);
     if(result.rejected){
       // The exchange itself rejected the key/secret — don't save it as connected.
       showAtMessage(`${EXCHANGES[key].label} rejected that ${netLabel} key: ${result.message}. Double-check the key, secret, and that it has the right permissions/IP allow-list, then try again.`, 'error');
@@ -891,7 +907,7 @@ async function placeOrderViaProxy(key, mode, cred, { symbol, side, amountKind, a
   const res = await fetch(`${proxyUrl}/api/order`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ exchange: key, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, symbol, side, amountKind, amount }),
+    body: JSON.stringify({ exchange: key, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol, side, amountKind, amount }),
   });
   const data = await res.json().catch(() => null);
   if(!data) throw new Error(`No response from proxy (HTTP ${res.status}).`);
@@ -917,7 +933,7 @@ async function fetchAssetBalance(key, mode, cred, asset){
     const res = await fetch(`${proxyUrl}/api/balance`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ exchange: key, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, asset }),
+      body: JSON.stringify({ exchange: key, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, asset }),
     });
     const data = await res.json().catch(() => null);
     if(!data || !data.ok || typeof data.balance !== 'number') return null;

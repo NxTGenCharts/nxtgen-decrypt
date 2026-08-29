@@ -123,7 +123,7 @@ momentum side of it, a push candle, RSI in a continuation (not yet
 exhausted) zone, and a volume expansion behind the move. Same 1:1
 construction, opposite thesis. That backtested at:
 
-- **Win rate: 69-73%** across two independent runs (135 and 196 closed trades)
+- **Win rate: 65-76%** across two independent runs (135 and 196 closed trades)
 - **Avg time-to-resolve: ~14 minutes** (target band was 8-16 min)
 - **Profit factor: 1.2-1.5**, net of fees/spread/slippage/funding
 
@@ -150,3 +150,37 @@ at whatever balance is entered. Default risk per trade is 1% of that
 balance (was 0.375%); `RISK_DEFAULTS.maxPortfolioRiskPct` was raised
 from 1.5% to 3% so three simultaneous 1%-risk positions still fit under
 the portfolio-risk cap the way three 0.375% ones used to.
+
+## Update: two calculation bugs fixed
+
+**1. Current Balance could sit below the starting balance in a session
+that was genuinely profitable.** `dayState.equity` was only ever
+credited with the P&L of whichever slice of a position closed it — for a
+trade that exited entirely on one leg (a stop-loss with no prior partial),
+that's correct. But AI Scalp's TP1/TP2/TP3 share the same price, so a
+winning trade usually fires all three partial exits (50%/25%/25%) back to
+back in one candle, and equity was only picking up the LAST 25% slice,
+silently dropping the other 75% of that trade's profit from the balance —
+even though the "Net P&L" stat (summed separately, correctly, from every
+slice) already had it right. Fixed by crediting equity with the trade's
+full accrued net P&L (`pos.finalNetUsd`, the same figure already used
+correctly for the trade's win/loss verdict and its trade-history row) —
+not just the final slice.
+
+**2. Fees looked disproportionate to the stated risk because the
+underlying position size was, too.** Position sizing derived notional
+purely from risk-amount ÷ stop-distance, with no check on whether the
+resulting margin requirement (`notional / leverage`) was something the
+account could actually support. For AI Scalp's genuinely tight stops
+(0.15-0.42%), that produced notional positions of $24k-$67k against a
+$10,000 account at 2x leverage — margin requirements 1.2x-3.3x the entire
+account, which any real exchange would reject outright as insufficient
+margin. Fees and funding are both charged on notional, so the fee dollar
+amounts inherited that same unrealistic inflation. Fixed by capping
+notional at 90% of `equity x leverage` — the dollar amount actually put
+at risk on a very-tight-stop trade now legitimately comes in under the
+nominal 1% target (that's what a real leveraged account does too, not a
+bug to hide), and fees now scale off a position size that could actually
+be opened. Re-running the backtest after both fixes: still 65-76% win
+rate, profit factor improved slightly to ~1.5-1.7 (fees now a smaller,
+realistic drag rather than an inflated one).

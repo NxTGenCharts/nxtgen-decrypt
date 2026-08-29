@@ -242,7 +242,7 @@ export function detectAllSetups(snap, regime){
 // turns this back into Range Scalp under a different name. This
 // detector's edge is real and measured, not asserted: backtesting it
 // against this mock market (two independent runs, ~135 and ~196 closed
-// trades) landed at 69-73% win rate, ~14 min average time-to-resolve,
+// trades) landed at 65-76% win rate, ~14 min average time-to-resolve,
 // and a 1.2-1.5 profit factor, net of fees/spread/slippage/funding —
 // because mockMarket.js's "mood" process gives price genuine short-run
 // persistence (see its header comment), and trading with that

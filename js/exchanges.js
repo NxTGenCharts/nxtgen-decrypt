@@ -247,7 +247,7 @@ export async function loadBitgetCoinInfo(){
 }
 
 export const EXCHANGES = {
-  bitget:  { label:'Bitget',  load:loadBitget, demoSupported:false },
+  bitget:  { label:'Bitget',  load:loadBitget, demoSupported:true, needsPassphrase:true },
   binance: { label:'Binance', load:loadBinance, demoSupported:true },
   bybit:   { label:'Bybit',   load:loadBybit, demoSupported:true },
   mexc:    { label:'MEXC',    load:loadMexc, demoSupported:false },
