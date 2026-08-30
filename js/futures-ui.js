@@ -7,14 +7,15 @@
 // Two independent trading loops live in this file:
 // - runCycle() — Paper mode, unchanged from before, always available,
 //   trades against the synthetic feed in js/futures/mockMarket.js.
-// - runLiveCycle() — Live/Demo mode, Bybit only so far. Runs the exact
-//   same engine.runScanCycle() detection/scoring logic, but fed real
-//   Bybit market data (via server.js's /api/futures/snapshot) instead of
+// - runLiveCycle() — Live/Demo mode, Bybit and Binance so far. Runs the
+//   exact same engine.runScanCycle() detection/scoring logic, but fed
+//   real market data (via server.js's /api/futures/snapshot) instead of
 //   the synthetic feed, and on an APPROVED signal places a real order
 //   (via /api/futures/order) with an exchange-side stop-loss/take-profit
-//   attached at creation — Bybit enforces the exit, this file never
-//   "watches" a live position's price and decides to close it. Reuses
-//   the same Bybit credential already connected in Autotrade & Balances.
+//   attached — the exchange enforces the exit, this file never "watches"
+//   a live position's price and decides to close it itself. Reuses
+//   whichever exchange's credential is already connected in Autotrade &
+//   Balances — nothing new to connect per exchange.
 // =============================================================
 import { els, state } from './state.js';
 import { fmtPct } from './utils.js';
@@ -219,11 +220,13 @@ function renderHistory(history){
 }
 
 // =============================================================
-// Live/Demo trading (Bybit only). Separate state, separate stats,
+// Live/Demo trading (Bybit and Binance so far). Separate state, separate stats,
 // separate history from Paper above — nothing here touches dayState/
 // tradeHistory, and Paper keeps running unaffected regardless of
 // whether Live/Demo is armed or not.
 // =============================================================
+
+const LIVE_TRADEABLE_EXCHANGES = ['bybit', 'binance', 'gateio']; // extend as more get wired up server-side
 
 function callProxy(path, body){
   const proxyUrl = (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
@@ -236,10 +239,10 @@ function callProxy(path, body){
   });
 }
 
-function fetchLiveSnapshot(symbol){
+function fetchLiveSnapshot(exchange, symbol){
   const proxyUrl = (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
   if(!proxyUrl) return Promise.reject(new Error('No verification proxy configured.'));
-  return fetch(`${proxyUrl}/api/futures/snapshot?symbol=${symbol}`)
+  return fetch(`${proxyUrl}/api/futures/snapshot?exchange=${exchange}&symbol=${symbol}`)
     .then(res => res.json().catch(() => null))
     .then(data => {
       if(!data || !data.ok) throw new Error((data && data.message) || 'Snapshot fetch failed.');
@@ -247,10 +250,10 @@ function fetchLiveSnapshot(symbol){
     });
 }
 
-function liveCred(){
+function liveCred(exchange){
   const mode = fu().liveMode;
   if(mode === 'paper') return null;
-  const cred = state.exchangeCreds.bybit && state.exchangeCreds.bybit[mode];
+  const cred = state.exchangeCreds[exchange] && state.exchangeCreds[exchange][mode];
   return (cred && cred.apiKey && cred.verified) ? cred : null;
 }
 
@@ -302,36 +305,34 @@ function buildLiveDayStateShim(equity){
 async function runLiveCycle(){
   const f = fu();
   if(f.liveMode === 'paper' || !f.liveArmed) return;
-  const currentExchange = els.fuExchange ? els.fuExchange.value : f.exchange;
-  if(currentExchange !== 'bybit'){
-    showLiveMessage(`Exchange above is set to "${currentExchange}", but Live/Demo trading only supports Bybit so far. Switch Exchange to Bybit Futures to run this — Paper mode can still simulate the others.`, 'error');
-    return;
-  }
-  const cred = liveCred();
-  if(!cred){
-    showLiveMessage(`No verified Bybit ${f.liveMode} key found — connect and verify one in Autotrade & Balances first.`, 'error');
-    return;
-  }
 
-  // 1) Check whatever we're already tracking as open, for closure.
+  // 1) Check whatever we're already tracking as open, for closure — using
+  // EACH position's own tracked exchange/credential, not necessarily
+  // whatever the Exchange dropdown currently shows. If that were keyed
+  // off the current dropdown instead, switching exchanges while a
+  // position from a different one is still open would query the wrong
+  // exchange for it and silently stop monitoring the real position.
   for(const symbol of Object.keys(f.livePositions)){
     const tracked = f.livePositions[symbol];
+    const posCred = liveCred(tracked.exchange);
+    if(!posCred) continue; // can't check right now (key disconnected?) — leave it tracked, try again next cycle
     try{
-      const data = await callProxy('/api/futures/position', { exchange:'bybit', mode: f.liveMode, apiKey: cred.apiKey, secretKey: cred.secretKey, symbol });
+      const data = await callProxy('/api/futures/position', { exchange: tracked.exchange, mode: f.liveMode, apiKey: posCred.apiKey, secretKey: posCred.secretKey, passphrase: posCred.passphrase, symbol, openedAtMs: tracked.openedAtMs });
       if(!data.ok) continue; // transient error — leave it tracked, try again next cycle
       if(!data.open){
         const closed = data.closed;
         const netUsd = closed ? closed.closedPnl : 0;
         f.liveTradeHistory.unshift({
-          closedAtMs: Date.now(), time: new Date().toLocaleTimeString(), symbol, side: tracked.side,
-          entry: closed ? closed.avgEntryPrice : tracked.entry, exit: closed ? closed.avgExitPrice : null,
+          closedAtMs: Date.now(), time: new Date().toLocaleTimeString(), exchange: tracked.exchange, symbol, side: tracked.side,
+          entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
+          exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
           leverage: tracked.leverage, qty: tracked.qty, netUsd, orderId: tracked.orderId,
         });
         f.liveTrades++;
         f.liveNetPnlUsd += netUsd;
         delete f.livePositions[symbol];
       } else if(els.fuLiveOpenPosition){
-        els.fuLiveOpenPosition.textContent = `${symbol} ${data.position.side} ${data.position.size} @ ${data.position.avgPrice} (uPnL ${fmtUsd(data.position.unrealisedPnl)})`;
+        els.fuLiveOpenPosition.textContent = `[${tracked.exchange}] ${symbol} ${data.position.side} ${data.position.size} @ ${data.position.avgPrice} (uPnL ${fmtUsd(data.position.unrealisedPnl)})`;
       }
     }catch(err){
       // network hiccup — leave it tracked, try again next cycle
@@ -344,13 +345,24 @@ async function runLiveCycle(){
   if(Object.keys(f.livePositions).length > 0) return;
   if(els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = 'None';
 
+  const exchange = els.fuExchange ? els.fuExchange.value : f.exchange;
+  if(!LIVE_TRADEABLE_EXCHANGES.includes(exchange)){
+    showLiveMessage(`Exchange above is set to "${exchange}", but Live/Demo trading only supports ${LIVE_TRADEABLE_EXCHANGES.join(' and ')} so far. Paper mode can still simulate the others.`, 'error');
+    return;
+  }
+  const cred = liveCred(exchange);
+  if(!cred){
+    showLiveMessage(`No verified ${exchange} ${f.liveMode} key found — connect and verify one in Autotrade & Balances first.`, 'error');
+    return;
+  }
+
   let equity;
   try{
-    const balData = await callProxy('/api/balance', { exchange:'bybit', mode: f.liveMode, apiKey: cred.apiKey, secretKey: cred.secretKey, asset:'USDT' });
+    const balData = await callProxy('/api/futures/balance', { exchange, mode: f.liveMode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase });
     if(!balData.ok) throw new Error(balData.message || 'Balance check failed.');
     equity = balData.balance;
   }catch(err){
-    showLiveMessage(`Could not read the real Bybit balance: ${err.message}`, 'error');
+    showLiveMessage(`Could not read the real ${exchange} futures balance: ${err.message}`, 'error');
     return;
   }
   if(els.fuLiveBalance) els.fuLiveBalance.textContent = '$' + equity.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
@@ -360,17 +372,17 @@ async function runLiveCycle(){
   // tolerates a null snapshot — see engine.js), not treated as fatal.
   const snapshots = {};
   await Promise.all(LIVE_WATCHLIST.map(async symbol => {
-    try{ snapshots[symbol] = await fetchLiveSnapshot(symbol); }catch(err){ /* skip this symbol this cycle */ }
+    try{ snapshots[symbol] = await fetchLiveSnapshot(exchange, symbol); }catch(err){ /* skip this symbol this cycle */ }
   }));
   if(!snapshots.BTCUSDT){
-    showLiveMessage('Could not fetch real BTC market data this cycle (needed for the shock filter) — skipping.', 'error');
+    showLiveMessage(`Could not fetch real BTC market data from ${exchange} this cycle (needed for the shock filter) — skipping.`, 'error');
     return;
   }
 
   readSettingsFromInputs();
   const f2 = fu();
   const cfg = {
-    exchange: 'bybit', weights: DEFAULT_WEIGHTS, highSelectivity: f2.highSelectivity,
+    exchange, weights: DEFAULT_WEIGHTS, highSelectivity: f2.highSelectivity,
     minConfidence: f2.minConfidence, minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
     riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage,
   };
@@ -385,15 +397,16 @@ async function runLiveCycle(){
 
   const approved = rows.find(r => r.status === 'APPROVED');
   if(!approved){
-    showLiveMessage(`Armed, watching ${LIVE_WATCHLIST.length} symbols — no qualifying signal this cycle.`);
+    showLiveMessage(`Armed on ${exchange}, watching ${LIVE_WATCHLIST.length} symbols — no qualifying signal this cycle.`);
     return;
   }
 
-  const side = approved.direction === 'LONG' ? 'Buy' : 'Sell';
+  const side = approved.direction === 'LONG' ? 'Buy' : 'Sell'; // server normalizes casing per exchange — see FUTURES_SIDE_CASING in server.js
+  const openedAtMs = Date.now();
   try{
-    showLiveMessage(`Placing a real ${f.liveMode} order: ${approved.symbol} ${side} @ ~${approved.entry}…`);
+    showLiveMessage(`Placing a real ${f.liveMode} order on ${exchange}: ${approved.symbol} ${side} @ ~${approved.entry}…`);
     const result = await callProxy('/api/futures/order', {
-      exchange:'bybit', mode: f.liveMode, apiKey: cred.apiKey, secretKey: cred.secretKey,
+      exchange, mode: f.liveMode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase,
       symbol: approved.symbol, side, qty: approved.sizing.qty, leverage: cfg.leverage,
       stopLossPrice: approved.stop, takeProfitPrice: approved.tp1,
     });
@@ -402,9 +415,9 @@ async function runLiveCycle(){
       return;
     }
     f.livePositions[approved.symbol] = {
-      orderId: result.orderId, side, qty: result.filledQty, entry: result.avgPrice,
+      exchange, orderId: result.orderId, side, qty: result.filledQty, entry: result.avgPrice,
       leverage: result.leverage, stopLossPrice: result.stopLossPrice, takeProfitPrice: result.takeProfitPrice,
-      riskAmountUsd: approved.sizing.riskAmountUsd, openedAtMs: Date.now(),
+      riskAmountUsd: approved.sizing.riskAmountUsd, openedAtMs,
     };
     showLiveMessage(`Real ${f.liveMode} position opened: ${approved.symbol} ${side} ${result.filledQty} @ ${result.avgPrice}, SL ${result.stopLossPrice} / TP ${result.takeProfitPrice} (order ${result.orderId}).`);
   }catch(err){
@@ -418,8 +431,9 @@ function renderLiveHistory(){
   const history = fu().liveTradeHistory;
   if(!history.length){ els.fuLiveHistoryRows.innerHTML = '<div class="fu-empty">No live/demo trades yet this session.</div>'; return; }
   els.fuLiveHistoryRows.innerHTML = history.slice(0, 50).map(t => `
-    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr 1.4fr;">
+    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr 1.4fr;">
       <div>${t.time}</div>
+      <div>${t.exchange || '—'}</div>
       <div>${t.symbol}</div>
       <div>${t.side}</div>
       <div>${t.entry != null ? Number(t.entry).toFixed(4) : '—'}</div>
@@ -448,7 +462,8 @@ function updateLiveModeUI(){
   } else if(!f.liveArmed){
     showLiveMessage(`${f.liveMode === 'live' ? 'Live' : 'Demo'} mode selected but not armed — check the box and type the phrase below to arm.`);
   } else {
-    showLiveMessage(`Armed for ${f.liveMode === 'live' ? 'LIVE (real funds)' : 'Demo'} trading on Bybit.`);
+    const currentExchange = els.fuExchange ? els.fuExchange.value : f.exchange;
+    showLiveMessage(`Armed for ${f.liveMode === 'live' ? 'LIVE (real funds)' : 'Demo'} trading on ${currentExchange}.`);
   }
 }
 
@@ -501,8 +516,12 @@ function initLiveTradingControls(){
     els.fuLiveArmBtn.addEventListener('click', () => {
       const f = fu();
       const currentExchange = els.fuExchange ? els.fuExchange.value : f.exchange;
-      if(currentExchange !== 'bybit'){
-        showLiveMessage(`Exchange above is set to "${currentExchange}" — switch it to Bybit Futures before arming Live/Demo trading (Bybit is the only one wired up so far).`, 'error');
+      if(!LIVE_TRADEABLE_EXCHANGES.includes(currentExchange)){
+        showLiveMessage(`Exchange above is set to "${currentExchange}" — switch it to one of: ${LIVE_TRADEABLE_EXCHANGES.join(', ')} before arming Live/Demo trading.`, 'error');
+        return;
+      }
+      if(!liveCred(currentExchange)){
+        showLiveMessage(`No verified ${currentExchange} ${f.liveMode} key found — connect and verify one in Autotrade & Balances first, then come back and arm.`, 'error');
         return;
       }
       if(!els.fuLiveConfirmCheck || !els.fuLiveConfirmCheck.checked){
@@ -511,10 +530,6 @@ function initLiveTradingControls(){
       }
       if((els.fuLiveArmPhrase.value || '').trim() !== ARM_PHRASE){
         showLiveMessage(`Type exactly "${ARM_PHRASE}" to arm.`, 'error');
-        return;
-      }
-      if(!liveCred()){
-        showLiveMessage(`No verified Bybit ${f.liveMode} key found — connect and verify one in Autotrade & Balances first, then come back and arm.`, 'error');
         return;
       }
       f.liveArmed = true;

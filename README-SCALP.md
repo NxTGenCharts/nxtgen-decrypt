@@ -241,3 +241,99 @@ Futures. Bybit was the first; extending this to the others is additive
 work (new market-data adapters, new order-placement functions per
 exchange's own API) — the pattern from this build should make it faster,
 not a redesign.
+
+## Update: Binance Futures added as the second Live/Demo exchange
+
+Same pattern as Bybit — real klines+ticker shaped into the shared
+snapshot format, native/exchange-enforced stop-loss and take-profit,
+one position at a time, arm-with-typed-phrase. Two things about Binance
+specifically made this NOT a copy-paste of the Bybit version:
+
+**Binance doesn't support attaching a stop-loss/take-profit to the entry
+order.** Bybit does this in one call (`tpslMode: 'Full'`); Binance needs
+three signed calls per position — the market entry, then a separate
+`STOP_MARKET` and a separate `TAKE_PROFIT_MARKET`, both `closePosition:
+true`. Worse, **Binance changed which endpoint conditional orders go
+through at all, in an API change dated 2025-12-09** — `STOP_MARKET`/
+`TAKE_PROFIT_MARKET` used to go through the regular order endpoint;
+they now 404/reject there and have to go through a newer
+`/fapi/v1/algoOrder` endpoint instead. This was caught during research
+(a live GitHub issue from another bot's maintainer breaking on exactly
+this), not discovered by trial and error against a real account. Because
+opening a Binance position is three calls instead of one, there's a real
+failure mode here that Bybit's single-call version doesn't have: the
+entry can fill and then either exit-order call can fail, leaving a real
+leveraged position open with no protection. That case is caught
+explicitly and reported as its own clearly-worded error (not a generic
+"order failed") telling you to go check Binance directly — it does not
+retry silently or pretend the position isn't there.
+
+**Binance keeps futures in a completely separate wallet from spot.**
+Bybit's account is unified, so Live/Demo trading could just reuse the
+same balance getter spot Autotrade already had. Binance can't — a new
+`/api/futures/balance` route and a dedicated `binanceFuturesBalance`
+were needed, or this would have silently read the wrong number (spot
+balance) when sizing a futures position.
+
+**No single "closed PnL" endpoint.** Bybit has one
+(`/v5/position/closed-pnl`) that hands back a single net number.
+Binance's closest equivalent is its income ledger
+(`/fapi/v1/income`) — this sums every `REALIZED_PNL`, `COMMISSION`, and
+`FUNDING_FEE` entry for the symbol since the position was opened
+(tracked client-side as `openedAtMs`, sent with every position check) to
+reconstruct the same net figure.
+
+Everything else — the real-data snapshot shape, the injectable
+`getSnapshot`/`now`/`getBtcShock` mechanism in `engine.js`, the one-
+position-at-a-time policy, the arm-phrase flow — is unchanged and now
+shared across both exchanges rather than hardcoded to either.
+
+## Update: Gate.io Futures added as the third Live/Demo exchange
+
+Same overall pattern again — real klines+ticker shaped into the shared
+snapshot format, exchange-enforced stop-loss/take-profit, one position
+at a time, arm-with-typed-phrase. Two things specific to Gate.io:
+
+**Its futures API lives on an entirely different domain from spot** —
+`fx-api.gateio.ws` / `fx-api-testnet.gateio.ws`, not `api.gateio.ws` /
+`api-testnet.gateapi.io`. Confirmed from Gate's own API changelog
+("Domain of base URLs are changed to fx-api.gateio.ws..."), not assumed
+by analogy to the spot integration built earlier — reusing the spot base
+would have silently pointed at the wrong host.
+
+**Gate.io futures orders are sized in whole CONTRACTS, not base-asset
+quantity.** Each contract represents a fixed amount of the underlying
+(`quanto_multiplier`, from the contract's own public info) — the
+engine's computed base-asset qty gets converted and floored to a whole
+contract count before it means anything here. This implementation
+doesn't support partial-contract sizing (most contracts don't either).
+Direction is also encoded differently than the other two exchanges: Gate
+uses the *sign* of the order size (positive = long, negative = short)
+rather than a separate side field.
+
+**TP/SL uses Gate's price-triggered order API** (`POST
+/futures/{settle}/price_orders`) — two separate trigger orders after the
+entry fills, same "separate calls" shape as Binance rather than Bybit's
+one-call inline attachment, using `order_type:
+plan-close-long-position`/`plan-close-short-position` so each trigger
+closes the whole position regardless of size. Gate does have a newer
+inline TP/SL field on the entry order itself
+(`tpsl_tp_trigger_price`/`tpsl_sl_trigger_price`, per their changelog) —
+deliberately not used: it's new enough that the full required schema
+around it couldn't be confirmed with confidence during research, and
+this isn't code to guess on. The trigger-order API used instead is
+older, has a fully-documented request/response shape including a working
+code example, and is what several third-party trading bots already use
+in production.
+
+Same separate-wallet situation as Binance (a dedicated
+`/api/futures/balance` entry, not reused from spot) and same
+no-single-closed-PnL-endpoint situation (reconstructed from the account
+ledger's `pnl`/`fee`/`fund` entries for the contract since the position
+opened, via `openedAtMs` — same approach as Binance's income-ledger sum).
+
+**MEXC Futures is the one remaining exchange, not yet built.** Its
+contract API lives on a different domain from its spot API with a
+different, less-standard signing scheme — deliberately saved for last
+rather than attempted under the same research/implementation pass as
+the other three.

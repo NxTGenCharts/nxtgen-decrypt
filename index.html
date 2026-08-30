@@ -278,7 +278,7 @@
         <select id="atExchange" title="Autotrade watches this exchange only"></select>
       </div>
       <div class="field" id="atModeRow">
-        <label title="Demo is available for Binance and Bybit only. Bitget has no public Demo Trading environment.">Network</label>
+        <label title="Demo is available for Binance, Bybit, Gate.io, and Bitget. MEXC has no public Demo Trading environment.">Network</label>
         <div class="mode-toggle">
           <button type="button" class="mode-btn active" id="atModeLive">Live</button>
           <button type="button" class="mode-btn" id="atModeDemo">Demo</button>
@@ -475,9 +475,12 @@
     </div>
 
     <div class="ov-block" style="margin-top:18px;border-color:var(--amber-dim);">
-      <div class="ov-block-title">Live / Demo Trading <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">BYBIT ONLY, FOR NOW</span></div>
+      <div class="ov-block-title">Live / Demo Trading <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">BYBIT, BINANCE &amp; GATE.IO, FOR NOW</span></div>
       <div style="font-size:12px;color:var(--dim);margin-bottom:14px;line-height:1.5;">
-        Separate from the paper engine above, which keeps running exactly as it always has regardless of what's set here. This places real orders on the Bybit key already connected in <b>Autotrade &amp; Balances</b> — nothing new to connect. Every position opens with an exchange-side stop-loss and take-profit attached at creation (not something this app watches and reacts to), so Bybit itself enforces the exit even if this tab is closed or your connection drops.
+        Separate from the paper engine above, which keeps running exactly as it always has regardless of what's set here. This places real orders on whichever exchange is selected above (Bybit, Binance, or Gate.io — MEXC Futures is still Paper-only) using the key already connected for it in <b>Autotrade &amp; Balances</b> — nothing new to connect. Every position opens with an exchange-side stop-loss and take-profit attached at creation (not something this app watches and reacts to), so the exchange itself enforces the exit even if this tab is closed or your connection drops.
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:10px;">
+        Binance and Gate.io both need two extra signed calls per position (their stop-loss and take-profit can't be attached to the entry order the way Bybit's can) — if the entry fills but either of those fails, this app will tell you plainly that the position is open and unprotected rather than reporting a generic error. Check the exchange directly if you ever see that message.
       </div>
       <div class="controls">
         <div class="field">
@@ -519,8 +522,8 @@
 
       <div class="ov-block" style="margin-top:14px;">
         <div class="ov-block-title" style="font-size:13px;">Live/Demo Trade History</div>
-        <div class="fu-hrow fu-head" style="grid-template-columns:1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr 1.4fr;">
-          <div>Time</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Net</div><div>Order ID</div>
+        <div class="fu-hrow fu-head" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr 1.4fr;">
+          <div>Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Net</div><div>Order ID</div>
         </div>
         <div id="fuLiveHistoryRows"><div class="fu-empty">No live/demo trades yet this session.</div></div>
       </div>
@@ -529,8 +532,8 @@
     <footer>
       <b>Scope —</b> USDT-margined perpetuals across a 35-symbol watchlist. Default risk 1% of equity per trade (configurable 0.1–2%), max 3 simultaneous positions, max 3% total portfolio risk, max 2% daily loss, pause after 3 consecutive losses — all enforced by the No-Trade Engine before any position opens.<br>
       <b>Win rate vs. expectancy —</b> the dashboard reports whatever win rate and profit factor the session's trades actually produced. A high win rate with poor expectancy is not something this build is tuned toward, and it will show a losing session honestly if that's what happens against the current (synthetic, Paper-mode) price data.<br>
-      <b>Live/Demo trading</b> (Bybit only so far) places real orders through <code>server/server.js</code> with a native exchange-side stop-loss/take-profit on every position — see the Live/Demo Trading section above and <code>server/README.md</code> before arming it with a Live key.<br>
-      <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet. Live/Demo execution for Binance Futures, MEXC Futures, and Gate.io Futures hasn't been built yet either — Bybit was the first.<br>
+      <b>Live/Demo trading</b> (Bybit, Binance, and Gate.io so far) places real orders through <code>server/server.js</code> with a native/exchange-enforced stop-loss and take-profit on every position — see the Live/Demo Trading section above and <code>server/README.md</code> before arming it with a Live key.<br>
+      <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet. Live/Demo execution for MEXC Futures hasn't been built yet — Bybit, Binance, and Gate.io are done.<br>
       This is not financial advice.
     </footer>
   </div>

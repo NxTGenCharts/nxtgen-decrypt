@@ -710,43 +710,139 @@ async function bybitBuildFuturesSnapshot(symbol){
   };
 }
 
+// ---- Binance USDⓈ-M real market data — same shape, klines are already
+// chronological (unlike Bybit's, which need reversing) and interval
+// strings are "5m"/"15m"/"1h" rather than raw minute counts. ----
+function binanceCandlesFromKline(raw){
+  if(!Array.isArray(raw)) return [];
+  return raw.map(row => ({
+    t: row[0], o: parseFloat(row[1]), h: parseFloat(row[2]), l: parseFloat(row[3]), c: parseFloat(row[4]), v: parseFloat(row[5]),
+  }));
+}
+async function binanceBuildFuturesSnapshot(symbol){
+  const base = BINANCE_FAPI_BASE.live; // public market data — same regardless of Live/Demo trading mode
+  const [m5Res, m15Res, h1Res, bookRes, premiumRes, tickerRes] = await Promise.all([
+    fetch(`${base}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=150`),
+    fetch(`${base}/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=150`),
+    fetch(`${base}/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=80`),
+    fetch(`${base}/fapi/v1/ticker/bookTicker?symbol=${symbol}`),
+    fetch(`${base}/fapi/v1/premiumIndex?symbol=${symbol}`),
+    fetch(`${base}/fapi/v1/ticker/24hr?symbol=${symbol}`),
+  ]);
+  const [m5Raw, m15Raw, h1Raw, book, premium, ticker24h] = await Promise.all([
+    m5Res.json(), m15Res.json(), h1Res.json(), bookRes.json(), premiumRes.json(), tickerRes.json(),
+  ]);
+
+  const m5 = binanceCandlesFromKline(m5Raw);
+  const m15 = binanceCandlesFromKline(m15Raw);
+  const h1 = binanceCandlesFromKline(h1Raw);
+  if(m5.length < 30 || m15.length < 20 || h1.length < 10){
+    throw new Error(`Not enough Binance kline history for ${symbol} yet (${m5.length}/${m15.length}/${h1.length} m5/m15/h1 candles).`);
+  }
+  if(!book || !book.bidPrice) throw new Error(`No Binance book ticker data for ${symbol}.`);
+
+  const bid = parseFloat(book.bidPrice || '0'), ask = parseFloat(book.askPrice || '0');
+  const spreadPct = (bid > 0 && ask > 0) ? ((ask - bid) / ((ask + bid) / 2)) * 100 : 0.02;
+  const volume24hUsd = parseFloat(ticker24h?.quoteVolume || '0');
+  const liquidityScore = Math.max(5, Math.min(99, Math.round(40 + 45 * Math.min(1, volume24hUsd / 2.2e9))));
+  const fundingRatePct = parseFloat(premium?.lastFundingRate || '0') * 100;
+  const last = parseFloat(premium?.markPrice || ticker24h?.lastPrice || '0');
+
+  return {
+    symbol, price: last || m5[m5.length - 1].c,
+    m5, m15, h1,
+    meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
+  };
+}
+
+// ---- Gate.io USDT-M real market data. Candlestick objects are already
+// chronological and use short keys ({t,o,h,l,c,v}) that happen to
+// already match this app's own candle shape almost exactly. ----
+function gateioCandlesFromKline(raw){
+  if(!Array.isArray(raw)) return [];
+  return raw.map(row => ({
+    t: (parseInt(row.t, 10) || 0) * 1000, o: parseFloat(row.o), h: parseFloat(row.h), l: parseFloat(row.l), c: parseFloat(row.c), v: parseFloat(row.v),
+  }));
+}
+async function gateioBuildFuturesSnapshot(symbol){
+  const base = GATEIO_FAPI_BASE.live; // public market data — same regardless of Live/Demo trading mode
+  const contract = toGateioContract(symbol);
+  const [m5Res, m15Res, h1Res, tickerRes] = await Promise.all([
+    fetch(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=5m&limit=150`),
+    fetch(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=15m&limit=150`),
+    fetch(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=1h&limit=80`),
+    fetch(`${base}/api/v4/futures/usdt/tickers?contract=${contract}`),
+  ]);
+  const [m5Raw, m15Raw, h1Raw, tickerRaw] = await Promise.all([m5Res.json(), m15Res.json(), h1Res.json(), tickerRes.json()]);
+
+  const m5 = gateioCandlesFromKline(m5Raw);
+  const m15 = gateioCandlesFromKline(m15Raw);
+  const h1 = gateioCandlesFromKline(h1Raw);
+  if(m5.length < 30 || m15.length < 20 || h1.length < 10){
+    throw new Error(`Not enough Gate.io kline history for ${symbol} yet (${m5.length}/${m15.length}/${h1.length} m5/m15/h1 candles).`);
+  }
+  const t = Array.isArray(tickerRaw) ? tickerRaw[0] : tickerRaw;
+  if(!t) throw new Error(`No Gate.io ticker data for ${symbol}.`);
+
+  const bid = parseFloat(t.highest_bid || '0'), ask = parseFloat(t.lowest_ask || '0');
+  const last = parseFloat(t.last || '0');
+  const spreadPct = (bid > 0 && ask > 0) ? ((ask - bid) / ((ask + bid) / 2)) * 100 : 0.02;
+  const volume24hUsd = parseFloat(t.volume_24h_quote || t.volume_24h_settle || '0');
+  const liquidityScore = Math.max(5, Math.min(99, Math.round(40 + 45 * Math.min(1, volume24hUsd / 2.2e9))));
+  const fundingRatePct = parseFloat(t.funding_rate || '0') * 100;
+
+  return {
+    symbol, price: last || m5[m5.length - 1].c,
+    m5, m15, h1,
+    meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
+  };
+}
+
+
 // Short cache + request coalescing, same pattern as getMarketsCached
 // above — Live/Demo cycles run every few seconds, but real kline data
 // doesn't need refetching that often, and this keeps a handful of
-// concurrent app instances from each hammering Bybit's public endpoints
-// independently.
+// concurrent app instances from each hammering an exchange's public
+// endpoints independently. Keyed by exchange+symbol since the same
+// symbol string can mean different things (or just different data) on
+// different exchanges.
+const FUTURES_SNAPSHOT_BUILDERS = { bybit: bybitBuildFuturesSnapshot, binance: binanceBuildFuturesSnapshot, gateio: gateioBuildFuturesSnapshot };
 const FUTURES_SNAPSHOT_CACHE_TTL_MS = 15_000;
-const futuresSnapshotCache = new Map(); // symbol -> { data, at }
-const futuresSnapshotInFlight = new Map(); // symbol -> Promise
+const futuresSnapshotCache = new Map(); // "exchange:symbol" -> { data, at }
+const futuresSnapshotInFlight = new Map();
 
-async function getBybitFuturesSnapshotCached(symbol){
+async function getFuturesSnapshotCached(exchange, symbol){
+  const builder = FUTURES_SNAPSHOT_BUILDERS[exchange];
+  if(!builder) throw new Error(`No real-data snapshot builder for "${exchange}" yet.`);
+  const key = `${exchange}:${symbol}`;
   const now = Date.now();
-  const cached = futuresSnapshotCache.get(symbol);
+  const cached = futuresSnapshotCache.get(key);
   if(cached && (now - cached.at) < FUTURES_SNAPSHOT_CACHE_TTL_MS) return cached.data;
-  if(futuresSnapshotInFlight.has(symbol)) return futuresSnapshotInFlight.get(symbol);
+  if(futuresSnapshotInFlight.has(key)) return futuresSnapshotInFlight.get(key);
   const p = (async () => {
-    const data = await bybitBuildFuturesSnapshot(symbol);
-    futuresSnapshotCache.set(symbol, { data, at: Date.now() });
+    const data = await builder(symbol);
+    futuresSnapshotCache.set(key, { data, at: Date.now() });
     return data;
   })();
-  futuresSnapshotInFlight.set(symbol, p);
+  futuresSnapshotInFlight.set(key, p);
   try{
     return await p;
   } finally {
-    futuresSnapshotInFlight.delete(symbol);
+    futuresSnapshotInFlight.delete(key);
   }
 }
 
 app.use('/api/futures/snapshot', rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
 app.get('/api/futures/snapshot', async (req, res) => {
   const symbol = req.query.symbol;
+  const exchange = String(req.query.exchange || 'bybit');
   if(!symbol) return res.status(400).json({ ok:false, message:'symbol is required.' });
   try{
-    const snap = await getBybitFuturesSnapshotCached(String(symbol));
+    const snap = await getFuturesSnapshotCached(exchange, String(symbol));
     res.set('Cache-Control', 'public, max-age=10');
     res.json({ ok:true, snapshot: snap });
   }catch(err){
-    res.status(502).json({ ok:false, message: `Could not fetch Bybit market data for ${symbol}: ${err.message}` });
+    res.status(502).json({ ok:false, message: `Could not fetch ${exchange} market data for ${symbol}: ${err.message}` });
   }
 });
 
@@ -889,7 +985,323 @@ async function placeBitgetOrder(mode, apiKey, secretKey, { symbol, side, amountK
   };
 }
 
+// =============================================================
+// Gate.io USDT-M Futures — the third Live/Demo exchange.
+//
+// Two things genuinely different from Bybit/Binance here, worth stating
+// plainly: (1) Gate.io futures runs on its own base domain entirely
+// separate from spot — fx-api.gateio.ws / fx-api-testnet.gateio.ws, not
+// api.gateio.ws / api-testnet.gateapi.io — confirmed from Gate's own API
+// changelog ("Domain of base URLs are changed to fx-api.gateio.ws...").
+// Reusing the spot base here would silently hit the wrong host. (2)
+// Gate.io futures orders are sized in whole CONTRACTS, not base-asset
+// quantity — each contract represents a fixed amount of the underlying
+// (quanto_multiplier, from the contract's own public info), so the
+// engine's computed base qty has to be converted to a contract count
+// before it means anything to this API. This implementation floors to
+// whole contracts (no partial-contract sizing) since that's correct for
+// the large majority of contracts, which don't support decimal sizes.
+//
+// TP/SL uses Gate's price-triggered order API (POST
+// /futures/{settle}/price_orders) — two separate trigger orders after
+// the entry fills, same "separate calls" shape as Binance rather than
+// Bybit's one-call inline attachment, using order_type:
+// plan-close-long-position / plan-close-short-position so each trigger
+// closes the WHOLE position regardless of size, the same closePosition
+// semantic as the other two exchanges. Gate does have a newer, less
+// battle-tested inline TP/SL field on the entry order itself
+// (tpsl_tp_trigger_price/tpsl_sl_trigger_price per their changelog) —
+// deliberately not used here: the trigger-order API is older, more
+// thoroughly documented, and this is not code to guess on.
+// =============================================================
+const GATEIO_FAPI_BASE = { live: 'https://fx-api.gateio.ws', demo: 'https://fx-api-testnet.gateio.ws' };
+
+async function gateioFuturesSignedRequest(method, path, query, body, apiKey, secretKey, mode){
+  const base = GATEIO_FAPI_BASE[mode] || GATEIO_FAPI_BASE.live;
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const bodyStr = body ? JSON.stringify(body) : '';
+  const bodyHash = sha512Hex(bodyStr);
+  const signString = `${method}\n${path}\n${query}\n${bodyHash}\n${timestamp}`;
+  const sign = hmacSha512Hex(secretKey, signString);
+  const res = await fetch(`${base}${path}${query ? '?' + query : ''}`, {
+    method,
+    headers: {
+      KEY: apiKey, Timestamp: timestamp, SIGN: sign,
+      Accept: 'application/json',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: bodyStr } : {}),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok){
+    throw new VerifyRejected(data && data.message ? data.message : `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+// USDT-M symbol like "BTCUSDT" -> Gate.io's underscore-separated contract
+// name "BTC_USDT". Every symbol on this app's futures watchlist ends in
+// USDT, so this is a fixed suffix split rather than a lookup table.
+function toGateioContract(symbol){
+  return symbol.endsWith('USDT') ? `${symbol.slice(0, -4)}_USDT` : symbol;
+}
+
+async function gateioFuturesBalance(mode, apiKey, secretKey){
+  const account = await gateioFuturesSignedRequest('GET', '/api/v4/futures/usdt/accounts', '', null, apiKey, secretKey, mode);
+  return account && account.available != null ? parseFloat(account.available) : null;
+}
+
+async function gateioContractInfo(mode, contract){
+  const base = GATEIO_FAPI_BASE[mode] || GATEIO_FAPI_BASE.live;
+  const res = await fetch(`${base}/api/v4/futures/usdt/contracts/${contract}`);
+  const data = await res.json().catch(() => null);
+  if(!data || !data.name) throw new Error(`Unknown Gate.io futures contract ${contract}`);
+  return {
+    quantoMultiplier: parseFloat(data.quanto_multiplier || '1'), // base-asset amount represented by 1 contract
+    orderSizeMin: parseInt(data.order_size_min, 10) || 1,        // in contracts
+    leverageMax: parseFloat(data.leverage_max || '20'),
+  };
+}
+
+async function gateioFuturesSetLeverage(mode, apiKey, secretKey, contract, leverage){
+  await gateioFuturesSignedRequest('POST', `/api/v4/futures/usdt/positions/${contract}/leverage`, `leverage=${leverage}`, null, apiKey, secretKey, mode);
+}
+
+async function placeGateioFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice }){
+  const contract = toGateioContract(symbol);
+  const info = await gateioContractInfo(mode, contract);
+
+  // Convert base-asset qty to a whole number of contracts.
+  const contracts = Math.floor(rawQty / info.quantoMultiplier);
+  if(contracts < info.orderSizeMin){
+    throw new VerifyRejected(`Size ${rawQty} ${symbol} converts to ${contracts} contract(s) (1 contract = ${info.quantoMultiplier} ${symbol.replace('USDT','')}), below the exchange minimum (${info.orderSizeMin}) — nothing was sent.`);
+  }
+  const clampedLeverage = Math.min(leverage, info.leverageMax);
+  const signedSize = side === 'buy' ? contracts : -contracts; // Gate.io encodes direction in the sign of size, not a separate side field
+
+  await gateioFuturesSetLeverage(mode, apiKey, secretKey, contract, clampedLeverage);
+
+  const order = await gateioFuturesSignedRequest('POST', '/api/v4/futures/usdt/orders', '', {
+    contract, size: signedSize, price: '0', tif: 'ioc', text: 't-nxtgen', // price:"0" + tif:"ioc" = market order
+  }, apiKey, secretKey, mode);
+  if(!order || order.status !== 'finished' || parseFloat(order.size || '0') === parseFloat(order.left ?? order.size ?? '0')){
+    // A market IOC order that didn't finish (fully or partially cancelled
+    // for lack of liquidity) is not something to treat as a live position.
+    if(!order || order.status !== 'finished'){
+      throw new VerifyRejected(`Order did not finish (status: ${order ? order.status : 'unknown'}). No further legs will be attempted automatically.`);
+    }
+  }
+  const filledContracts = Math.abs(parseFloat(order.size || '0') - parseFloat(order.left || '0')) || Math.abs(parseFloat(order.size || '0'));
+  const filledQty = filledContracts * info.quantoMultiplier;
+  const avgPrice = parseFloat(order.fill_price || order.price || '0');
+
+  const closeOrderType = side === 'buy' ? 'plan-close-long-position' : 'plan-close-short-position';
+  // rule 1 = triggers when price >= trigger.price; rule 2 = triggers when price <= trigger.price.
+  const slRule = side === 'buy' ? 2 : 1;
+  const tpRule = side === 'buy' ? 1 : 2;
+  try{
+    await gateioFuturesSignedRequest('POST', '/api/v4/futures/usdt/price_orders', '', {
+      initial: { contract, size: 0, price: '0', tif: 'ioc', reduce_only: true },
+      trigger: { strategy_type: 0, price_type: 0, price: rawStopLossPrice.toString(), rule: slRule },
+      order_type: closeOrderType,
+    }, apiKey, secretKey, mode);
+    await gateioFuturesSignedRequest('POST', '/api/v4/futures/usdt/price_orders', '', {
+      initial: { contract, size: 0, price: '0', tif: 'ioc', reduce_only: true },
+      trigger: { strategy_type: 0, price_type: 0, price: rawTakeProfitPrice.toString(), rule: tpRule },
+      order_type: closeOrderType,
+    }, apiKey, secretKey, mode);
+  }catch(err){
+    throw new VerifyRejected(`Position OPENED (${symbol} ${side} ${filledQty} @ ${avgPrice}, order ${order.id}) but attaching stop-loss/take-profit FAILED: ${err.message}. This position has no protective orders on it — check Gate.io directly and close or protect it manually.`);
+  }
+
+  return { orderId: order.id, filledQty, avgPrice, leverage: clampedLeverage, stopLossPrice: rawStopLossPrice, takeProfitPrice: rawTakeProfitPrice };
+}
+
+async function getGateioFuturesPosition(mode, apiKey, secretKey, symbol){
+  const contract = toGateioContract(symbol);
+  const pos = await gateioFuturesSignedRequest('GET', `/api/v4/futures/usdt/positions/${contract}`, '', null, apiKey, secretKey, mode);
+  const size = pos ? parseFloat(pos.size || '0') : 0;
+  if(!pos || size === 0) return null;
+  return {
+    size: Math.abs(size), side: size > 0 ? 'Buy' : 'Sell', avgPrice: parseFloat(pos.entry_price || '0'),
+    markPrice: parseFloat(pos.mark_price || '0'), unrealisedPnl: parseFloat(pos.unrealised_pnl || '0'),
+    leverage: parseFloat(pos.leverage || '0'), liqPrice: pos.liq_price ? parseFloat(pos.liq_price) : null,
+  };
+}
+
+// No single "closed PnL" endpoint — sums the account ledger's pnl entries
+// for this contract since the position was opened, matching the same
+// approach used for Binance (see getBinanceFuturesRealizedResult).
+async function getGateioFuturesRealizedResult(mode, apiKey, secretKey, symbol, passphrase, openedAtMs){
+  const contract = toGateioContract(symbol);
+  const sinceSec = Math.floor((openedAtMs || (Date.now() - 24 * 60 * 60 * 1000)) / 1000);
+  const rows = await gateioFuturesSignedRequest('GET', '/api/v4/futures/usdt/account_book', `contract=${contract}&from=${sinceSec}&limit=200`, null, apiKey, secretKey, mode);
+  if(!Array.isArray(rows) || rows.length === 0) return null;
+  const relevant = rows.filter(r => ['pnl', 'fee', 'fund'].includes(r.type));
+  if(relevant.length === 0) return null;
+  const closedPnl = relevant.reduce((a, r) => a + parseFloat(r.change || '0'), 0);
+  return { closedPnl, entries: relevant.length };
+}
+
 const ORDER_PLACERS = { binance: placeBinanceOrder, bybit: placeBybitOrder, mexc: placeMexcOrder, gateio: placeGateioOrder, bitget: placeBitgetOrder };
+
+
+// =============================================================
+// Binance USDⓈ-M Futures — the second Live/Demo exchange (after Bybit).
+// Reuses hmacSha256Hex + the X-MBX-APIKEY header scheme already proven
+// for Binance spot, and binanceAssetBalance/verifyBinance's account
+// balance path doesn't apply here — futures has its own wallet, queried
+// separately below (binanceFuturesBalance).
+//
+// The one thing that made this NOT a copy-paste of the Bybit version:
+// Binance does not support attaching a stop-loss/take-profit to a market
+// order the way Bybit does. As of a Binance API change on 2025-12-09,
+// conditional orders (STOP_MARKET/TAKE_PROFIT_MARKET) also can't go
+// through the regular order endpoint at all anymore — they 404/reject
+// with "-4120, use the Algo Order API instead". So opening a position
+// here is three signed calls, not one: the market entry, then a
+// STOP_MARKET algo order and a TAKE_PROFIT_MARKET algo order, both with
+// closePosition:true (close the whole thing, not a fixed quantity) and
+// workingType:MARK_PRICE (trigger off mark price, harder to wick-hunt
+// than last-traded price). Same safety property as Bybit's native
+// TP/SL either way: Binance enforces the exit, not this server watching
+// a price feed in a loop.
+// =============================================================
+const BINANCE_FAPI_BASE = { live: 'https://fapi.binance.com', demo: 'https://testnet.binancefuture.com' };
+
+async function binanceFuturesSignedRequest(method, path, params, apiKey, secretKey, mode){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const qs = new URLSearchParams({ ...params, timestamp: String(Date.now()), recvWindow: '5000' });
+  const signature = hmacSha256Hex(secretKey, qs.toString());
+  qs.set('signature', signature);
+  const url = method === 'GET' ? `${base}${path}?${qs.toString()}` : `${base}${path}`;
+  const res = await fetch(url, {
+    method,
+    headers: { 'X-MBX-APIKEY': apiKey, ...(method !== 'GET' ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}) },
+    ...(method !== 'GET' ? { body: qs.toString() } : {}),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
+    throw new VerifyRejected(data && data.msg ? data.msg : `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+async function binanceFuturesBalance(mode, apiKey, secretKey){
+  const data = await binanceFuturesSignedRequest('GET', '/fapi/v3/positionRisk', {}, apiKey, secretKey, mode).catch(() => null);
+  // positionRisk isn't the balance — used here only to confirm the key
+  // works against futures at all before the real balance call below,
+  // since a spot-only key will fail THIS call with a clear permissions
+  // error rather than a confusing one on the balance endpoint.
+  void data;
+  const account = await binanceFuturesSignedRequest('GET', '/fapi/v2/account', {}, apiKey, secretKey, mode);
+  const usdt = (account.assets || []).find(a => a.asset === 'USDT');
+  return usdt ? parseFloat(usdt.availableBalance) : null;
+}
+
+async function binanceFuturesSymbolFilters(base, symbol){
+  const res = await fetch(`${base}/fapi/v1/exchangeInfo?symbol=${symbol}`);
+  const data = await res.json().catch(() => null);
+  const s = data?.symbols?.[0];
+  if(!s) throw new Error(`Unknown Binance futures symbol ${symbol}`);
+  const lotSize = (s.filters || []).find(f => f.filterType === 'LOT_SIZE');
+  const minNotional = (s.filters || []).find(f => f.filterType === 'MIN_NOTIONAL');
+  return {
+    qtyStep: lotSize ? parseFloat(lotSize.stepSize) : Math.pow(10, -(s.quantityPrecision ?? 3)),
+    minQty: lotSize ? parseFloat(lotSize.minQty) : 0,
+    pricePrecision: s.pricePrecision ?? 2,
+    minNotional: minNotional ? parseFloat(minNotional.notional) : 0,
+  };
+}
+
+async function binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage){
+  await binanceFuturesSignedRequest('POST', '/fapi/v1/leverage', { symbol, leverage: String(Math.round(leverage)) }, apiKey, secretKey, mode);
+}
+
+async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+
+  const qty = floorToStep(rawQty, filters.qtyStep);
+  if(qty <= 0 || qty < filters.minQty){
+    throw new VerifyRejected(`Size ${rawQty} ${symbol} rounds down to ${qty}, below the exchange minimum (${filters.minQty}) — nothing was sent.`);
+  }
+  const roundPrice = p => Number(p.toFixed(filters.pricePrecision));
+  const stopLossPrice = roundPrice(rawStopLossPrice);
+  const takeProfitPrice = roundPrice(rawTakeProfitPrice);
+  const exitSide = side === 'BUY' ? 'SELL' : 'BUY'; // TP/SL close the position, so they trade the opposite direction from entry
+
+  await binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage);
+
+  let order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+    symbol, side, type: 'MARKET', quantity: qty.toString(), newOrderRespType: 'RESULT',
+  }, apiKey, secretKey, mode);
+  // MARKET orders should return the filled result synchronously with
+  // newOrderRespType:RESULT — but if avgPrice ever comes back empty/zero
+  // (edge case under heavy load), fall back to polling the order once,
+  // same defensive pattern used for the exchanges that never return fill
+  // data synchronously at all.
+  if(!order || !(parseFloat(order.avgPrice) > 0)){
+    await new Promise(r => setTimeout(r, 500));
+    order = await binanceFuturesSignedRequest('GET', '/fapi/v1/order', { symbol, orderId: order.orderId }, apiKey, secretKey, mode);
+  }
+  if(!order || order.status !== 'FILLED'){
+    throw new VerifyRejected(`Order did not fully fill (status: ${order ? order.status : 'unknown'}). No further legs will be attempted automatically.`);
+  }
+  const filledQty = parseFloat(order.executedQty);
+  const avgPrice = parseFloat(order.avgPrice);
+
+  // Entry is live — now attach the exit orders. If either of these
+  // fails, the position is open with NO protection, which is worse than
+  // the order never having been placed at all, so this surfaces as a
+  // clearly-labeled partial-failure rather than a generic order error.
+  try{
+    await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+      algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'STOP_MARKET',
+      triggerPrice: stopLossPrice.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+    }, apiKey, secretKey, mode);
+    await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+      algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'TAKE_PROFIT_MARKET',
+      triggerPrice: takeProfitPrice.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+    }, apiKey, secretKey, mode);
+  }catch(err){
+    throw new VerifyRejected(`Position OPENED (${symbol} ${side} ${filledQty} @ ${avgPrice}, order ${order.orderId}) but attaching stop-loss/take-profit FAILED: ${err.message}. This position has no protective orders on it — check Binance directly and close or protect it manually.`);
+  }
+
+  return { orderId: order.orderId, filledQty, avgPrice, leverage, stopLossPrice, takeProfitPrice };
+}
+
+async function getBinanceFuturesPosition(mode, apiKey, secretKey, symbol){
+  const list = await binanceFuturesSignedRequest('GET', '/fapi/v3/positionRisk', { symbol }, apiKey, secretKey, mode);
+  const pos = Array.isArray(list) ? list.find(p => p.symbol === symbol) : null;
+  const amt = pos ? parseFloat(pos.positionAmt) : 0;
+  if(!pos || amt === 0) return null;
+  return {
+    size: Math.abs(amt), side: amt > 0 ? 'Buy' : 'Sell', avgPrice: parseFloat(pos.entryPrice),
+    markPrice: parseFloat(pos.markPrice), unrealisedPnl: parseFloat(pos.unRealizedProfit),
+    leverage: parseFloat(pos.leverage), liqPrice: pos.liquidationPrice ? parseFloat(pos.liquidationPrice) : null,
+  };
+}
+
+// No single "closed PnL" endpoint like Bybit's — sums the income ledger
+// (realized PnL from price movement, trading fees, and any funding paid)
+// for this symbol since the position was opened, which nets out to the
+// same real economic result Bybit's closedPnl reports as one number.
+// Signature matches the shared closed-pnl-getter shape (mode, apiKey,
+// secretKey, symbol, passphrase, openedAtMs) even though Binance doesn't
+// use a passphrase — openedAtMs is what this one actually needs, and
+// keeping the positional shape uniform across exchanges is what lets
+// the /api/futures/position route call any of them the same way.
+async function getBinanceFuturesRealizedResult(mode, apiKey, secretKey, symbol, passphrase, openedAtMs){
+  const sinceMs = openedAtMs || (Date.now() - 24 * 60 * 60 * 1000); // fallback: last 24h, if the caller somehow didn't send it
+  const income = await binanceFuturesSignedRequest('GET', '/fapi/v1/income', { symbol, startTime: String(sinceMs), limit: '200' }, apiKey, secretKey, mode);
+  if(!Array.isArray(income) || income.length === 0) return null;
+  const relevant = income.filter(e => ['REALIZED_PNL', 'COMMISSION', 'FUNDING_FEE'].includes(e.incomeType));
+  if(relevant.length === 0) return null;
+  const closedPnl = relevant.reduce((a, e) => a + parseFloat(e.income), 0);
+  return { closedPnl, entries: relevant.length };
+}
+
 
 app.post('/api/order', async (req, res) => {
   const { exchange, mode, apiKey, secretKey, symbol, side, amountKind, amount, passphrase } = req.body || {};
@@ -930,9 +1342,50 @@ app.post('/api/order', async (req, res) => {
 // amount split. Only Bybit is wired up right now (the AI Futures Engine's
 // first live/demo integration); the exchange-keyed maps below are set up
 // so extending to the others later is additive, not a rewrite. ----
-const FUTURES_ORDER_PLACERS = { bybit: placeBybitFuturesOrder };
-const FUTURES_POSITION_GETTERS = { bybit: getBybitPosition };
-const FUTURES_CLOSED_PNL_GETTERS = { bybit: getBybitClosedPnl };
+const FUTURES_ORDER_PLACERS = { bybit: placeBybitFuturesOrder, binance: placeBinanceFuturesOrder, gateio: placeGateioFuturesOrder };
+const FUTURES_POSITION_GETTERS = { bybit: getBybitPosition, binance: getBinanceFuturesPosition, gateio: getGateioFuturesPosition };
+const FUTURES_CLOSED_PNL_GETTERS = { bybit: getBybitClosedPnl, binance: getBinanceFuturesRealizedResult, gateio: getGateioFuturesRealizedResult };
+// Bybit's account is unified (spot + derivatives share one USDT
+// balance), so its futures balance is just its regular asset-balance
+// getter. Binance and Gate.io both keep futures in a completely separate
+// wallet from spot — reusing a spot balance getter would silently read
+// the wrong number, so each needs its own entry here rather than falling
+// back to ASSET_BALANCE_GETTERS.
+const FUTURES_BALANCE_GETTERS = {
+  bybit: (mode, apiKey, secretKey) => bybitAssetBalance(mode, apiKey, secretKey, 'USDT'),
+  binance: binanceFuturesBalance,
+  gateio: gateioFuturesBalance,
+};
+// Bybit wants 'Buy'/'Sell'; Binance wants 'BUY'/'SELL'; Gate.io wants
+// lowercase 'buy'/'sell' (it encodes direction in the sign of the order
+// size, not a separate field, but placeGateioFuturesOrder still needs
+// the word to know which sign to apply).
+const FUTURES_SIDE_CASING = {
+  bybit: side => side[0].toUpperCase() + side.slice(1).toLowerCase(),
+  binance: side => side.toUpperCase(),
+  gateio: side => side.toLowerCase(),
+};
+
+app.post('/api/futures/balance', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey and secretKey are all required.' });
+  }
+  const getter = FUTURES_BALANCE_GETTERS[exchange];
+  if(!getter){
+    return res.status(400).json({ ok:false, message:`No futures balance getter for "${exchange}" yet — only bybit, binance, and gateio are supported so far.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const balance = await getter(netMode, apiKey, secretKey, passphrase);
+    return res.json({ ok:true, balance });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not read futures balance on ${exchange}: ${err.message}` });
+  }
+});
 
 app.post('/api/futures/order', async (req, res) => {
   const { exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, stopLossPrice, takeProfitPrice, passphrase } = req.body || {};
@@ -941,10 +1394,11 @@ app.post('/api/futures/order', async (req, res) => {
   }
   const placer = FUTURES_ORDER_PLACERS[exchange];
   if(!placer){
-    return res.status(400).json({ ok:false, message:`No futures order placer for "${exchange}" yet — only bybit is supported so far.` });
+    return res.status(400).json({ ok:false, message:`No futures order placer for "${exchange}" yet — only bybit, binance, and gateio are supported so far.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
-  const normalizedSide = String(side)[0].toUpperCase() + String(side).slice(1).toLowerCase(); // Bybit wants 'Buy' | 'Sell'
+  const casingFn = FUTURES_SIDE_CASING[exchange] || (s => s[0].toUpperCase() + s.slice(1).toLowerCase());
+  const normalizedSide = casingFn(String(side));
 
   try{
     const result = await placer(netMode, apiKey, secretKey, {
@@ -961,14 +1415,14 @@ app.post('/api/futures/order', async (req, res) => {
 });
 
 app.post('/api/futures/position', async (req, res) => {
-  const { exchange, mode, apiKey, secretKey, symbol, passphrase } = req.body || {};
+  const { exchange, mode, apiKey, secretKey, symbol, passphrase, openedAtMs } = req.body || {};
   if(!exchange || !apiKey || !secretKey || !symbol){
     return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, and symbol are all required.' });
   }
   const positionGetter = FUTURES_POSITION_GETTERS[exchange];
   const closedPnlGetter = FUTURES_CLOSED_PNL_GETTERS[exchange];
   if(!positionGetter){
-    return res.status(400).json({ ok:false, message:`No futures position getter for "${exchange}" yet — only bybit is supported so far.` });
+    return res.status(400).json({ ok:false, message:`No futures position getter for "${exchange}" yet — only bybit, binance, and gateio are supported so far.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   try{
@@ -978,7 +1432,7 @@ app.post('/api/futures/position', async (req, res) => {
     }
     // Not open anymore — pull the realized result, if we can, so the
     // caller can record what actually happened rather than just "it's gone".
-    const closed = closedPnlGetter ? await closedPnlGetter(netMode, apiKey, secretKey, symbol, passphrase).catch(() => null) : null;
+    const closed = closedPnlGetter ? await closedPnlGetter(netMode, apiKey, secretKey, symbol, passphrase, openedAtMs).catch(() => null) : null;
     return res.json({ ok:true, open: false, closed });
   }catch(err){
     if(err instanceof VerifyRejected){
