@@ -121,6 +121,19 @@ export const els = {
   fuExchange: document.getElementById('fuExchange'),
   fuStartingBalance: document.getElementById('fuStartingBalance'),
   fuResetSessionBtn: document.getElementById('fuResetSessionBtn'),
+  fuLiveMode: document.getElementById('fuLiveMode'),
+  fuLiveStatusLabel: document.getElementById('fuLiveStatusLabel'),
+  fuLiveArmWrap: document.getElementById('fuLiveArmWrap'),
+  fuLiveConfirmCheck: document.getElementById('fuLiveConfirmCheck'),
+  fuLiveArmRow: document.getElementById('fuLiveArmRow'),
+  fuLiveArmPhrase: document.getElementById('fuLiveArmPhrase'),
+  fuLiveArmBtn: document.getElementById('fuLiveArmBtn'),
+  fuLiveToggleBtn: document.getElementById('fuLiveToggleBtn'),
+  fuLiveBalance: document.getElementById('fuLiveBalance'),
+  fuLiveOpenPosition: document.getElementById('fuLiveOpenPosition'),
+  fuLiveTrades: document.getElementById('fuLiveTrades'),
+  fuLiveNetPnl: document.getElementById('fuLiveNetPnl'),
+  fuLiveHistoryRows: document.getElementById('fuLiveHistoryRows'),
   fuMinConfidence: document.getElementById('fuMinConfidence'),
   fuMinRR: document.getElementById('fuMinRR'),
   fuMinNetProfit: document.getElementById('fuMinNetProfit'),
@@ -257,6 +270,15 @@ export const state = {
     lastRows: [],
     lastRegimeSummary: null,
     lastExplainIndex: null,
+    // Live/Demo trading — entirely separate from the paper dayState above,
+    // which keeps running unaffected regardless of any of this.
+    liveMode: 'paper',      // 'paper' | 'demo' | 'live'
+    liveArmed: false,       // resets to false on load and whenever liveMode changes
+    liveRunning: false,
+    liveTimer: null,
+    livePositions: {},      // symbol -> { orderId, side, qty, entry, stopLossPrice, takeProfitPrice, leverage, openedAt }
+    liveTradeHistory: [],
+    liveTrades: 0, liveNetPnlUsd: 0, liveStartingEquity: null,
   },
 };
 

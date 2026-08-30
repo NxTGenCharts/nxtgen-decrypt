@@ -1,15 +1,16 @@
 // =============================================================
-// mockMarket.js — PLACEHOLDER DATA SOURCE.
+// mockMarket.js — PLACEHOLDER DATA SOURCE, used by Paper mode only.
 //
 // This engine's scoring/regime/setup/risk logic is written against a
 // plain candle shape ({t,o,h,l,c,v}) and a plain "snapshot" shape
 // (spread/funding/open interest/liquidity), not against any particular
-// exchange. Today this file fabricates that shape with a seeded random
-// walk so the dashboard, scanner and paper-trading loop can be fully
-// exercised end to end. Wiring Phase 2 (real Binance/Bybit USDT-M
-// futures market data) means replacing ONLY this file — every other
-// module in js/futures/ already consumes the same {m5,m15,h1,meta}
-// shape this returns, and doesn't need to change.
+// exchange. This file fabricates that shape with a seeded random walk so
+// the dashboard, scanner and paper-trading loop can be fully exercised
+// end to end without needing a live account. Live/Demo trading (Bybit
+// only so far — see js/futures-ui.js's runLiveCycle) uses a real data
+// source instead, built the same shape, fetched via
+// server.js's /api/futures/snapshot — this file is untouched by that;
+// Paper mode keeps running exactly as it always has, in parallel.
 //
 // The random walk is NOT tuned to make the strategy look good — it has
 // no knowledge of the scoring/setup logic at all, so whatever win rate
@@ -22,6 +23,8 @@
 // structurally confined to the same handful of symbols every cycle.
 // Base prices/volumes are illustrative synthetic seeds (this whole file
 // is a placeholder data source, see header above), not live quotes.
+import { computeBtcShock } from './indicators.js';
+
 const SYMBOLS = [
   'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT',
   'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT', 'LTCUSDT', 'TRXUSDT',
@@ -192,18 +195,13 @@ class MockMarket {
     };
   }
 
-  // BTC-specific "shock" read used by the altcoin market filter — large
-  // recent BTC range relative to its own average = temporarily reduce/
-  // disable new altcoin entries.
+  // BTC-specific "shock" read used by the altcoin market filter — see
+  // computeBtcShock in indicators.js for the actual formula, shared with
+  // the real-data (Live/Demo) path so both use identical logic.
   btcShock(){
     const btc = this.series.get('BTCUSDT');
     const recent = btc.aggregate(5, 12); // last hour of 5m candles
-    if(recent.length < 6) return { shocked: false, movePct: 0 };
-    const ranges = recent.map(c => (c.h - c.l) / c.c);
-    const avgRange = ranges.slice(0, -3).reduce((a, b) => a + b, 0) / Math.max(1, ranges.length - 3);
-    const lastRange = ranges.slice(-3).reduce((a, b) => a + b, 0) / 3;
-    const movePct = ((recent[recent.length - 1].c - recent[0].c) / recent[0].c) * 100;
-    return { shocked: avgRange > 0 && lastRange > avgRange * 2.2, movePct };
+    return computeBtcShock(recent);
   }
 }
 

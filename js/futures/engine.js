@@ -5,11 +5,15 @@
 // paper trades against the latest price action (partial TP1,
 // break-even stop, trailing, time-stop) using realistic costs.
 //
-// This module is data-source agnostic: it only calls
-// mockMarket.snapshot()/btcShock() through the two functions at the
-// top, so swapping in a real exchange feed later means changing
-// those two call sites (or the mockMarket module itself), not this
-// orchestration logic.
+// This module is data-source agnostic: runScanCycle() defaults to
+// mockMarket.snapshot()/btcShock()/now() (Paper mode), but accepts an
+// optional `opts` object ({ symbols, getSnapshot, getBtcShock, now }) to
+// override every one of them — that's what js/futures-ui.js's
+// runLiveCycle() passes to run this exact same detection/scoring logic
+// against real Bybit market data for Live/Demo mode instead. Nothing in
+// this file needed to change for that beyond adding the override
+// points; regime.js, setups.js, scoring.js, risk.js, costs.js, and
+// noTradeEngine.js are all equally data-source agnostic already.
 // =============================================================
 import { mockMarket, FUTURES_SYMBOLS } from './mockMarket.js';
 import { classifyRegime, REGIMES } from './regime.js';
@@ -119,8 +123,11 @@ function buildLevels(snap, direction, setupType){
 // Produces one row per symbol: APPROVED opportunities plus REJECTED
 // ones (kept so the scanner table can show "why not" transparently,
 // matching the No-Trade Engine's job of explaining a pass).
-export function runScanCycle(cfg, dayState){
-  const btcShock = getBtcShock();
+export function runScanCycle(cfg, dayState, opts){
+  const symbols = (opts && opts.symbols) || FUTURES_SYMBOLS;
+  const snapshotFor = (opts && opts.getSnapshot) || getSnapshot;
+  const nowFn = (opts && opts.now) || (() => mockMarket.now());
+  const btcShock = (opts && opts.getBtcShock) ? opts.getBtcShock() : getBtcShock();
   const rows = [];
 
   // Cooling-off period elapsed — allow the consecutive-loss streak to
@@ -128,11 +135,12 @@ export function runScanCycle(cfg, dayState){
   // session (see RISK_DEFAULTS.coolingOffMinutes).
   if(dayState.consecutiveLosses >= RISK_DEFAULTS.maxConsecutiveLosses){
     const cooldownUntil = (dayState.lastLossAt || 0) + RISK_DEFAULTS.coolingOffMinutes * 60_000;
-    if(mockMarket.now() >= cooldownUntil) dayState.consecutiveLosses = 0;
+    if(nowFn() >= cooldownUntil) dayState.consecutiveLosses = 0;
   }
 
-  for(const symbol of FUTURES_SYMBOLS){
-    const snap = getSnapshot(symbol);
+  for(const symbol of symbols){
+    const snap = snapshotFor(symbol);
+    if(!snap) continue; // real-data fetch for this symbol failed/unavailable this cycle — skip it, don't crash the whole scan
     const regime = classifyRegime(snap.h1, snap.m15);
     const setups = detectAllSetups(snap, regime);
     const ensemble = combineEnsemble(setups);
@@ -201,7 +209,7 @@ export function runScanCycle(cfg, dayState){
       riskRewardRatio, minRiskReward: minRR,
       liquidationSafety: liqSafety, dayState, btcShock, isAltcoin,
       fundingCostPct: costs.fundingCostPct, grossTargetPct: levels.tp1Pct,
-      nowMs: mockMarket.now(),
+      nowMs: nowFn(),
     });
 
     const sizing = positionSize({

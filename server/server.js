@@ -515,6 +515,241 @@ async function placeBybitOrder(mode, apiKey, secretKey, { symbol, side, amountKi
   throw new VerifyRejected(`Order ${orderId} was accepted but did not confirm as Filled within 6s — check Bybit's order history directly before assuming anything about the position.`);
 }
 
+// =============================================================
+// Bybit Futures (USDT perpetual, category=linear) — for the AI Futures
+// Engine's Live/Demo mode. Reuses bybitSignedRequest, BYBIT_BASE, and
+// bybitAssetBalance/verifyBybit as-is: Bybit's UNIFIED account holds one
+// shared USDT balance across spot AND derivatives, so the same credential
+// and the same balance check already built for spot Autotrade cover this
+// too — nothing new to connect.
+//
+// Safety design, stated explicitly because it's the most important
+// decision in this section: every order placed here carries its
+// stop-loss AND take-profit as native, exchange-side, market-triggered
+// orders (tpslMode: 'Full') attached at creation time — Bybit itself
+// exits the position, not this server watching prices in a loop. That
+// matters because unlike the paper engine (which only "checks" a
+// position when its own code happens to run), a real leveraged position
+// left unmanaged if this server stops running, the browser tab closes,
+// or the network drops would carry open liquidation risk with nothing
+// watching it. Native TP/SL means the exchange enforces the exit
+// regardless of whether anything of ours is still running.
+// =============================================================
+async function bybitFuturesSymbolFilters(base, symbol){
+  const res = await fetch(`${base}/v5/market/instruments-info?category=linear&symbol=${symbol}`);
+  const data = await res.json().catch(() => null);
+  const s = data?.result?.list?.[0];
+  if(!s) throw new Error(`Unknown Bybit linear symbol ${symbol}`);
+  return {
+    qtyStep: parseFloat(s.lotSizeFilter?.qtyStep || '0.001'),
+    minOrderQty: parseFloat(s.lotSizeFilter?.minOrderQty || '0'),
+    minNotionalValue: parseFloat(s.lotSizeFilter?.minNotionalValue || '0'),
+    tickSize: parseFloat(s.priceFilter?.tickSize || '0.01'),
+    maxLeverage: parseFloat(s.leverageFilter?.maxLeverage || '1'),
+  };
+}
+
+async function bybitSetLeverage(mode, apiKey, secretKey, symbol, leverage){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  try{
+    await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/set-leverage', {
+      category: 'linear', symbol, buyLeverage: String(leverage), sellLeverage: String(leverage),
+    });
+  }catch(err){
+    // retCode 110043 "leverage not modified" means it's already set to
+    // this value — not a failure, just a no-op. bybitSignedRequest only
+    // gives us the message text, so match on that rather than the code.
+    if(!/not modified/i.test(err.message)) throw err;
+  }
+}
+
+// Places a market order with native TP/SL attached, sets leverage first,
+// then polls for the fill exactly like placeBybitOrder does for spot
+// (Bybit's create-order response is an ACK only, not a fill report).
+// side: 'Buy' | 'Sell'. rawQty/rawStopLossPrice/rawTakeProfitPrice are the
+// caller's intended values BEFORE rounding — this function rounds qty to
+// the symbol's qtyStep and both prices to its tickSize itself (Bybit
+// rejects values that don't land on-step), same division of
+// responsibility as placeBybitOrder for spot.
+async function placeBybitFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+
+  const qty = floorToStep(rawQty, filters.qtyStep);
+  if(qty <= 0 || qty < filters.minOrderQty){
+    throw new VerifyRejected(`Size ${rawQty} ${symbol} rounds down to ${qty}, below the exchange minimum (${filters.minOrderQty}) — nothing was sent.`);
+  }
+  const roundToTick = p => Math.round(p / filters.tickSize) * filters.tickSize;
+  const stopLossPrice = roundToTick(rawStopLossPrice);
+  const takeProfitPrice = roundToTick(rawTakeProfitPrice);
+  const clampedLeverage = Math.min(leverage, filters.maxLeverage);
+
+  await bybitSetLeverage(mode, apiKey, secretKey, symbol, clampedLeverage);
+
+  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+    category: 'linear', symbol, side, orderType: 'Market', qty: qty.toString(),
+    timeInForce: 'IOC', positionIdx: 0, // one-way mode — see note below if this ever rejects
+    takeProfit: takeProfitPrice.toString(), stopLoss: stopLossPrice.toString(),
+    tpOrderType: 'Market', slOrderType: 'Market', tpslMode: 'Full',
+  }).catch(err => {
+    // positionIdx:0 is one-way mode, which is what a new/default Bybit
+    // derivatives account uses. If this account was switched to hedge
+    // mode (separate Buy/Sell position slots), Bybit rejects positionIdx
+    // mismatches with a clear error — surface it as-is rather than
+    // guessing which hedge-mode slot was meant.
+    if(/position idx/i.test(err.message)){
+      throw new VerifyRejected(`${err.message} — this account appears to be in hedge mode. Switch it to one-way position mode in Bybit's derivatives settings (this app only supports one-way).`);
+    }
+    throw err;
+  });
+  const orderId = created.result?.orderId;
+  if(!orderId) throw new VerifyRejected('Bybit accepted the order but returned no orderId to confirm the fill with.');
+
+  const deadline = Date.now() + 6000;
+  while(Date.now() < deadline){
+    const check = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/order/realtime', `category=linear&orderId=${orderId}`);
+    const order = check.result?.list?.[0];
+    if(order && order.orderStatus === 'Filled'){
+      const filledQty = parseFloat(order.cumExecQty);
+      const avgPrice = parseFloat(order.avgPrice || '0');
+      return { orderId, filledQty, avgPrice, feeUsd: parseFloat(order.cumExecFee || '0'), leverage: clampedLeverage, stopLossPrice, takeProfitPrice };
+    }
+    if(order && ['Cancelled', 'Rejected', 'Deactivated'].includes(order.orderStatus)){
+      throw new VerifyRejected(`Order ${order.orderStatus.toLowerCase()} before filling. No position was opened.`);
+    }
+    await new Promise(r => setTimeout(r, 400));
+  }
+  throw new VerifyRejected(`Order ${orderId} was accepted but did not confirm as Filled within 6s — check Bybit's order history directly before assuming anything about the position.`);
+}
+
+// Reads the live position for one symbol — size:"0" (or no row at all)
+// means it's closed, whether that was the native TP, the native SL, or a
+// manual close on Bybit's own UI. Used to detect closure from our side;
+// the actual exit was already handled exchange-side per the safety note
+// above, this is just "has it happened yet".
+async function getBybitPosition(mode, apiKey, secretKey, symbol){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const data = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/position/list', `category=linear&symbol=${symbol}`);
+  const pos = data.result?.list?.[0];
+  if(!pos || parseFloat(pos.size || '0') === 0) return null;
+  return {
+    size: parseFloat(pos.size), side: pos.side, avgPrice: parseFloat(pos.avgPrice || '0'),
+    markPrice: parseFloat(pos.markPrice || '0'), unrealisedPnl: parseFloat(pos.unrealisedPnl || '0'),
+    leverage: parseFloat(pos.leverage || '0'), liqPrice: pos.liqPrice ? parseFloat(pos.liqPrice) : null,
+  };
+}
+
+// Once getBybitPosition reports a symbol closed, this pulls the actual
+// realized result for it — the definitive P&L figure (Bybit's own
+// closedPnl, which already nets out entry+exit fees) rather than
+// something reconstructed from separate fill records.
+async function getBybitClosedPnl(mode, apiKey, secretKey, symbol){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const data = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/position/closed-pnl', `category=linear&symbol=${symbol}&limit=1`);
+  const row = data.result?.list?.[0];
+  if(!row) return null;
+  return {
+    avgEntryPrice: parseFloat(row.avgEntryPrice || '0'), avgExitPrice: parseFloat(row.avgExitPrice || '0'),
+    closedPnl: parseFloat(row.closedPnl || '0'), qty: parseFloat(row.qty || row.closedSize || '0'),
+    side: row.side, leverage: parseFloat(row.leverage || '0'),
+    createdTime: parseInt(row.createdTime, 10) || null, updatedTime: parseInt(row.updatedTime, 10) || null,
+  };
+}
+
+// =============================================================
+// Real Bybit market data for Live/Demo trading — builds the exact same
+// {symbol, price, m5, m15, h1, meta} shape mockMarket.snapshot() produces
+// (see that file's header), from real klines + a real ticker, so the
+// unmodified scoring/regime/setup logic can run against it. This is what
+// makes Live/Demo trading safe to wire up at all — entries, stops, and
+// targets are computed from wherever Bybit is actually trading, not from
+// the synthetic Paper-mode feed. Always reads from BYBIT_BASE.live
+// (public market data is the same whether you go on to trade it in Live
+// or Demo mode — only account/order execution differs between the two).
+// =============================================================
+function bybitCandlesFromKline(raw){
+  const list = raw?.result?.list || [];
+  // Bybit returns most-recent-first; reverse to oldest-first, matching
+  // the {t,o,h,l,c,v} shape every js/futures/*.js module already expects.
+  return list.slice().reverse().map(row => ({
+    t: parseInt(row[0], 10), o: parseFloat(row[1]), h: parseFloat(row[2]), l: parseFloat(row[3]), c: parseFloat(row[4]), v: parseFloat(row[5]),
+  }));
+}
+
+async function bybitBuildFuturesSnapshot(symbol){
+  const base = BYBIT_BASE.live;
+  const [m5Res, m15Res, h1Res, tickerRes] = await Promise.all([
+    fetch(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=5&limit=150`),
+    fetch(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=15&limit=150`),
+    fetch(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=60&limit=80`),
+    fetch(`${base}/v5/market/tickers?category=linear&symbol=${symbol}`),
+  ]);
+  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([m5Res.json(), m15Res.json(), h1Res.json(), tickerRes.json()]);
+
+  const m5 = bybitCandlesFromKline(m5Data);
+  const m15 = bybitCandlesFromKline(m15Data);
+  const h1 = bybitCandlesFromKline(h1Data);
+  if(m5.length < 30 || m15.length < 20 || h1.length < 10){
+    throw new Error(`Not enough Bybit kline history for ${symbol} yet (${m5.length}/${m15.length}/${h1.length} m5/m15/h1 candles).`);
+  }
+
+  const t = tickerData?.result?.list?.[0];
+  if(!t) throw new Error(`No Bybit ticker data for ${symbol}.`);
+  const bid = parseFloat(t.bid1Price || '0'), ask = parseFloat(t.ask1Price || '0'), last = parseFloat(t.lastPrice || '0');
+  const spreadPct = (bid > 0 && ask > 0) ? ((ask - bid) / ((ask + bid) / 2)) * 100 : 0.02;
+  const volume24hUsd = parseFloat(t.turnover24h || '0');
+  // Same formula mockMarket.js uses for its synthetic liquidityScore, applied to a real volume figure.
+  const liquidityScore = Math.max(5, Math.min(99, Math.round(40 + 45 * Math.min(1, volume24hUsd / 2.2e9))));
+  const fundingRatePct = parseFloat(t.fundingRate || '0') * 100;
+  const openInterestUsd = parseFloat(t.openInterestValue || '0');
+
+  return {
+    symbol, price: last || m5[m5.length - 1].c,
+    m5, m15, h1,
+    meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd },
+  };
+}
+
+// Short cache + request coalescing, same pattern as getMarketsCached
+// above — Live/Demo cycles run every few seconds, but real kline data
+// doesn't need refetching that often, and this keeps a handful of
+// concurrent app instances from each hammering Bybit's public endpoints
+// independently.
+const FUTURES_SNAPSHOT_CACHE_TTL_MS = 15_000;
+const futuresSnapshotCache = new Map(); // symbol -> { data, at }
+const futuresSnapshotInFlight = new Map(); // symbol -> Promise
+
+async function getBybitFuturesSnapshotCached(symbol){
+  const now = Date.now();
+  const cached = futuresSnapshotCache.get(symbol);
+  if(cached && (now - cached.at) < FUTURES_SNAPSHOT_CACHE_TTL_MS) return cached.data;
+  if(futuresSnapshotInFlight.has(symbol)) return futuresSnapshotInFlight.get(symbol);
+  const p = (async () => {
+    const data = await bybitBuildFuturesSnapshot(symbol);
+    futuresSnapshotCache.set(symbol, { data, at: Date.now() });
+    return data;
+  })();
+  futuresSnapshotInFlight.set(symbol, p);
+  try{
+    return await p;
+  } finally {
+    futuresSnapshotInFlight.delete(symbol);
+  }
+}
+
+app.use('/api/futures/snapshot', rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
+app.get('/api/futures/snapshot', async (req, res) => {
+  const symbol = req.query.symbol;
+  if(!symbol) return res.status(400).json({ ok:false, message:'symbol is required.' });
+  try{
+    const snap = await getBybitFuturesSnapshotCached(String(symbol));
+    res.set('Cache-Control', 'public, max-age=10');
+    res.json({ ok:true, snapshot: snap });
+  }catch(err){
+    res.status(502).json({ ok:false, message: `Could not fetch Bybit market data for ${symbol}: ${err.message}` });
+  }
+});
+
 // ---- Gate.io: currency pair details (precision, minimum amounts) ----
 async function gateioSymbolFilters(base, symbol){
   const res = await fetch(`${base}/api/v4/spot/currency_pairs/${symbol}`);
@@ -686,6 +921,70 @@ app.post('/api/order', async (req, res) => {
       return res.json({ ok:false, rejected:true, message: err.message });
     }
     return res.json({ ok:false, rejected:false, message: `Could not complete order on ${exchange}: ${err.message}` });
+  }
+});
+
+// ---- Futures (leveraged) order execution — separate route family from
+// spot's /api/order above, since a futures order needs leverage, native
+// TP/SL prices, and a directional Buy/Sell rather than a base/quote
+// amount split. Only Bybit is wired up right now (the AI Futures Engine's
+// first live/demo integration); the exchange-keyed maps below are set up
+// so extending to the others later is additive, not a rewrite. ----
+const FUTURES_ORDER_PLACERS = { bybit: placeBybitFuturesOrder };
+const FUTURES_POSITION_GETTERS = { bybit: getBybitPosition };
+const FUTURES_CLOSED_PNL_GETTERS = { bybit: getBybitClosedPnl };
+
+app.post('/api/futures/order', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, stopLossPrice, takeProfitPrice, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !symbol || !side || !qty || !leverage || !stopLossPrice || !takeProfitPrice){
+    return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, stopLossPrice, and takeProfitPrice are all required — every futures order this app places carries a stop-loss and take-profit from the moment it opens, no exceptions.' });
+  }
+  const placer = FUTURES_ORDER_PLACERS[exchange];
+  if(!placer){
+    return res.status(400).json({ ok:false, message:`No futures order placer for "${exchange}" yet — only bybit is supported so far.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  const normalizedSide = String(side)[0].toUpperCase() + String(side).slice(1).toLowerCase(); // Bybit wants 'Buy' | 'Sell'
+
+  try{
+    const result = await placer(netMode, apiKey, secretKey, {
+      symbol, side: normalizedSide, rawQty: parseFloat(qty), leverage: parseFloat(leverage),
+      rawStopLossPrice: parseFloat(stopLossPrice), rawTakeProfitPrice: parseFloat(takeProfitPrice),
+    }, passphrase);
+    return res.json({ ok:true, ...result });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not open futures position on ${exchange}: ${err.message}` });
+  }
+});
+
+app.post('/api/futures/position', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, symbol, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !symbol){
+    return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, and symbol are all required.' });
+  }
+  const positionGetter = FUTURES_POSITION_GETTERS[exchange];
+  const closedPnlGetter = FUTURES_CLOSED_PNL_GETTERS[exchange];
+  if(!positionGetter){
+    return res.status(400).json({ ok:false, message:`No futures position getter for "${exchange}" yet — only bybit is supported so far.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const open = await positionGetter(netMode, apiKey, secretKey, symbol, passphrase);
+    if(open){
+      return res.json({ ok:true, open: true, position: open });
+    }
+    // Not open anymore — pull the realized result, if we can, so the
+    // caller can record what actually happened rather than just "it's gone".
+    const closed = closedPnlGetter ? await closedPnlGetter(netMode, apiKey, secretKey, symbol, passphrase).catch(() => null) : null;
+    return res.json({ ok:true, open: false, closed });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not read ${symbol} position on ${exchange}: ${err.message}` });
   }
 });
 

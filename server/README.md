@@ -56,6 +56,14 @@ passphrase. Read `server.js` yourself; that's what it's short enough for.
   nothing to configure per device.
 - `GET /api/markets/bitget-coins` — Bitget's withdraw/deposit-enabled coin
   directory, cached for 10 minutes.
+- `GET /api/futures/snapshot?symbol=X` — real Bybit market data (klines + ticker) shaped into the same `{symbol, price, m5, m15, h1, meta}` format the AI Futures Engine's scoring/regime/setup logic already consumes, cached 15s per symbol. This is what Live/Demo trading scans against instead of the synthetic Paper-mode feed — see "Live/Demo futures trading" below.
+- `POST /api/futures/order` — body `{ exchange:"bybit", mode, apiKey, secretKey, symbol, side, qty, leverage, stopLossPrice, takeProfitPrice }`. Sets leverage, then places a market order with the stop-loss and take-profit attached as **native, exchange-side, market-triggered orders** (`tpslMode: "Full"`) — not something this app watches and reacts to. That's deliberate: a real leveraged position left unmanaged if this server stops, the tab closes, or the connection drops would carry open liquidation risk with nothing watching it; native TP/SL means Bybit enforces the exit regardless. Returns `{ ok, orderId, filledQty, avgPrice, feeUsd, leverage, stopLossPrice, takeProfitPrice }`.
+- `POST /api/futures/position` — body `{ exchange:"bybit", mode, apiKey, secretKey, symbol }`. Returns `{ ok, open:true, position }` if still open, or `{ ok, open:false, closed }` with the realized P&L once Bybit's native TP/SL has closed it.
+
+## Live/Demo futures trading (Bybit only, so far)
+
+The AI Futures Engine's Paper mode (synthetic random-walk prices) is untouched and still the default. A second, independent mode exists in that tab's UI for Bybit specifically: it runs the exact same detection/scoring code, but fed real Bybit market data via `/api/futures/snapshot` instead of the synthetic feed, and on an approved signal places a real order via `/api/futures/order` with native SL/TP attached. Every position it opens is capped at one at a time, deliberately, for this first build. See `README-SCALP.md` for the full design writeup, including the bug caught and fixed along the way (a hardcoded reference to the simulated clock that would have made the cooldown-after-losses safety check compare real timestamps against fake time).
+
 - `GET /api/health` — liveness check, returns `{ ok: true }`.
 
 ## Run it locally

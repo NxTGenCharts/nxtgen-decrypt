@@ -474,10 +474,63 @@
       <div id="fuHistoryRows"><div class="fu-empty">No closed trades yet this session.</div></div>
     </div>
 
+    <div class="ov-block" style="margin-top:18px;border-color:var(--amber-dim);">
+      <div class="ov-block-title">Live / Demo Trading <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">BYBIT ONLY, FOR NOW</span></div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:14px;line-height:1.5;">
+        Separate from the paper engine above, which keeps running exactly as it always has regardless of what's set here. This places real orders on the Bybit key already connected in <b>Autotrade &amp; Balances</b> — nothing new to connect. Every position opens with an exchange-side stop-loss and take-profit attached at creation (not something this app watches and reacts to), so Bybit itself enforces the exit even if this tab is closed or your connection drops.
+      </div>
+      <div class="controls">
+        <div class="field">
+          <label for="fuLiveMode">Trading mode</label>
+          <select id="fuLiveMode">
+            <option value="paper" selected>Paper (simulation only — default)</option>
+            <option value="demo">Demo — Bybit Demo Trading</option>
+            <option value="live">Live — real funds</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Status</label>
+          <div class="ov-value" id="fuLiveStatusLabel" style="font-size:14px;">Paper only — nothing real will be traded</div>
+        </div>
+      </div>
+      <div id="fuLiveArmWrap" style="display:none;margin-top:6px;">
+        <label class="toggle-check">
+          <input id="fuLiveConfirmCheck" type="checkbox">
+          <span>Sign and send real orders instead of simulating (requires a connected, verified Bybit key for the mode selected above)</span>
+        </label>
+        <div id="fuLiveArmRow" style="display:none;margin-top:8px;gap:8px;align-items:center;" class="kv-field">
+          <input id="fuLiveArmPhrase" type="text" placeholder="Type PLACE REAL ORDERS to arm" style="flex:1;">
+          <button type="button" class="primary" id="fuLiveArmBtn">Arm</button>
+        </div>
+        <div style="font-size:11px;color:var(--dim);margin-top:6px;">
+          Resets to OFF every time this page loads or the trading mode changes — it is never left armed silently across a refresh.
+        </div>
+        <div class="btn-row" style="margin-top:10px;">
+          <button class="primary live-toggle" id="fuLiveToggleBtn"><span class="dot"></span><span class="btn-label">Start Live/Demo Trading</span></button>
+        </div>
+      </div>
+
+      <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);margin-top:16px;">
+        <div class="ov-card ov-highlight"><span class="ov-label">Real Balance (USDT)</span><span class="ov-value" id="fuLiveBalance">—</span></div>
+        <div class="ov-card"><span class="ov-label">Open Position</span><span class="ov-value" id="fuLiveOpenPosition" style="font-size:14px;">None</span></div>
+        <div class="ov-card"><span class="ov-label">Trades (session)</span><span class="ov-value" id="fuLiveTrades">0</span></div>
+        <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value" id="fuLiveNetPnl">$0.00</span></div>
+      </div>
+
+      <div class="ov-block" style="margin-top:14px;">
+        <div class="ov-block-title" style="font-size:13px;">Live/Demo Trade History</div>
+        <div class="fu-hrow fu-head" style="grid-template-columns:1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr 1.4fr;">
+          <div>Time</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Net</div><div>Order ID</div>
+        </div>
+        <div id="fuLiveHistoryRows"><div class="fu-empty">No live/demo trades yet this session.</div></div>
+      </div>
+    </div>
+
     <footer>
-      <b>Scope —</b> USDT-margined perpetuals on Binance Futures / Bybit Derivatives only, across BTC/ETH/SOL/BNB/XRP/DOGE. Default risk 0.375% of equity per trade (configurable 0.25–1%), max 3 simultaneous positions, max 1.5% total portfolio risk, max 2% daily loss, pause after 3 consecutive losses — all enforced by the No-Trade Engine before any position opens.<br>
-      <b>Win rate vs. expectancy —</b> the dashboard reports whatever win rate and profit factor the session's trades actually produced. A high win rate with poor expectancy is not something this build is tuned toward, and it will show a losing session honestly if that's what happens against the current (synthetic) price data.<br>
-      <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet — see the architecture notes from the initial assessment. Live order execution additionally requires server-side key storage and an execution/reconciliation service. Paper mode here is running the real decision logic today so it can be validated before either of those is built.<br>
+      <b>Scope —</b> USDT-margined perpetuals across a 35-symbol watchlist. Default risk 1% of equity per trade (configurable 0.1–2%), max 3 simultaneous positions, max 3% total portfolio risk, max 2% daily loss, pause after 3 consecutive losses — all enforced by the No-Trade Engine before any position opens.<br>
+      <b>Win rate vs. expectancy —</b> the dashboard reports whatever win rate and profit factor the session's trades actually produced. A high win rate with poor expectancy is not something this build is tuned toward, and it will show a losing session honestly if that's what happens against the current (synthetic, Paper-mode) price data.<br>
+      <b>Live/Demo trading</b> (Bybit only so far) places real orders through <code>server/server.js</code> with a native exchange-side stop-loss/take-profit on every position — see the Live/Demo Trading section above and <code>server/README.md</code> before arming it with a Live key.<br>
+      <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet. Live/Demo execution for Binance Futures, MEXC Futures, and Gate.io Futures hasn't been built yet either — Bybit was the first.<br>
       This is not financial advice.
     </footer>
   </div>

@@ -184,3 +184,60 @@ bug to hide), and fees now scale off a position size that could actually
 be opened. Re-running the backtest after both fixes: still 65-76% win
 rate, profit factor improved slightly to ~1.5-1.7 (fees now a smaller,
 realistic drag rather than an inflated one).
+
+## Update: Live/Demo trading, Bybit only (first exchange)
+
+Paper mode is untouched — same synthetic feed, same default, nothing
+about it changed. A second, independent trading mode was added for
+Bybit specifically, reachable from the Futures tab's new "Live / Demo
+Trading" section.
+
+**The one non-negotiable design decision**: every order this places
+carries a stop-loss AND take-profit as native, exchange-side,
+market-triggered orders (`tpslMode: 'Full'`), attached at the moment the
+position opens — not something this app watches a price feed and reacts
+to. A real leveraged position managed by "check back every few seconds
+and close it if price crosses a line" is only as safe as this app
+staying open and connected; native TP/SL means Bybit itself enforces the
+exit even if the tab closes or the connection drops.
+
+**The bug this caught before it shipped**: the scanner's detection logic
+was built entirely against `mockMarket.js`'s synthetic prices. Wiring
+real order execution straight to that would have meant computing a
+stop-loss and take-profit against a price with no relationship to where
+Bybit is actually trading. Fixed by building a real data path instead —
+`server.js` fetches actual Bybit klines + ticker data and shapes them
+into the exact same `{m5, m15, h1, meta}` format the mock generator
+already produces (this was **the point** of that shape being generic in
+the first place — see `mockMarket.js`'s header). `engine.js`'s
+`runScanCycle()` now takes an optional `opts` override
+(`{symbols, getSnapshot, getBtcShock, now}`) so the identical
+detection/scoring/risk/no-trade code runs against either source; Paper
+mode passes nothing and gets the old default behavior unchanged.
+
+**A second bug caught in the same pass**: the no-trade engine's
+cooldown-after-consecutive-losses check compared a real timestamp
+(`dayState.lastLossAt`) against `mockMarket.now()` — the *simulated*
+clock, a completely different epoch from real wall-clock time. Anything
+that mixed real and simulated timestamps would make that comparison
+meaningless. Fixed by threading the same injectable `now()` through
+that check too, so Live/Demo consistently uses `Date.now()` throughout.
+
+**What's deliberately conservative about this first build**:
+- One real position at a time, not the 3 Paper mode allows.
+- A smaller, curated 10-symbol watchlist (must include BTCUSDT, which
+  the shock filter reads directly), not Paper's full 35 — keeps real API
+  call volume reasonable.
+- Arming requires the same typed-phrase confirmation Autotrade's real
+  spot execution already uses, resets on every page load AND on every
+  trading-mode change, and is blocked outright unless a verified Bybit
+  key already exists for the selected mode (reusing the same credential
+  Autotrade & Balances manages — nothing new to connect).
+- Switching Demo <-> Live wipes the session's stats rather than mixing
+  two different accounts' numbers together.
+
+**What's still Paper-only**: Binance Futures, MEXC Futures, and Gate.io
+Futures. Bybit was the first; extending this to the others is additive
+work (new market-data adapters, new order-placement functions per
+exchange's own API) — the pattern from this build should make it faster,
+not a redesign.

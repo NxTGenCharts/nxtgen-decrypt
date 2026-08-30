@@ -120,3 +120,20 @@ export function pctChange(from, to){
 }
 
 export function clamp(x, lo, hi){ return Math.max(lo, Math.min(hi, x)); }
+
+// Shared "BTC shock" read, used by the altcoin market filter (see
+// noTradeEngine.js) — a large recent BTC range relative to its own
+// average means temporarily reduce/disable new altcoin entries. Pulled
+// out here (rather than living inside mockMarket.js) so the exact same
+// formula applies whether the m5 candles come from the synthetic
+// generator (Paper mode) or a real exchange feed (Live/Demo mode) — see
+// js/futures-ui.js for the real-data version's caller.
+export function computeBtcShock(btcM5Candles){
+  const recent = btcM5Candles.slice(-12); // last hour of 5m candles
+  if(recent.length < 6) return { shocked: false, movePct: 0 };
+  const ranges = recent.map(c => (c.h - c.l) / c.c);
+  const avgRange = ranges.slice(0, -3).reduce((a, b) => a + b, 0) / Math.max(1, ranges.length - 3);
+  const lastRange = ranges.slice(-3).reduce((a, b) => a + b, 0) / 3;
+  const movePct = ((recent[recent.length - 1].c - recent[0].c) / recent[0].c) * 100;
+  return { shocked: avgRange > 0 && lastRange > avgRange * 2.2, movePct };
+}
