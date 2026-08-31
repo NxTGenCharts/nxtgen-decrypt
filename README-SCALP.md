@@ -337,3 +337,62 @@ contract API lives on a different domain from its spot API with a
 different, less-standard signing scheme — deliberately saved for last
 rather than attempted under the same research/implementation pass as
 the other three.
+
+## Update: MEXC Futures added as the fourth and final Live/Demo exchange
+
+Same overall pattern as the other three — real klines+ticker shaped into
+the shared snapshot format, exchange-enforced stop-loss/take-profit, one
+position at a time, arm-with-typed-phrase — with two things specific to
+MEXC that made it the exchange to research most carefully, saved for
+last on purpose:
+
+**MEXC's programmatic Futures order placement is genuinely new** —
+launched 2026-03-31, about five months before this was built, per MEXC's
+own announcement ("Introducing API Futures Trading on Mar 31, 2026").
+That's not a reason to distrust what's implemented here (everything
+below comes straight from MEXC's own current API docs, not guessed by
+analogy to MEXC's older, more established spot API), but it's real
+context: this integration has the least real-world mileage of the four,
+the smallest body of other bots/tooling having already found and fixed
+the rough edges. Said plainly in the app's own UI, not just here.
+
+**MEXC's Futures API domain changed on 2026-01-14** —
+`contract.mexc.com` to `api.mexc.com`, with the old domain fully
+decommissioned within a week of the transition period ending. Confirmed
+from MEXC's own "Futures API Access Domain Update" announcement, not
+assumed from older docs or tooling that would now silently point at a
+dead host.
+
+**No Demo mode.** MEXC does have a Futures "Demo Trading" — but it's a
+website/app-only feature (its own "receive demo coins" flow) with
+nothing in MEXC's current API documentation exposing a demo/testnet base
+URL the way Binance/Bybit/Gate.io each do. This app's Trading Mode
+selector blocks Demo for MEXC specifically (`LIVE_ONLY_EXCHANGES` in
+`js/futures-ui.js`) rather than silently letting someone select it and
+have it quietly hit Live — same "MEXC has no public Demo Trading" fact
+this app has always shown for MEXC spot, extended to futures.
+
+**Simpler than three of the four in one respect**: MEXC's order-create
+endpoint takes `stopLossPrice`/`takeProfitPrice` AND `leverage` directly
+on the entry order — one call opens the position with both already
+attached, same as Bybit, and simpler than Binance/Gate.io's
+separate-calls approach. It does need one thing neither of the others
+require: a `price` field even on a market order (used as a
+price-protection reference, not a limit) — the app threads the scanned
+entry price through for this specifically (`entryPrice` in the
+`/api/futures/order` body), ignored by every other exchange.
+
+**Sizing is contract-based, same situation as Gate.io** — MEXC's
+`contractSize` plays the same role as Gate.io's `quanto_multiplier`, and
+this implementation floors to whole contracts the same way. **Symbol
+format is also underscore-separated** (`BTC_USDT`), same conversion
+pattern as Gate.io. **Kline response shape is genuinely different from
+every other exchange here** — MEXC returns columnar parallel arrays
+(`time[]`, `open[]`, `high[]`, `low[]`, `close[]`, `vol[]`) rather than
+an array of candle rows, so the parsing step zips them together into the
+shared `{t,o,h,l,c,v}` shape instead of just mapping over rows.
+
+All four Live/Demo integrations are now built. What's still genuinely
+missing, stated in the app's own footer: real historical backtesting,
+walk-forward optimization, and Monte Carlo analysis, none of which this
+static app has anywhere to store the historical OHLCV they'd need.

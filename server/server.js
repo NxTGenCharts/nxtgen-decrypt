@@ -806,7 +806,52 @@ async function gateioBuildFuturesSnapshot(symbol){
 // endpoints independently. Keyed by exchange+symbol since the same
 // symbol string can mean different things (or just different data) on
 // different exchanges.
-const FUTURES_SNAPSHOT_BUILDERS = { bybit: bybitBuildFuturesSnapshot, binance: binanceBuildFuturesSnapshot, gateio: gateioBuildFuturesSnapshot };
+// ---- MEXC Futures real market data. Kline response is COLUMNAR (parallel
+// arrays: time[], open[], high[], low[], close[], vol[]) rather than an
+// array of candle objects like every other exchange here — needs zipping
+// into the shared {t,o,h,l,c,v} shape. ----
+function mexcCandlesFromKline(raw){
+  if(!raw || !Array.isArray(raw.time)) return [];
+  const out = [];
+  for(let i = 0; i < raw.time.length; i++){
+    out.push({ t: raw.time[i] * 1000, o: raw.open[i], h: raw.high[i], l: raw.low[i], c: raw.close[i], v: raw.vol[i] });
+  }
+  return out;
+}
+async function mexcBuildFuturesSnapshot(symbol){
+  const contract = toMexcContract(symbol);
+  const [m5Res, m15Res, h1Res, tickerRes] = await Promise.all([
+    fetch(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min5`),
+    fetch(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min15`),
+    fetch(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min60`),
+    fetch(`${MEXC_FAPI_BASE}/api/v1/contract/ticker?symbol=${contract}`),
+  ]);
+  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([m5Res.json(), m15Res.json(), h1Res.json(), tickerRes.json()]);
+
+  const m5 = mexcCandlesFromKline(m5Data && m5Data.data);
+  const m15 = mexcCandlesFromKline(m15Data && m15Data.data);
+  const h1 = mexcCandlesFromKline(h1Data && h1Data.data);
+  if(m5.length < 30 || m15.length < 20 || h1.length < 10){
+    throw new Error(`Not enough MEXC kline history for ${symbol} yet (${m5.length}/${m15.length}/${h1.length} m5/m15/h1 candles).`);
+  }
+  const t = tickerData && tickerData.data;
+  if(!t) throw new Error(`No MEXC ticker data for ${symbol}.`);
+
+  const bid = parseFloat(t.bid1 || '0'), ask = parseFloat(t.ask1 || '0');
+  const spreadPct = (bid > 0 && ask > 0) ? ((ask - bid) / ((ask + bid) / 2)) * 100 : 0.02;
+  const volume24hUsd = parseFloat(t.amount24 || '0'); // already quote-currency turnover
+  const liquidityScore = Math.max(5, Math.min(99, Math.round(40 + 45 * Math.min(1, volume24hUsd / 2.2e9))));
+  const fundingRatePct = parseFloat(t.fundingRate || '0') * 100;
+  const last = parseFloat(t.lastPrice || t.fairPrice || '0');
+
+  return {
+    symbol, price: last || m5[m5.length - 1].c,
+    m5, m15, h1,
+    meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
+  };
+}
+
+const FUTURES_SNAPSHOT_BUILDERS = { bybit: bybitBuildFuturesSnapshot, binance: binanceBuildFuturesSnapshot, gateio: gateioBuildFuturesSnapshot, mexc: mexcBuildFuturesSnapshot };
 const FUTURES_SNAPSHOT_CACHE_TTL_MS = 15_000;
 const futuresSnapshotCache = new Map(); // "exchange:symbol" -> { data, at }
 const futuresSnapshotInFlight = new Map();
@@ -1143,7 +1188,159 @@ async function getGateioFuturesRealizedResult(mode, apiKey, secretKey, symbol, p
   return { closedPnl, entries: relevant.length };
 }
 
+// =============================================================
+// MEXC Futures — the fourth and final Live/Demo exchange, LIVE ONLY (see
+// below for why there's no Demo option here, unlike the other three).
+//
+// Worth stating plainly, because it's a real difference from the other
+// three exchanges: MEXC only launched programmatic Futures order
+// placement via API on 2026-03-31 — about five months before this was
+// written. That's not a reason to distrust the mechanics below (the
+// official docs for it are thorough and internally consistent, and
+// everything here is sourced directly from them, not guessed by analogy
+// to MEXC's older, more established spot API), but it does mean this
+// exchange has the least real-world mileage of the four — the smallest
+// body of other bots/tooling having already found and fixed the rough
+// edges. Treat it accordingly.
+//
+// Also worth noting: MEXC's Futures API domain itself changed as
+// recently as 2026-01-14 (contract.mexc.com -> api.mexc.com, old domain
+// fully decommissioned within a week) — confirmed from MEXC's own
+// announcement, not assumed from older docs/tooling that would now point
+// at a dead host.
+//
+// No Demo mode: MEXC's Futures Demo Trading exists, but only as a
+// website/app feature (with its own separate "receive demo coins" flow)
+// — nothing in MEXC's current API documentation exposes a demo/testnet
+// base URL the way Binance/Bybit/Gate.io each do. Same situation as
+// MEXC spot, which has never had Live/Demo toggle in this app either.
+//
+// Simpler than the other three in one respect: MEXC's order-create
+// endpoint takes stopLossPrice/takeProfitPrice AND leverage directly —
+// one call opens the position with both already attached, no separate
+// leverage-setting or exit-order calls needed.
+// =============================================================
+const MEXC_FAPI_BASE = 'https://api.mexc.com';
+
+async function mexcFuturesSignedRequest(method, path, params, apiKey, secretKey){
+  const timestamp = String(Date.now());
+  let paramString, url;
+  if(method === 'GET'){
+    const qs = new URLSearchParams(params || {});
+    paramString = qs.toString(); // already key=value&key=value in insertion order; MEXC just wants sorted-dictionary-order concatenation
+    url = `${MEXC_FAPI_BASE}${path}${paramString ? '?' + paramString : ''}`;
+  } else {
+    paramString = params ? JSON.stringify(params) : '';
+    url = `${MEXC_FAPI_BASE}${path}`;
+  }
+  const target = apiKey + timestamp + paramString;
+  const signature = hmacSha256Hex(secretKey, target);
+  const res = await fetch(url, {
+    method,
+    headers: {
+      ApiKey: apiKey, 'Request-Time': timestamp, Signature: signature,
+      'Content-Type': 'application/json',
+    },
+    ...(method !== 'GET' ? { body: paramString } : {}),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || !data || data.success !== true){
+    throw new VerifyRejected(data && data.message ? data.message : `HTTP ${res.status}`);
+  }
+  return data.data;
+}
+
+async function mexcFuturesBalance(mode, apiKey, secretKey){
+  const asset = await mexcFuturesSignedRequest('GET', '/api/v1/private/account/asset/USDT', null, apiKey, secretKey);
+  return asset && asset.availableBalance != null ? parseFloat(asset.availableBalance) : null;
+}
+
+function toMexcContract(symbol){
+  return symbol.endsWith('USDT') ? `${symbol.slice(0, -4)}_USDT` : symbol;
+}
+
+async function mexcContractInfo(contract){
+  const res = await fetch(`${MEXC_FAPI_BASE}/api/v1/contract/detail/country?symbol=${contract}`);
+  const data = await res.json().catch(() => null);
+  if(!data || !data.success || !data.data) throw new Error(`Unknown MEXC futures contract ${contract}`);
+  const c = data.data;
+  return {
+    contractSize: parseFloat(c.contractSize || '1'), volUnit: parseFloat(c.volUnit || '1'),
+    minVol: parseFloat(c.minVol || '1'), maxLeverage: parseFloat(c.maxLeverage || '20'),
+    priceUnit: parseFloat(c.priceUnit || '0.01'),
+  };
+}
+
+async function placeMexcFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawEntryPrice, rawStopLossPrice, rawTakeProfitPrice }){
+  const contract = toMexcContract(symbol);
+  const info = await mexcContractInfo(contract);
+
+  // Convert base-asset qty to whole contracts (volUnit step, floored).
+  const contracts = Math.floor((rawQty / info.contractSize) / info.volUnit) * info.volUnit;
+  if(contracts < info.minVol){
+    throw new VerifyRejected(`Size ${rawQty} ${symbol} converts to ${contracts} contract(s) (1 contract = ${info.contractSize} ${symbol.replace('USDT', '')}), below the exchange minimum (${info.minVol}) — nothing was sent.`);
+  }
+  const roundToTick = p => Math.round(p / info.priceUnit) * info.priceUnit;
+  const entryPrice = roundToTick(rawEntryPrice);
+  const stopLossPrice = roundToTick(rawStopLossPrice);
+  const takeProfitPrice = roundToTick(rawTakeProfitPrice);
+  const clampedLeverage = Math.min(Math.round(leverage), info.maxLeverage);
+  const mexcSide = side === 'buy' ? 1 : 3; // 1 = open long, 3 = open short (this app never sends close orders through this path)
+
+  const order = await mexcFuturesSignedRequest('POST', '/api/v1/private/order/create', {
+    symbol: contract, price: entryPrice, // required even for type:5 (market) — used as a price-protection reference, not a limit
+    vol: contracts, leverage: clampedLeverage, side: mexcSide, type: 5, openType: 1,
+    stopLossPrice, takeProfitPrice, lossTrend: 2, profitTrend: 2, // trigger off fair (mark) price, not last price
+  }, apiKey, secretKey);
+  const orderId = order && order.orderId;
+  if(!orderId) throw new VerifyRejected('MEXC accepted the order but returned no orderId to confirm the fill with.');
+
+  // Order-create's own response is just {orderId, ts} — no fill data —
+  // so confirm the position actually opened by reading it back, same
+  // polling need as Bitget/Bybit had for their own order-ack-only responses.
+  const deadline = Date.now() + 6000;
+  let filled = null;
+  while(Date.now() < deadline){
+    await new Promise(r => setTimeout(r, 400));
+    const positions = await mexcFuturesSignedRequest('GET', '/api/v1/private/position/open_positions', { symbol: contract }, apiKey, secretKey);
+    const pos = Array.isArray(positions) ? positions.find(p => p.symbol === contract && p.state === 1) : null;
+    if(pos && parseFloat(pos.holdVol) > 0){ filled = pos; break; }
+  }
+  if(!filled){
+    throw new VerifyRejected(`Order ${orderId} was accepted but no open position confirmed within 6s — check MEXC directly before assuming anything about it.`);
+  }
+  const filledQty = parseFloat(filled.holdVol) * info.contractSize;
+  const avgPrice = parseFloat(filled.openAvgPrice || filled.holdAvgPrice || '0');
+  return { orderId, filledQty, avgPrice, leverage: clampedLeverage, stopLossPrice, takeProfitPrice };
+}
+
+async function getMexcFuturesPosition(mode, apiKey, secretKey, symbol){
+  const contract = toMexcContract(symbol);
+  const positions = await mexcFuturesSignedRequest('GET', '/api/v1/private/position/open_positions', { symbol: contract }, apiKey, secretKey);
+  const pos = Array.isArray(positions) ? positions.find(p => p.symbol === contract && p.state === 1) : null;
+  if(!pos || parseFloat(pos.holdVol) === 0) return null;
+  return {
+    size: parseFloat(pos.holdVol), side: pos.positionType === 1 ? 'Buy' : 'Sell',
+    avgPrice: parseFloat(pos.holdAvgPrice || '0'), markPrice: null,
+    unrealisedPnl: parseFloat(pos.unRealizedPnl || '0'), leverage: parseFloat(pos.leverage || '0'),
+    liqPrice: pos.liquidatePrice ? parseFloat(pos.liquidatePrice) : null,
+  };
+}
+
+async function getMexcFuturesRealizedResult(mode, apiKey, secretKey, symbol, passphrase, openedAtMs){
+  const contract = toMexcContract(symbol);
+  const history = await mexcFuturesSignedRequest('GET', '/api/v1/private/position/list/history_positions', {
+    symbol: contract, start_time: String(openedAtMs || (Date.now() - 24 * 60 * 60 * 1000)), page_num: '1', page_size: '5',
+  }, apiKey, secretKey);
+  const list = Array.isArray(history) ? history : (history && history.resultList) || [];
+  const row = list[0]; // most recent closed position for this contract
+  if(!row) return null;
+  return { closedPnl: parseFloat(row.realised || '0'), entries: 1 };
+}
+
 const ORDER_PLACERS = { binance: placeBinanceOrder, bybit: placeBybitOrder, mexc: placeMexcOrder, gateio: placeGateioOrder, bitget: placeBitgetOrder };
+
+
 
 
 // =============================================================
@@ -1342,28 +1539,31 @@ app.post('/api/order', async (req, res) => {
 // amount split. Only Bybit is wired up right now (the AI Futures Engine's
 // first live/demo integration); the exchange-keyed maps below are set up
 // so extending to the others later is additive, not a rewrite. ----
-const FUTURES_ORDER_PLACERS = { bybit: placeBybitFuturesOrder, binance: placeBinanceFuturesOrder, gateio: placeGateioFuturesOrder };
-const FUTURES_POSITION_GETTERS = { bybit: getBybitPosition, binance: getBinanceFuturesPosition, gateio: getGateioFuturesPosition };
-const FUTURES_CLOSED_PNL_GETTERS = { bybit: getBybitClosedPnl, binance: getBinanceFuturesRealizedResult, gateio: getGateioFuturesRealizedResult };
+const FUTURES_ORDER_PLACERS = { bybit: placeBybitFuturesOrder, binance: placeBinanceFuturesOrder, gateio: placeGateioFuturesOrder, mexc: placeMexcFuturesOrder };
+const FUTURES_POSITION_GETTERS = { bybit: getBybitPosition, binance: getBinanceFuturesPosition, gateio: getGateioFuturesPosition, mexc: getMexcFuturesPosition };
+const FUTURES_CLOSED_PNL_GETTERS = { bybit: getBybitClosedPnl, binance: getBinanceFuturesRealizedResult, gateio: getGateioFuturesRealizedResult, mexc: getMexcFuturesRealizedResult };
 // Bybit's account is unified (spot + derivatives share one USDT
 // balance), so its futures balance is just its regular asset-balance
-// getter. Binance and Gate.io both keep futures in a completely separate
-// wallet from spot — reusing a spot balance getter would silently read
-// the wrong number, so each needs its own entry here rather than falling
-// back to ASSET_BALANCE_GETTERS.
+// getter. Binance, Gate.io, and MEXC all keep futures in a completely
+// separate wallet from spot — reusing a spot balance getter would
+// silently read the wrong number, so each needs its own entry here
+// rather than falling back to ASSET_BALANCE_GETTERS.
 const FUTURES_BALANCE_GETTERS = {
   bybit: (mode, apiKey, secretKey) => bybitAssetBalance(mode, apiKey, secretKey, 'USDT'),
   binance: binanceFuturesBalance,
   gateio: gateioFuturesBalance,
+  mexc: mexcFuturesBalance,
 };
-// Bybit wants 'Buy'/'Sell'; Binance wants 'BUY'/'SELL'; Gate.io wants
-// lowercase 'buy'/'sell' (it encodes direction in the sign of the order
-// size, not a separate field, but placeGateioFuturesOrder still needs
-// the word to know which sign to apply).
+// Bybit wants 'Buy'/'Sell'; Binance wants 'BUY'/'SELL'; Gate.io and MEXC
+// both want lowercase 'buy'/'sell' (neither uses the word as a literal
+// API field — Gate.io encodes direction in the sign of the order size,
+// MEXC encodes it in a numeric side enum — but both placers still need
+// the word itself to know which one to apply).
 const FUTURES_SIDE_CASING = {
   bybit: side => side[0].toUpperCase() + side.slice(1).toLowerCase(),
   binance: side => side.toUpperCase(),
   gateio: side => side.toLowerCase(),
+  mexc: side => side.toLowerCase(),
 };
 
 app.post('/api/futures/balance', async (req, res) => {
@@ -1373,7 +1573,7 @@ app.post('/api/futures/balance', async (req, res) => {
   }
   const getter = FUTURES_BALANCE_GETTERS[exchange];
   if(!getter){
-    return res.status(400).json({ ok:false, message:`No futures balance getter for "${exchange}" yet — only bybit, binance, and gateio are supported so far.` });
+    return res.status(400).json({ ok:false, message:`No futures balance getter for "${exchange}" yet — only bybit, binance, gateio, and mexc are supported so far.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   try{
@@ -1388,13 +1588,13 @@ app.post('/api/futures/balance', async (req, res) => {
 });
 
 app.post('/api/futures/order', async (req, res) => {
-  const { exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, stopLossPrice, takeProfitPrice, passphrase } = req.body || {};
+  const { exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, entryPrice, stopLossPrice, takeProfitPrice, passphrase } = req.body || {};
   if(!exchange || !apiKey || !secretKey || !symbol || !side || !qty || !leverage || !stopLossPrice || !takeProfitPrice){
     return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, stopLossPrice, and takeProfitPrice are all required — every futures order this app places carries a stop-loss and take-profit from the moment it opens, no exceptions.' });
   }
   const placer = FUTURES_ORDER_PLACERS[exchange];
   if(!placer){
-    return res.status(400).json({ ok:false, message:`No futures order placer for "${exchange}" yet — only bybit, binance, and gateio are supported so far.` });
+    return res.status(400).json({ ok:false, message:`No futures order placer for "${exchange}" yet — only bybit, binance, gateio, and mexc are supported so far.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   const casingFn = FUTURES_SIDE_CASING[exchange] || (s => s[0].toUpperCase() + s.slice(1).toLowerCase());
@@ -1403,6 +1603,7 @@ app.post('/api/futures/order', async (req, res) => {
   try{
     const result = await placer(netMode, apiKey, secretKey, {
       symbol, side: normalizedSide, rawQty: parseFloat(qty), leverage: parseFloat(leverage),
+      rawEntryPrice: entryPrice != null ? parseFloat(entryPrice) : undefined, // only MEXC's placer actually needs this — others ignore it
       rawStopLossPrice: parseFloat(stopLossPrice), rawTakeProfitPrice: parseFloat(takeProfitPrice),
     }, passphrase);
     return res.json({ ok:true, ...result });
@@ -1422,7 +1623,7 @@ app.post('/api/futures/position', async (req, res) => {
   const positionGetter = FUTURES_POSITION_GETTERS[exchange];
   const closedPnlGetter = FUTURES_CLOSED_PNL_GETTERS[exchange];
   if(!positionGetter){
-    return res.status(400).json({ ok:false, message:`No futures position getter for "${exchange}" yet — only bybit, binance, and gateio are supported so far.` });
+    return res.status(400).json({ ok:false, message:`No futures position getter for "${exchange}" yet — only bybit, binance, gateio, and mexc are supported so far.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   try{

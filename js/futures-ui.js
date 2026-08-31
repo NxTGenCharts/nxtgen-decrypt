@@ -7,7 +7,8 @@
 // Two independent trading loops live in this file:
 // - runCycle() — Paper mode, unchanged from before, always available,
 //   trades against the synthetic feed in js/futures/mockMarket.js.
-// - runLiveCycle() — Live/Demo mode, Bybit and Binance so far. Runs the
+// - runLiveCycle() — Live/Demo mode, all four exchanges (MEXC is Live
+//   only — see LIVE_ONLY_EXCHANGES). Runs the
 //   exact same engine.runScanCycle() detection/scoring logic, but fed
 //   real market data (via server.js's /api/futures/snapshot) instead of
 //   the synthetic feed, and on an APPROVED signal places a real order
@@ -220,13 +221,17 @@ function renderHistory(history){
 }
 
 // =============================================================
-// Live/Demo trading (Bybit and Binance so far). Separate state, separate stats,
+// Live/Demo trading (all four exchanges; MEXC is Live only). Separate state, separate stats,
 // separate history from Paper above — nothing here touches dayState/
 // tradeHistory, and Paper keeps running unaffected regardless of
 // whether Live/Demo is armed or not.
 // =============================================================
 
-const LIVE_TRADEABLE_EXCHANGES = ['bybit', 'binance', 'gateio']; // extend as more get wired up server-side
+const LIVE_TRADEABLE_EXCHANGES = ['bybit', 'binance', 'gateio', 'mexc'];
+// MEXC's Futures Demo Trading is a website/app-only feature — nothing in
+// its API exposes a demo/testnet base URL (same situation MEXC spot has
+// always had in this app). Live is still available; Demo just isn't.
+const LIVE_ONLY_EXCHANGES = ['mexc'];
 
 function callProxy(path, body){
   const proxyUrl = (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
@@ -347,7 +352,11 @@ async function runLiveCycle(){
 
   const exchange = els.fuExchange ? els.fuExchange.value : f.exchange;
   if(!LIVE_TRADEABLE_EXCHANGES.includes(exchange)){
-    showLiveMessage(`Exchange above is set to "${exchange}", but Live/Demo trading only supports ${LIVE_TRADEABLE_EXCHANGES.join(' and ')} so far. Paper mode can still simulate the others.`, 'error');
+    showLiveMessage(`Exchange above is set to "${exchange}", but Live/Demo trading only supports ${LIVE_TRADEABLE_EXCHANGES.join(', ')} so far. Paper mode can still simulate the others.`, 'error');
+    return;
+  }
+  if(f.liveMode === 'demo' && LIVE_ONLY_EXCHANGES.includes(exchange)){
+    showLiveMessage(`${exchange} has no Demo Trading available through its API — only Live. Switch Trading mode to Live, or pick a different exchange.`, 'error');
     return;
   }
   const cred = liveCred(exchange);
@@ -407,7 +416,7 @@ async function runLiveCycle(){
     showLiveMessage(`Placing a real ${f.liveMode} order on ${exchange}: ${approved.symbol} ${side} @ ~${approved.entry}…`);
     const result = await callProxy('/api/futures/order', {
       exchange, mode: f.liveMode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase,
-      symbol: approved.symbol, side, qty: approved.sizing.qty, leverage: cfg.leverage,
+      symbol: approved.symbol, side, qty: approved.sizing.qty, leverage: cfg.leverage, entryPrice: approved.entry,
       stopLossPrice: approved.stop, takeProfitPrice: approved.tp1,
     });
     if(!result.ok){
@@ -518,6 +527,10 @@ function initLiveTradingControls(){
       const currentExchange = els.fuExchange ? els.fuExchange.value : f.exchange;
       if(!LIVE_TRADEABLE_EXCHANGES.includes(currentExchange)){
         showLiveMessage(`Exchange above is set to "${currentExchange}" — switch it to one of: ${LIVE_TRADEABLE_EXCHANGES.join(', ')} before arming Live/Demo trading.`, 'error');
+        return;
+      }
+      if(f.liveMode === 'demo' && LIVE_ONLY_EXCHANGES.includes(currentExchange)){
+        showLiveMessage(`${currentExchange} has no Demo Trading available through its API — only Live. Switch Trading mode to Live, or pick a different exchange.`, 'error');
         return;
       }
       if(!liveCred(currentExchange)){
