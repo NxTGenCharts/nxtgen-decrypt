@@ -7,7 +7,7 @@
 // Two independent trading loops live in this file:
 // - runCycle() — Paper mode, unchanged from before, always available,
 //   trades against the synthetic feed in js/futures/mockMarket.js.
-// - runLiveCycle() — Live/Demo mode, all four exchanges (MEXC is Live
+// - runLiveCycle() — Live/Demo mode, all five exchanges (MEXC is Live
 //   only — see LIVE_ONLY_EXCHANGES). Runs the
 //   exact same engine.runScanCycle() detection/scoring logic, but fed
 //   real market data (via server.js's /api/futures/snapshot) instead of
@@ -221,13 +221,13 @@ function renderHistory(history){
 }
 
 // =============================================================
-// Live/Demo trading (all four exchanges; MEXC is Live only). Separate state, separate stats,
+// Live/Demo trading (all five exchanges; MEXC is Live only). Separate state, separate stats,
 // separate history from Paper above — nothing here touches dayState/
 // tradeHistory, and Paper keeps running unaffected regardless of
 // whether Live/Demo is armed or not.
 // =============================================================
 
-const LIVE_TRADEABLE_EXCHANGES = ['bybit', 'binance', 'gateio', 'mexc'];
+const LIVE_TRADEABLE_EXCHANGES = ['bybit', 'binance', 'gateio', 'mexc', 'bitget'];
 // MEXC's Futures Demo Trading is a website/app-only feature — nothing in
 // its API exposes a demo/testnet base URL (same situation MEXC spot has
 // always had in this app). Live is still available; Demo just isn't.
@@ -463,8 +463,20 @@ function renderLive(){
   renderLiveHistory();
 }
 
+const EXCHANGE_DISPLAY_NAMES = { bybit: 'Bybit', binance: 'Binance', gateio: 'Gate.io', mexc: 'MEXC', bitget: 'Bitget' };
+
+function updateLiveModeDemoOptionLabel(){
+  if(!els.fuLiveModeDemoOption) return;
+  const exchange = els.fuExchange ? els.fuExchange.value : fu().exchange;
+  const name = EXCHANGE_DISPLAY_NAMES[exchange] || exchange;
+  els.fuLiveModeDemoOption.textContent = LIVE_ONLY_EXCHANGES.includes(exchange)
+    ? `Demo — not available for ${name}`
+    : `Demo — ${name} Demo Trading`;
+}
+
 function updateLiveModeUI(){
   const f = fu();
+  updateLiveModeDemoOptionLabel();
   if(els.fuLiveArmWrap) els.fuLiveArmWrap.style.display = f.liveMode === 'paper' ? 'none' : '';
   if(f.liveMode === 'paper'){
     showLiveMessage('Paper only — nothing real will be traded');
@@ -492,28 +504,43 @@ function toggleLiveRunning(){
   }
 }
 
+// Arming never survives a mode OR exchange change — re-arming for a
+// different context (Demo -> Live, or Bybit -> Binance) is a decision
+// that has to be made again, deliberately, every time. Session stats
+// reset too: different mode/exchange combinations are different
+// accounts with different balances — carrying one's numbers into
+// another's display would be actively misleading, not just untidy.
+function resetLiveSession(){
+  const f = fu();
+  if(f.liveRunning) toggleLiveRunning();
+  f.liveArmed = false;
+  f.liveStartingEquity = null;
+  f.liveTrades = 0;
+  f.liveNetPnlUsd = 0;
+  f.liveTradeHistory = [];
+  f.livePositions = {};
+  if(els.fuLiveConfirmCheck) els.fuLiveConfirmCheck.checked = false;
+  if(els.fuLiveArmRow) els.fuLiveArmRow.style.display = 'none';
+  if(els.fuLiveArmPhrase) els.fuLiveArmPhrase.value = '';
+  updateLiveModeUI();
+  renderLive();
+}
+
 function initLiveTradingControls(){
+  if(els.fuExchange){
+    els.fuExchange.addEventListener('change', () => {
+      updateLiveModeDemoOptionLabel();
+      // Only reset if Live/Demo is actually in play — switching exchange
+      // while sitting in Paper mode doesn't touch any real account, so
+      // there's nothing to protect against there.
+      if(fu().liveMode !== 'paper') resetLiveSession();
+    });
+  }
   if(els.fuLiveMode){
     els.fuLiveMode.addEventListener('change', () => {
       const f = fu();
-      // Arming never survives a mode change — re-arming for a different
-      // mode (e.g. Demo -> Live) is a decision that has to be made again,
-      // deliberately, every time. Session stats reset too: Demo and Live
-      // are different accounts with different balances — carrying one's
-      // numbers into the other's display would be actively misleading.
-      if(f.liveRunning) toggleLiveRunning();
       f.liveMode = els.fuLiveMode.value;
-      f.liveArmed = false;
-      f.liveStartingEquity = null;
-      f.liveTrades = 0;
-      f.liveNetPnlUsd = 0;
-      f.liveTradeHistory = [];
-      f.livePositions = {};
-      if(els.fuLiveConfirmCheck) els.fuLiveConfirmCheck.checked = false;
-      if(els.fuLiveArmRow) els.fuLiveArmRow.style.display = 'none';
-      if(els.fuLiveArmPhrase) els.fuLiveArmPhrase.value = '';
-      updateLiveModeUI();
-      renderLive();
+      resetLiveSession();
     });
   }
   if(els.fuLiveConfirmCheck){

@@ -398,7 +398,7 @@
       </div>
       <div class="field">
         <label for="fuExchange">Exchange</label>
-        <select id="fuExchange"><option value="binance">Binance Futures</option><option value="bybit">Bybit Derivatives</option><option value="mexc">MEXC Futures</option><option value="gateio">Gate.io Futures</option></select>
+        <select id="fuExchange"><option value="binance">Binance Futures</option><option value="bybit">Bybit Derivatives</option><option value="mexc">MEXC Futures</option><option value="gateio">Gate.io Futures</option><option value="bitget">Bitget Futures</option></select>
       </div>
       <div class="field">
         <label for="fuMinConfidence">Min confidence</label>
@@ -475,22 +475,25 @@
     </div>
 
     <div class="ov-block" style="margin-top:18px;border-color:var(--amber-dim);">
-      <div class="ov-block-title">Live / Demo Trading <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">ALL FOUR EXCHANGES</span></div>
+      <div class="ov-block-title">Live / Demo Trading <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">ALL FIVE EXCHANGES</span></div>
       <div style="font-size:12px;color:var(--dim);margin-bottom:14px;line-height:1.5;">
         Separate from the paper engine above, which keeps running exactly as it always has regardless of what's set here. This places real orders on whichever exchange is selected above using the key already connected for it in <b>Autotrade &amp; Balances</b> — nothing new to connect. Every position opens with an exchange-side stop-loss and take-profit attached at creation (not something this app watches and reacts to), so the exchange itself enforces the exit even if this tab is closed or your connection drops.
       </div>
       <div style="font-size:11px;color:var(--dim);margin-bottom:6px;">
-        Binance and Gate.io both need two extra signed calls per position (their stop-loss and take-profit can't be attached to the entry order the way Bybit's and MEXC's can) — if the entry fills but either of those fails, this app will tell you plainly that the position is open and unprotected rather than reporting a generic error. Check the exchange directly if you ever see that message.
+        Binance and Gate.io both need two extra signed calls per position (their stop-loss and take-profit can't be attached to the entry order the way Bybit's, MEXC's, and Bitget's can) — if the entry fills but either of those fails, this app will tell you plainly that the position is open and unprotected rather than reporting a generic error. Check the exchange directly if you ever see that message.
       </div>
       <div style="font-size:11px;color:var(--dim);margin-bottom:10px;">
-        MEXC is <b>Live only</b> — it has no Demo Trading exposed through its API — and its API only gained the ability to place Futures orders at all in <b>March 2026</b>, about five months before this was built. That's not a reason to distrust it (everything here comes straight from MEXC's own current documentation), but it has the least real-world mileage of the four; start smaller and watch it more closely than you would the other three.
+        MEXC is <b>Live only</b> — it has no Demo Trading exposed through its API — and its API only gained the ability to place Futures orders at all in <b>March 2026</b>, about five months before this was built. That's not a reason to distrust it (everything here comes straight from MEXC's own current documentation), but it has the least real-world mileage of the five; start smaller and watch it more closely than the other four.
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-bottom:10px;">
+        Bitget's Demo mode uses the same account-level "Demo API key + a request header" mechanism as Bitget spot demo already in this app — documented by Bitget as their general approach, but its exact behavior on these specific futures endpoints hasn't been independently confirmed end-to-end against a real Demo account. Watch a few Demo trades closely before trusting it further, same advice as MEXC above.
       </div>
       <div class="controls">
         <div class="field">
           <label for="fuLiveMode">Trading mode</label>
           <select id="fuLiveMode">
             <option value="paper" selected>Paper (simulation only — default)</option>
-            <option value="demo">Demo — Bybit Demo Trading</option>
+            <option value="demo" id="fuLiveModeDemoOption">Demo — exchange's own Demo Trading</option>
             <option value="live">Live — real funds</option>
           </select>
         </div>
@@ -535,8 +538,8 @@
     <footer>
       <b>Scope —</b> USDT-margined perpetuals across a 35-symbol watchlist. Default risk 1% of equity per trade (configurable 0.1–2%), max 3 simultaneous positions, max 3% total portfolio risk, max 2% daily loss, pause after 3 consecutive losses — all enforced by the No-Trade Engine before any position opens.<br>
       <b>Win rate vs. expectancy —</b> the dashboard reports whatever win rate and profit factor the session's trades actually produced. A high win rate with poor expectancy is not something this build is tuned toward, and it will show a losing session honestly if that's what happens against the current (synthetic, Paper-mode) price data.<br>
-      <b>Live/Demo trading</b> (Bybit, Binance, Gate.io, and MEXC — MEXC is Live only, no Demo) places real orders through <code>server/server.js</code> with a native/exchange-enforced stop-loss and take-profit on every position — see the Live/Demo Trading section above and <code>server/README.md</code> before arming it with a Live key.<br>
-      <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet. All four exchanges now have Live/Demo (or Live-only, for MEXC) execution built.<br>
+      <b>Live/Demo trading</b> (Bybit, Binance, Gate.io, MEXC, and Bitget — MEXC is Live only, no Demo) places real orders through <code>server/server.js</code> with a native/exchange-enforced stop-loss and take-profit on every position — see the Live/Demo Trading section above and <code>server/README.md</code> before arming it with a Live key.<br>
+      <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet. All five exchanges now have Live/Demo (or Live-only, for MEXC) execution built.<br>
       This is not financial advice.
     </footer>
   </div>

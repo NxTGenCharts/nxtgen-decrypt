@@ -396,3 +396,63 @@ All four Live/Demo integrations are now built. What's still genuinely
 missing, stated in the app's own footer: real historical backtesting,
 walk-forward optimization, and Monte Carlo analysis, none of which this
 static app has anywhere to store the historical OHLCV they'd need.
+
+## Update: Bitget Futures added as the fifth and final Live/Demo exchange, plus two UI bugs fixed
+
+**Bug fixes first, since they were reported directly:** the Paper-mode
+Exchange dropdown was missing Bitget as an option (Binance, Bybit, MEXC,
+Gate.io only) — simple oversight, added now; `cfg.exchange` in Paper
+mode is purely a display label (never consumed by the cost/fee model),
+so this was a safe, zero-risk fix. Separately, the Trading Mode
+dropdown's "Demo" option had Bybit's name hardcoded into it
+("Demo — Bybit Demo Trading") regardless of which exchange was actually
+selected — misleading, since the underlying logic already correctly used
+whichever exchange was selected. Fixed by making that label update live
+as the Exchange dropdown changes, and by making switching exchanges
+while Live/Demo is active trigger the same arm-reset/stats-reset safety
+behavior that switching Trading Mode already did (extracted both into
+one shared `resetLiveSession()` so the two paths can't drift apart) —
+worth calling out because switching exchange mid-session without that
+reset would have silently continued monitoring positions under a stale
+context, not just shown a wrong label.
+
+**Bitget Futures itself** turned out to be the simplest of the five to
+wire up, for one specific reason: it's the only one that shares its
+entire host and signing scheme with its own spot integration
+(`api.bitget.com`, the same `bitgetSignedRequest` helper, the same
+Demo-mode `paptrading: 1` header) — no new domain, no new signature
+algorithm, no new credential type to collect. It also attaches TP/SL
+directly on the entry order (`presetStopSurplusPrice`/
+`presetStopLossPrice`), one call like Bybit and MEXC, not the
+separate-calls pattern Binance and Gate.io need.
+
+**Where confidence is lower than the other four, stated plainly rather
+than smoothed over:** Bitget's Demo trading mechanism for the *classic*
+mix (futures) API has conflicting documentation across Bitget's own
+API history — an older v1 system used entirely different `productType`
+values (`sumcbl`) and special demo-coin symbols (`SBTC`, `SUSDT`), while
+newer documentation describes the `paptrading` header as a general
+mechanism tied to their Unified Trading Account system. This
+implementation uses the newer header-based approach, for consistency
+with the Bitget spot integration already in this app (same mental model:
+Demo API key + one header, not a special symbol set to memorize) — but
+unlike the order-placement mechanics themselves (sourced from
+directly-confirmed, internally-consistent v2 mix API documentation),
+this specific piece hasn't been independently verified end-to-end
+against a real Bitget Demo futures account. Said directly in the app's
+own UI, not just here — start in Demo and confirm a few trades resolve
+correctly on Bitget's own UI before trusting it further.
+
+**One field-naming uncertainty, handled defensively rather than
+guessed:** Bitget's contract-config endpoint's exact field names for
+size step / minimum size weren't pinned down with the same certainty as
+the rest of this integration — `bitgetFuturesSymbolFilters` tries
+`volumePlace` (decimal-places count) first, falling back to
+`sizeMultiplier` if that's absent, rather than trusting a single
+assumed field name for something that affects order sizing.
+
+All five exchanges are now built for Live/Demo futures trading (four
+full Live+Demo, MEXC Live-only). Same standing caveat as every exchange
+before it: none of this has been tested against a real account from
+this codebase's own testing — that's not something an AI assistant can
+do for you.

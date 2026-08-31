@@ -851,7 +851,7 @@ async function mexcBuildFuturesSnapshot(symbol){
   };
 }
 
-const FUTURES_SNAPSHOT_BUILDERS = { bybit: bybitBuildFuturesSnapshot, binance: binanceBuildFuturesSnapshot, gateio: gateioBuildFuturesSnapshot, mexc: mexcBuildFuturesSnapshot };
+const FUTURES_SNAPSHOT_BUILDERS = { bybit: bybitBuildFuturesSnapshot, binance: binanceBuildFuturesSnapshot, gateio: gateioBuildFuturesSnapshot, mexc: mexcBuildFuturesSnapshot, bitget: bitgetBuildFuturesSnapshot };
 const FUTURES_SNAPSHOT_CACHE_TTL_MS = 15_000;
 const futuresSnapshotCache = new Map(); // "exchange:symbol" -> { data, at }
 const futuresSnapshotInFlight = new Map();
@@ -1338,6 +1338,166 @@ async function getMexcFuturesRealizedResult(mode, apiKey, secretKey, symbol, pas
   return { closedPnl: parseFloat(row.realised || '0'), entries: 1 };
 }
 
+// =============================================================
+// Bitget Futures (USDT-M) — the fifth and final Live/Demo exchange.
+// Same host, same signing, same paptrading:1 demo mechanism as Bitget
+// spot above — reuses bitgetSignedRequest as-is, just against
+// /api/v2/mix/... paths with productType:"USDT-FUTURES" instead of
+// /api/v2/spot/... paths. No separate futures domain to get wrong here,
+// unlike MEXC and Gate.io.
+//
+// Demo mode carries the same caveat noted for Bitget spot: the
+// paptrading:1 header is documented as Bitget's general mechanism for
+// their Demo API keys, but its exact behavior specifically on these mix
+// (futures) endpoints hasn't been independently verified end-to-end
+// against a real Demo account from this codebase's own testing — same
+// honesty bar as everywhere else here. Start in Demo and confirm a few
+// trades look right on Bitget's own UI before trusting it further.
+//
+// One genuinely under-confirmed piece, flagged rather than silently
+// assumed: the exact field names on Get Contract Config
+// (/api/v2/mix/market/contracts) for size step / minimum size / price
+// precision weren't pinned down with the same certainty as everything
+// else here (Bitget's spot symbols endpoint uses different field names
+// than its docs example responses for this one suggest futures might).
+// bitgetFuturesSymbolFilters below tries several plausible field names
+// defensively rather than trusting a single guess.
+// =============================================================
+async function bitgetFuturesSymbolFilters(symbol){
+  const res = await fetch(`${BITGET_BASE}/api/v2/mix/market/contracts?productType=USDT-FUTURES&symbol=${symbol}`);
+  const json = await res.json().catch(() => null);
+  const s = json && Array.isArray(json.data) ? json.data[0] : null;
+  if(!s) throw new Error(`Unknown Bitget futures symbol ${symbol}`);
+  // volumePlace (decimal places) is the field named in Bitget's own
+  // futures docs; sizeMultiplier is kept as a fallback in case a
+  // response ever uses the other naming — see the uncertainty note above.
+  const sizeStep = s.volumePlace != null ? Math.pow(10, -parseInt(s.volumePlace, 10)) : parseFloat(s.sizeMultiplier || '0.001');
+  return {
+    sizeStep,
+    minSize: parseFloat(s.minTradeNum || '0.001'),
+    pricePrecision: parseInt(s.pricePlace, 10) || 2,
+    maxLeverage: parseFloat(s.maxLever || s.maxLeverage || '20'),
+  };
+}
+
+async function bitgetFuturesBalance(mode, apiKey, secretKey, passphrase){
+  const data = await bitgetSignedRequest('GET', '/api/v2/mix/account/accounts', 'productType=USDT-FUTURES', null, apiKey, secretKey, passphrase, mode);
+  const usdt = Array.isArray(data) ? data.find(a => String(a.marginCoin || '').toUpperCase() === 'USDT') : null;
+  return usdt ? parseFloat(usdt.available || '0') : null;
+}
+
+async function placeBitgetFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice }, passphrase){
+  const filters = await bitgetFuturesSymbolFilters(symbol);
+  const size = floorToStep(rawQty, filters.sizeStep);
+  if(size <= 0 || size < filters.minSize){
+    throw new VerifyRejected(`Size ${rawQty} ${symbol} rounds down to ${size}, below the exchange minimum (${filters.minSize}) — nothing was sent.`);
+  }
+  const roundPrice = p => Number(p.toFixed(filters.pricePrecision));
+  const stopLossPrice = roundPrice(rawStopLossPrice);
+  const takeProfitPrice = roundPrice(rawTakeProfitPrice);
+  const clampedLeverage = Math.min(Math.round(leverage), filters.maxLeverage);
+
+  await bitgetSignedRequest('POST', '/api/v2/mix/account/set-leverage', '', {
+    symbol, productType: 'USDT-FUTURES', marginCoin: 'USDT', leverage: String(clampedLeverage),
+  }, apiKey, secretKey, passphrase, mode);
+
+  const order = await bitgetSignedRequest('POST', '/api/v2/mix/order/place-order', '', {
+    symbol, productType: 'USDT-FUTURES', marginMode: 'isolated', marginCoin: 'USDT',
+    size: size.toString(), side, tradeSide: 'open', orderType: 'market', force: 'gtc',
+    presetStopSurplusPrice: takeProfitPrice.toString(), presetStopLossPrice: stopLossPrice.toString(),
+  }, apiKey, secretKey, passphrase, mode);
+  const orderId = order && order.orderId;
+  if(!orderId) throw new VerifyRejected('Bitget accepted the order but returned no orderId to confirm the fill with.');
+
+  // place-order's own response is just {orderId, clientOid} — no fill
+  // data — so poll order detail until it confirms filled, same pattern
+  // already used for Bitget spot above.
+  const deadline = Date.now() + 6000;
+  let filled = null;
+  while(Date.now() < deadline){
+    await new Promise(r => setTimeout(r, 400));
+    const detail = await bitgetSignedRequest('GET', '/api/v2/mix/order/detail', `symbol=${symbol}&orderId=${orderId}&productType=USDT-FUTURES`, null, apiKey, secretKey, passphrase, mode).catch(() => null);
+    if(detail && detail.state === 'filled'){ filled = detail; break; }
+    if(detail && ['cancelled', 'rejected'].includes(detail.state)){
+      throw new VerifyRejected(`Order ${detail.state} before filling. No position was opened.`);
+    }
+  }
+  if(!filled){
+    throw new VerifyRejected(`Order ${orderId} was accepted but did not confirm as filled within 6s — check Bitget directly before assuming anything about the position.`);
+  }
+  return {
+    orderId, filledQty: parseFloat(filled.baseVolume || size), avgPrice: parseFloat(filled.priceAvg || '0'),
+    leverage: clampedLeverage, stopLossPrice, takeProfitPrice,
+  };
+}
+
+async function getBitgetFuturesPosition(mode, apiKey, secretKey, symbol, passphrase){
+  const data = await bitgetSignedRequest('GET', '/api/v2/mix/position/single-position', `symbol=${symbol}&productType=USDT-FUTURES&marginCoin=USDT`, null, apiKey, secretKey, passphrase, mode);
+  const pos = Array.isArray(data) ? data[0] : null;
+  const total = pos ? parseFloat(pos.total || '0') : 0;
+  if(!pos || total === 0) return null;
+  return {
+    size: total, side: pos.holdSide === 'long' ? 'Buy' : 'Sell', avgPrice: parseFloat(pos.openPriceAvg || '0'),
+    markPrice: parseFloat(pos.markPrice || '0'), unrealisedPnl: parseFloat(pos.unrealizedPL || '0'),
+    leverage: parseFloat(pos.leverage || '0'), liqPrice: pos.liquidationPrice ? parseFloat(pos.liquidationPrice) : null,
+  };
+}
+
+// No single "closed PnL" endpoint — sums the account bill ledger's
+// realized-P&L and fee entries for this symbol since the position
+// opened, same approach used for Binance/Gate.io/MEXC.
+async function getBitgetFuturesRealizedResult(mode, apiKey, secretKey, symbol, passphrase, openedAtMs){
+  const startTime = String(openedAtMs || (Date.now() - 24 * 60 * 60 * 1000));
+  const data = await bitgetSignedRequest('GET', '/api/v2/mix/account/bill', `symbol=${symbol}&productType=USDT-FUTURES&startTime=${startTime}&endTime=${Date.now()}&limit=100`, null, apiKey, secretKey, passphrase, mode);
+  const bills = data && Array.isArray(data.bills) ? data.bills : (Array.isArray(data) ? data : []);
+  if(bills.length === 0) return null;
+  const relevant = bills.filter(b => ['open_long', 'close_long', 'open_short', 'close_short', 'contract_settle_fee'].includes(b.businessType));
+  if(relevant.length === 0) return null;
+  const closedPnl = relevant.reduce((a, b) => a + (parseFloat(b.amount || '0') + parseFloat(b.fee || '0')), 0);
+  return { closedPnl, entries: relevant.length };
+}
+
+// ---- Bitget Futures real market data. Klines use the same "candles"
+// terminology and array-row shape as several other exchanges here. ----
+function bitgetFuturesCandlesFromKline(raw){
+  if(!Array.isArray(raw)) return [];
+  return raw.map(row => ({
+    t: parseInt(row[0], 10), o: parseFloat(row[1]), h: parseFloat(row[2]), l: parseFloat(row[3]), c: parseFloat(row[4]), v: parseFloat(row[5]),
+  }));
+}
+async function bitgetBuildFuturesSnapshot(symbol){
+  const base = BITGET_BASE;
+  const [m5Res, m15Res, h1Res, tickerRes] = await Promise.all([
+    fetch(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=5m&limit=150`),
+    fetch(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=15m&limit=150`),
+    fetch(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=1H&limit=80`),
+    fetch(`${base}/api/v2/mix/market/ticker?symbol=${symbol}&productType=USDT-FUTURES`),
+  ]);
+  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([m5Res.json(), m15Res.json(), h1Res.json(), tickerRes.json()]);
+
+  const m5 = bitgetFuturesCandlesFromKline(m5Data && m5Data.data);
+  const m15 = bitgetFuturesCandlesFromKline(m15Data && m15Data.data);
+  const h1 = bitgetFuturesCandlesFromKline(h1Data && h1Data.data);
+  if(m5.length < 30 || m15.length < 20 || h1.length < 10){
+    throw new Error(`Not enough Bitget kline history for ${symbol} yet (${m5.length}/${m15.length}/${h1.length} m5/m15/h1 candles).`);
+  }
+  const t = tickerData && Array.isArray(tickerData.data) ? tickerData.data[0] : null;
+  if(!t) throw new Error(`No Bitget ticker data for ${symbol}.`);
+
+  const bid = parseFloat(t.bidPr || '0'), ask = parseFloat(t.askPr || '0');
+  const spreadPct = (bid > 0 && ask > 0) ? ((ask - bid) / ((ask + bid) / 2)) * 100 : 0.02;
+  const volume24hUsd = parseFloat(t.usdtVolume || t.quoteVolume || '0');
+  const liquidityScore = Math.max(5, Math.min(99, Math.round(40 + 45 * Math.min(1, volume24hUsd / 2.2e9))));
+  const fundingRatePct = parseFloat(t.fundingRate || '0') * 100;
+  const last = parseFloat(t.lastPr || '0');
+
+  return {
+    symbol, price: last || m5[m5.length - 1].c,
+    m5, m15, h1,
+    meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
+  };
+}
+
 const ORDER_PLACERS = { binance: placeBinanceOrder, bybit: placeBybitOrder, mexc: placeMexcOrder, gateio: placeGateioOrder, bitget: placeBitgetOrder };
 
 
@@ -1539,31 +1699,34 @@ app.post('/api/order', async (req, res) => {
 // amount split. Only Bybit is wired up right now (the AI Futures Engine's
 // first live/demo integration); the exchange-keyed maps below are set up
 // so extending to the others later is additive, not a rewrite. ----
-const FUTURES_ORDER_PLACERS = { bybit: placeBybitFuturesOrder, binance: placeBinanceFuturesOrder, gateio: placeGateioFuturesOrder, mexc: placeMexcFuturesOrder };
-const FUTURES_POSITION_GETTERS = { bybit: getBybitPosition, binance: getBinanceFuturesPosition, gateio: getGateioFuturesPosition, mexc: getMexcFuturesPosition };
-const FUTURES_CLOSED_PNL_GETTERS = { bybit: getBybitClosedPnl, binance: getBinanceFuturesRealizedResult, gateio: getGateioFuturesRealizedResult, mexc: getMexcFuturesRealizedResult };
+const FUTURES_ORDER_PLACERS = { bybit: placeBybitFuturesOrder, binance: placeBinanceFuturesOrder, gateio: placeGateioFuturesOrder, mexc: placeMexcFuturesOrder, bitget: placeBitgetFuturesOrder };
+const FUTURES_POSITION_GETTERS = { bybit: getBybitPosition, binance: getBinanceFuturesPosition, gateio: getGateioFuturesPosition, mexc: getMexcFuturesPosition, bitget: getBitgetFuturesPosition };
+const FUTURES_CLOSED_PNL_GETTERS = { bybit: getBybitClosedPnl, binance: getBinanceFuturesRealizedResult, gateio: getGateioFuturesRealizedResult, mexc: getMexcFuturesRealizedResult, bitget: getBitgetFuturesRealizedResult };
 // Bybit's account is unified (spot + derivatives share one USDT
 // balance), so its futures balance is just its regular asset-balance
-// getter. Binance, Gate.io, and MEXC all keep futures in a completely
-// separate wallet from spot — reusing a spot balance getter would
-// silently read the wrong number, so each needs its own entry here
-// rather than falling back to ASSET_BALANCE_GETTERS.
+// getter. Binance, Gate.io, MEXC, and Bitget all keep futures in a
+// completely separate wallet from spot — reusing a spot balance getter
+// would silently read the wrong number, so each needs its own entry
+// here rather than falling back to ASSET_BALANCE_GETTERS.
 const FUTURES_BALANCE_GETTERS = {
   bybit: (mode, apiKey, secretKey) => bybitAssetBalance(mode, apiKey, secretKey, 'USDT'),
   binance: binanceFuturesBalance,
   gateio: gateioFuturesBalance,
   mexc: mexcFuturesBalance,
+  bitget: bitgetFuturesBalance,
 };
 // Bybit wants 'Buy'/'Sell'; Binance wants 'BUY'/'SELL'; Gate.io and MEXC
 // both want lowercase 'buy'/'sell' (neither uses the word as a literal
 // API field — Gate.io encodes direction in the sign of the order size,
 // MEXC encodes it in a numeric side enum — but both placers still need
-// the word itself to know which one to apply).
+// the word itself to know which one to apply); Bitget also wants
+// lowercase 'buy'/'sell', used directly as its order side field.
 const FUTURES_SIDE_CASING = {
   bybit: side => side[0].toUpperCase() + side.slice(1).toLowerCase(),
   binance: side => side.toUpperCase(),
   gateio: side => side.toLowerCase(),
   mexc: side => side.toLowerCase(),
+  bitget: side => side.toLowerCase(),
 };
 
 app.post('/api/futures/balance', async (req, res) => {
@@ -1571,9 +1734,12 @@ app.post('/api/futures/balance', async (req, res) => {
   if(!exchange || !apiKey || !secretKey){
     return res.status(400).json({ ok:false, message:'exchange, apiKey and secretKey are all required.' });
   }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
   const getter = FUTURES_BALANCE_GETTERS[exchange];
   if(!getter){
-    return res.status(400).json({ ok:false, message:`No futures balance getter for "${exchange}" yet — only bybit, binance, gateio, and mexc are supported so far.` });
+    return res.status(400).json({ ok:false, message:`No futures balance getter for "${exchange}" yet — only bybit, binance, gateio, mexc, and bitget are supported so far.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   try{
@@ -1592,9 +1758,12 @@ app.post('/api/futures/order', async (req, res) => {
   if(!exchange || !apiKey || !secretKey || !symbol || !side || !qty || !leverage || !stopLossPrice || !takeProfitPrice){
     return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, stopLossPrice, and takeProfitPrice are all required — every futures order this app places carries a stop-loss and take-profit from the moment it opens, no exceptions.' });
   }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
   const placer = FUTURES_ORDER_PLACERS[exchange];
   if(!placer){
-    return res.status(400).json({ ok:false, message:`No futures order placer for "${exchange}" yet — only bybit, binance, gateio, and mexc are supported so far.` });
+    return res.status(400).json({ ok:false, message:`No futures order placer for "${exchange}" yet — only bybit, binance, gateio, mexc, and bitget are supported so far.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   const casingFn = FUTURES_SIDE_CASING[exchange] || (s => s[0].toUpperCase() + s.slice(1).toLowerCase());
@@ -1620,10 +1789,13 @@ app.post('/api/futures/position', async (req, res) => {
   if(!exchange || !apiKey || !secretKey || !symbol){
     return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, and symbol are all required.' });
   }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
   const positionGetter = FUTURES_POSITION_GETTERS[exchange];
   const closedPnlGetter = FUTURES_CLOSED_PNL_GETTERS[exchange];
   if(!positionGetter){
-    return res.status(400).json({ ok:false, message:`No futures position getter for "${exchange}" yet — only bybit, binance, gateio, and mexc are supported so far.` });
+    return res.status(400).json({ ok:false, message:`No futures position getter for "${exchange}" yet — only bybit, binance, gateio, mexc, and bitget are supported so far.` });
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   try{

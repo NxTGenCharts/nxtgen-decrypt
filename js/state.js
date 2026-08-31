@@ -122,6 +122,7 @@ export const els = {
   fuStartingBalance: document.getElementById('fuStartingBalance'),
   fuResetSessionBtn: document.getElementById('fuResetSessionBtn'),
   fuLiveMode: document.getElementById('fuLiveMode'),
+  fuLiveModeDemoOption: document.getElementById('fuLiveModeDemoOption'),
   fuLiveStatusLabel: document.getElementById('fuLiveStatusLabel'),
   fuLiveArmWrap: document.getElementById('fuLiveArmWrap'),
   fuLiveConfirmCheck: document.getElementById('fuLiveConfirmCheck'),
