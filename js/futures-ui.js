@@ -255,9 +255,7 @@ function fetchLiveSnapshot(exchange, symbol){
     });
 }
 
-function liveCred(exchange){
-  const mode = fu().liveMode;
-  if(mode === 'paper') return null;
+function liveCred(exchange, mode){
   const cred = state.exchangeCreds[exchange] && state.exchangeCreds[exchange][mode];
   return (cred && cred.apiKey && cred.verified) ? cred : null;
 }
@@ -309,20 +307,23 @@ function buildLiveDayStateShim(equity){
 
 async function runLiveCycle(){
   const f = fu();
-  if(f.liveMode === 'paper' || !f.liveArmed) return;
+  const exchange = f.liveExchange;
+  if(!f.liveArmed) return;
 
   // 1) Check whatever we're already tracking as open, for closure — using
-  // EACH position's own tracked exchange/credential, not necessarily
-  // whatever the Exchange dropdown currently shows. If that were keyed
-  // off the current dropdown instead, switching exchanges while a
-  // position from a different one is still open would query the wrong
-  // exchange for it and silently stop monitoring the real position.
+  // EACH position's own tracked exchange/mode/credential, not necessarily
+  // whatever's currently selected. If that were keyed off the current
+  // selection instead, switching exchanges while a position from a
+  // different one is still open would query the wrong exchange for it
+  // and silently stop monitoring the real position. (In practice
+  // resetLiveSession clears livePositions on any switch, so this is a
+  // belt-and-suspenders correctness point more than a routinely-hit path.)
   for(const symbol of Object.keys(f.livePositions)){
     const tracked = f.livePositions[symbol];
-    const posCred = liveCred(tracked.exchange);
+    const posCred = liveCred(tracked.exchange, tracked.mode);
     if(!posCred) continue; // can't check right now (key disconnected?) — leave it tracked, try again next cycle
     try{
-      const data = await callProxy('/api/futures/position', { exchange: tracked.exchange, mode: f.liveMode, apiKey: posCred.apiKey, secretKey: posCred.secretKey, passphrase: posCred.passphrase, symbol, openedAtMs: tracked.openedAtMs });
+      const data = await callProxy('/api/futures/position', { exchange: tracked.exchange, mode: tracked.mode, apiKey: posCred.apiKey, secretKey: posCred.secretKey, passphrase: posCred.passphrase, symbol, openedAtMs: tracked.openedAtMs });
       if(!data.ok) continue; // transient error — leave it tracked, try again next cycle
       if(!data.open){
         const closed = data.closed;
@@ -350,24 +351,24 @@ async function runLiveCycle(){
   if(Object.keys(f.livePositions).length > 0) return;
   if(els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = 'None';
 
-  const exchange = els.fuExchange ? els.fuExchange.value : f.exchange;
   if(!LIVE_TRADEABLE_EXCHANGES.includes(exchange)){
-    showLiveMessage(`Exchange above is set to "${exchange}", but Live/Demo trading only supports ${LIVE_TRADEABLE_EXCHANGES.join(', ')} so far. Paper mode can still simulate the others.`, 'error');
+    showLiveMessage(`"${exchange}" isn't a supported Live/Demo exchange.`, 'error');
     return;
   }
-  if(f.liveMode === 'demo' && LIVE_ONLY_EXCHANGES.includes(exchange)){
-    showLiveMessage(`${exchange} has no Demo Trading available through its API — only Live. Switch Trading mode to Live, or pick a different exchange.`, 'error');
+  const mode = f.liveModeByExchange[exchange] || 'live';
+  if(mode === 'demo' && LIVE_ONLY_EXCHANGES.includes(exchange)){
+    showLiveMessage(`${exchange} has no Demo Trading available through its API — only Live.`, 'error');
     return;
   }
-  const cred = liveCred(exchange);
+  const cred = liveCred(exchange, mode);
   if(!cred){
-    showLiveMessage(`No verified ${exchange} ${f.liveMode} key found — connect and verify one in Autotrade & Balances first.`, 'error');
+    showLiveMessage(`No verified ${exchange} ${mode} key found — connect and verify one in Autotrade & Balances first.`, 'error');
     return;
   }
 
   let equity;
   try{
-    const balData = await callProxy('/api/futures/balance', { exchange, mode: f.liveMode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase });
+    const balData = await callProxy('/api/futures/balance', { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase });
     if(!balData.ok) throw new Error(balData.message || 'Balance check failed.');
     equity = balData.balance;
   }catch(err){
@@ -406,16 +407,16 @@ async function runLiveCycle(){
 
   const approved = rows.find(r => r.status === 'APPROVED');
   if(!approved){
-    showLiveMessage(`Armed on ${exchange}, watching ${LIVE_WATCHLIST.length} symbols — no qualifying signal this cycle.`);
+    showLiveMessage(`Armed on ${exchange} (${mode}), watching ${LIVE_WATCHLIST.length} symbols — no qualifying signal this cycle.`);
     return;
   }
 
   const side = approved.direction === 'LONG' ? 'Buy' : 'Sell'; // server normalizes casing per exchange — see FUTURES_SIDE_CASING in server.js
   const openedAtMs = Date.now();
   try{
-    showLiveMessage(`Placing a real ${f.liveMode} order on ${exchange}: ${approved.symbol} ${side} @ ~${approved.entry}…`);
+    showLiveMessage(`Placing a real ${mode} order on ${exchange}: ${approved.symbol} ${side} @ ~${approved.entry}…`);
     const result = await callProxy('/api/futures/order', {
-      exchange, mode: f.liveMode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase,
+      exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase,
       symbol: approved.symbol, side, qty: approved.sizing.qty, leverage: cfg.leverage, entryPrice: approved.entry,
       stopLossPrice: approved.stop, takeProfitPrice: approved.tp1,
     });
@@ -424,11 +425,11 @@ async function runLiveCycle(){
       return;
     }
     f.livePositions[approved.symbol] = {
-      exchange, orderId: result.orderId, side, qty: result.filledQty, entry: result.avgPrice,
+      exchange, mode, orderId: result.orderId, side, qty: result.filledQty, entry: result.avgPrice,
       leverage: result.leverage, stopLossPrice: result.stopLossPrice, takeProfitPrice: result.takeProfitPrice,
       riskAmountUsd: approved.sizing.riskAmountUsd, openedAtMs,
     };
-    showLiveMessage(`Real ${f.liveMode} position opened: ${approved.symbol} ${side} ${result.filledQty} @ ${result.avgPrice}, SL ${result.stopLossPrice} / TP ${result.takeProfitPrice} (order ${result.orderId}).`);
+    showLiveMessage(`Real ${mode} position opened: ${approved.symbol} ${side} ${result.filledQty} @ ${result.avgPrice}, SL ${result.stopLossPrice} / TP ${result.takeProfitPrice} (order ${result.orderId}).`);
   }catch(err){
     showLiveMessage(`Order failed: ${err.message}`, 'error');
   }
@@ -465,26 +466,63 @@ function renderLive(){
 
 const EXCHANGE_DISPLAY_NAMES = { bybit: 'Bybit', binance: 'Binance', gateio: 'Gate.io', mexc: 'MEXC', bitget: 'Bitget' };
 
-function updateLiveModeDemoOptionLabel(){
-  if(!els.fuLiveModeDemoOption) return;
-  const exchange = els.fuExchange ? els.fuExchange.value : fu().exchange;
-  const name = EXCHANGE_DISPLAY_NAMES[exchange] || exchange;
-  els.fuLiveModeDemoOption.textContent = LIVE_ONLY_EXCHANGES.includes(exchange)
-    ? `Demo — not available for ${name}`
-    : `Demo — ${name} Demo Trading`;
+function renderLiveExchangeRows(){
+  if(!els.fuLiveExchRows) return;
+  const f = fu();
+  els.fuLiveExchRows.innerHTML = LIVE_TRADEABLE_EXCHANGES.map(key => {
+    const name = EXCHANGE_DISPLAY_NAMES[key] || key;
+    const mode = f.liveModeByExchange[key] || 'live';
+    const selected = f.liveExchange === key;
+    const supportsDemo = !LIVE_ONLY_EXCHANGES.includes(key);
+    const cred = state.exchangeCreds[key] && state.exchangeCreds[key][mode];
+    const verified = !!(cred && cred.verified);
+    const statusNote = verified
+      ? `verified ${mode} key connected`
+      : `no verified ${mode} key — connect in Autotrade &amp; Balances`;
+    const modeToggle = supportsDemo ? `
+      <div class="mode-toggle" role="group" aria-label="${name} network">
+        <button type="button" class="mode-btn ${mode==='live'?'active':''}" data-mode="live">Live</button>
+        <button type="button" class="mode-btn ${mode==='demo'?'active':''}" data-mode="demo">Demo</button>
+      </div>` : `<div class="mode-toggle mode-toggle--disabled" title="${name} has no public Demo Trading environment"><span class="mode-btn active">Live only</span></div>`;
+    return `<div class="fu-live-exch-row${selected ? ' selected' : ''}" data-exchange="${key}">
+      <div class="fu-live-exch-radio"></div>
+      <div class="fu-live-exch-label">${name}</div>
+      ${modeToggle}
+      <div class="fu-live-exch-note" style="text-align:right;color:${verified ? 'var(--green)' : 'var(--dim)'};">${statusNote}</div>
+    </div>`;
+  }).join('');
+}
+
+function initLiveExchangeRows(){
+  if(!els.fuLiveExchRows) return;
+  els.fuLiveExchRows.addEventListener('click', e => {
+    const row = e.target.closest('.fu-live-exch-row');
+    if(!row) return;
+    const exchange = row.dataset.exchange;
+    const f = fu();
+    const modeBtn = e.target.closest('.mode-btn[data-mode]');
+
+    const exchangeChanged = f.liveExchange !== exchange;
+    const modeChanged = modeBtn && f.liveModeByExchange[exchange] !== modeBtn.dataset.mode;
+    if(!exchangeChanged && !modeChanged) return; // clicked the already-selected exchange/mode — nothing to do
+
+    if(modeBtn) f.liveModeByExchange[exchange] = modeBtn.dataset.mode;
+    f.liveExchange = exchange;
+    resetLiveSession(); // re-arming for a different exchange/network is a decision made again, deliberately, every time — see its own comment below
+  });
 }
 
 function updateLiveModeUI(){
   const f = fu();
-  updateLiveModeDemoOptionLabel();
-  if(els.fuLiveArmWrap) els.fuLiveArmWrap.style.display = f.liveMode === 'paper' ? 'none' : '';
-  if(f.liveMode === 'paper'){
-    showLiveMessage('Paper only — nothing real will be traded');
-  } else if(!f.liveArmed){
-    showLiveMessage(`${f.liveMode === 'live' ? 'Live' : 'Demo'} mode selected but not armed — check the box and type the phrase below to arm.`);
+  const exchange = f.liveExchange;
+  const mode = f.liveModeByExchange[exchange] || 'live';
+  const name = EXCHANGE_DISPLAY_NAMES[exchange] || exchange;
+  if(els.fuLiveArmWrap) els.fuLiveArmWrap.style.display = '';
+  if(els.fuLiveConfirmLabel) els.fuLiveConfirmLabel.textContent = `Sign and send real orders instead of simulating (requires a connected, verified ${name} ${mode} key)`;
+  if(!f.liveArmed){
+    showLiveMessage(`${name} (${mode === 'live' ? 'Live' : 'Demo'}) selected but not armed — check the box and type the phrase below to arm.`);
   } else {
-    const currentExchange = els.fuExchange ? els.fuExchange.value : f.exchange;
-    showLiveMessage(`Armed for ${f.liveMode === 'live' ? 'LIVE (real funds)' : 'Demo'} trading on ${currentExchange}.`);
+    showLiveMessage(`Armed for ${mode === 'live' ? 'LIVE (real funds)' : 'Demo'} trading on ${name}.`);
   }
 }
 
@@ -504,10 +542,10 @@ function toggleLiveRunning(){
   }
 }
 
-// Arming never survives a mode OR exchange change — re-arming for a
+// Arming never survives an exchange OR network change — re-arming for a
 // different context (Demo -> Live, or Bybit -> Binance) is a decision
 // that has to be made again, deliberately, every time. Session stats
-// reset too: different mode/exchange combinations are different
+// reset too: different exchange/mode combinations are different
 // accounts with different balances — carrying one's numbers into
 // another's display would be actively misleading, not just untidy.
 function resetLiveSession(){
@@ -522,27 +560,13 @@ function resetLiveSession(){
   if(els.fuLiveConfirmCheck) els.fuLiveConfirmCheck.checked = false;
   if(els.fuLiveArmRow) els.fuLiveArmRow.style.display = 'none';
   if(els.fuLiveArmPhrase) els.fuLiveArmPhrase.value = '';
+  renderLiveExchangeRows();
   updateLiveModeUI();
   renderLive();
 }
 
 function initLiveTradingControls(){
-  if(els.fuExchange){
-    els.fuExchange.addEventListener('change', () => {
-      updateLiveModeDemoOptionLabel();
-      // Only reset if Live/Demo is actually in play — switching exchange
-      // while sitting in Paper mode doesn't touch any real account, so
-      // there's nothing to protect against there.
-      if(fu().liveMode !== 'paper') resetLiveSession();
-    });
-  }
-  if(els.fuLiveMode){
-    els.fuLiveMode.addEventListener('change', () => {
-      const f = fu();
-      f.liveMode = els.fuLiveMode.value;
-      resetLiveSession();
-    });
-  }
+  initLiveExchangeRows();
   if(els.fuLiveConfirmCheck){
     els.fuLiveConfirmCheck.addEventListener('change', () => {
       if(els.fuLiveArmRow) els.fuLiveArmRow.style.display = els.fuLiveConfirmCheck.checked ? '' : 'none';
@@ -551,17 +575,10 @@ function initLiveTradingControls(){
   if(els.fuLiveArmBtn){
     els.fuLiveArmBtn.addEventListener('click', () => {
       const f = fu();
-      const currentExchange = els.fuExchange ? els.fuExchange.value : f.exchange;
-      if(!LIVE_TRADEABLE_EXCHANGES.includes(currentExchange)){
-        showLiveMessage(`Exchange above is set to "${currentExchange}" — switch it to one of: ${LIVE_TRADEABLE_EXCHANGES.join(', ')} before arming Live/Demo trading.`, 'error');
-        return;
-      }
-      if(f.liveMode === 'demo' && LIVE_ONLY_EXCHANGES.includes(currentExchange)){
-        showLiveMessage(`${currentExchange} has no Demo Trading available through its API — only Live. Switch Trading mode to Live, or pick a different exchange.`, 'error');
-        return;
-      }
-      if(!liveCred(currentExchange)){
-        showLiveMessage(`No verified ${currentExchange} ${f.liveMode} key found — connect and verify one in Autotrade & Balances first, then come back and arm.`, 'error');
+      const exchange = f.liveExchange;
+      const mode = f.liveModeByExchange[exchange] || 'live';
+      if(!liveCred(exchange, mode)){
+        showLiveMessage(`No verified ${exchange} ${mode} key found — connect and verify one in Autotrade & Balances first, then come back and arm.`, 'error');
         return;
       }
       if(!els.fuLiveConfirmCheck || !els.fuLiveConfirmCheck.checked){
@@ -577,6 +594,7 @@ function initLiveTradingControls(){
     });
   }
   if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.addEventListener('click', toggleLiveRunning);
+  renderLiveExchangeRows();
   updateLiveModeUI();
 }
 

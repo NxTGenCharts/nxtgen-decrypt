@@ -121,11 +121,11 @@ export const els = {
   fuExchange: document.getElementById('fuExchange'),
   fuStartingBalance: document.getElementById('fuStartingBalance'),
   fuResetSessionBtn: document.getElementById('fuResetSessionBtn'),
-  fuLiveMode: document.getElementById('fuLiveMode'),
-  fuLiveModeDemoOption: document.getElementById('fuLiveModeDemoOption'),
+  fuLiveExchRows: document.getElementById('fuLiveExchRows'),
   fuLiveStatusLabel: document.getElementById('fuLiveStatusLabel'),
   fuLiveArmWrap: document.getElementById('fuLiveArmWrap'),
   fuLiveConfirmCheck: document.getElementById('fuLiveConfirmCheck'),
+  fuLiveConfirmLabel: document.getElementById('fuLiveConfirmLabel'),
   fuLiveArmRow: document.getElementById('fuLiveArmRow'),
   fuLiveArmPhrase: document.getElementById('fuLiveArmPhrase'),
   fuLiveArmBtn: document.getElementById('fuLiveArmBtn'),
@@ -272,9 +272,14 @@ export const state = {
     lastRegimeSummary: null,
     lastExplainIndex: null,
     // Live/Demo trading — entirely separate from the paper dayState above,
-    // which keeps running unaffected regardless of any of this.
-    liveMode: 'paper',      // 'paper' | 'demo' | 'live'
-    liveArmed: false,       // resets to false on load and whenever liveMode changes
+    // which keeps running unaffected regardless of any of this. Only one
+    // exchange trades Live/Demo at a time; liveExchange picks which, and
+    // liveModeByExchange remembers each exchange's own last-picked network
+    // (so switching exchanges doesn't reset what you'd already set for one
+    // you'd used before) — MEXC only ever holds 'live', it has no Demo API.
+    liveExchange: 'bybit',
+    liveModeByExchange: { bybit: 'live', binance: 'live', gateio: 'live', mexc: 'live', bitget: 'live' },
+    liveArmed: false,       // resets to false on load and whenever the selected exchange/network changes
     liveRunning: false,
     liveTimer: null,
     livePositions: {},      // symbol -> { orderId, side, qty, entry, stopLossPrice, takeProfitPrice, leverage, openedAt }

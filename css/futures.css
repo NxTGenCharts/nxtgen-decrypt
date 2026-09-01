@@ -83,3 +83,24 @@
     content: attr(data-label);
   }
 }
+
+/* Live/Demo Trading — per-exchange selection rows (mirrors Autotrade's
+   Connect Exchanges rows: exchange label + Live/Demo toggle — but here
+   the row itself is also the "which exchange is active" selector, since
+   only one exchange trades Live/Demo at a time in this app). */
+#panelFutures .fu-live-exch-rows{ display:flex; flex-direction:column; gap:8px; margin:14px 0; }
+#panelFutures .fu-live-exch-row{
+  display:grid; grid-template-columns:24px 150px auto 1fr; gap:14px; align-items:center;
+  padding:12px 16px; border:1px solid var(--line); border-radius:var(--r-lg);
+  background:var(--panel2); cursor:pointer;
+}
+#panelFutures .fu-live-exch-row:hover{ border-color:var(--amber-dim); }
+#panelFutures .fu-live-exch-row.selected{ border-color:var(--amber); background:rgba(240,180,41,.06); }
+#panelFutures .fu-live-exch-radio{
+  width:16px; height:16px; border-radius:50%; border:2px solid var(--line); flex:none;
+}
+#panelFutures .fu-live-exch-row.selected .fu-live-exch-radio{
+  border-color:var(--amber); background:radial-gradient(circle, var(--amber) 0 40%, transparent 44%);
+}
+#panelFutures .fu-live-exch-label{ font-weight:600; color:var(--ink); }
+#panelFutures .fu-live-exch-note{ font-size:11px; color:var(--dim); }
