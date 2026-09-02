@@ -38,6 +38,8 @@ export const els = {
   statHits: document.getElementById('statHits'),
   tabTriBtn: document.getElementById('tabTriBtn'),
   tabXBtn: document.getElementById('tabXBtn'),
+  tabTradingBtn: document.getElementById('tabTradingBtn'),
+  panelTrading: document.getElementById('panelTrading'),
   panelTri: document.getElementById('panelTri'),
   panelX: document.getElementById('panelX'),
   xAmount: document.getElementById('xAmount'),

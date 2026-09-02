@@ -62,15 +62,34 @@ export function renderOverview(){
 }
 
 // Single source of truth for tab switching across all panels.
-const TAB_KEYS = ['overview', 'tri', 'x', 'auto', 'futures'];
-const TAB_BTN_ELS = { overview: 'tabOverviewBtn', tri: 'tabTriBtn', x: 'tabXBtn', auto: 'tabAutoBtn', futures: 'tabFuturesBtn' };
-const TAB_PANEL_ELS = { overview: 'panelOverview', tri: 'panelTri', x: 'panelX', auto: 'panelAuto', futures: 'panelFutures' };
+const TAB_KEYS = ['overview', 'tri', 'x', 'trading'];
+const TAB_BTN_ELS = { overview: 'tabOverviewBtn', tri: 'tabTriBtn', x: 'tabXBtn', trading: 'tabTradingBtn' };
+const TAB_PANEL_ELS = { overview: 'panelOverview', tri: 'panelTri', x: 'panelX', trading: 'panelTrading' };
 
 export function switchTabAll(which){
   TAB_KEYS.forEach(key => {
     const btn = els[TAB_BTN_ELS[key]];
     const panel = els[TAB_PANEL_ELS[key]];
     if(!btn || !panel) return; // tolerate a tab whose markup isn't present
+    const active = which === key;
+    btn.classList.toggle('active', active);
+    panel.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active);
+  });
+}
+
+// Sub-tab switch WITHIN the combined Autotrade & Futures panel — same
+// active-class-toggle pattern as switchTabAll above, just scoped to the
+// two sub-panels nested inside panelTrading instead of the top-level nav.
+const SUBTAB_KEYS = ['auto', 'futures'];
+const SUBTAB_BTN_ELS = { auto: 'tabAutoBtn', futures: 'tabFuturesBtn' };
+const SUBTAB_PANEL_ELS = { auto: 'panelAuto', futures: 'panelFutures' };
+
+export function switchSubTab(which){
+  SUBTAB_KEYS.forEach(key => {
+    const btn = els[SUBTAB_BTN_ELS[key]];
+    const panel = els[SUBTAB_PANEL_ELS[key]];
+    if(!btn || !panel) return;
     const active = which === key;
     btn.classList.toggle('active', active);
     panel.classList.toggle('active', active);

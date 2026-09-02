@@ -51,8 +51,7 @@
     <button class="navtab active" id="tabOverviewBtn" role="tab" aria-selected="true"><span class="ic">&#9635;</span>Overview</button>
     <button class="navtab" id="tabTriBtn" role="tab" aria-selected="false"><span class="ic">&#9651;</span>Triangular Arbitrage</button>
     <button class="navtab" id="tabXBtn" role="tab" aria-selected="false"><span class="ic">&#8645;</span>Cross-Exchange</button>
-    <button class="navtab" id="tabAutoBtn" role="tab" aria-selected="false"><span class="ic">&#9889;</span>Autotrade &amp; Balances</button>
-    <button class="navtab" id="tabFuturesBtn" role="tab" aria-selected="false"><span class="ic">&#9670;</span>AI Futures Engine</button>
+    <button class="navtab" id="tabTradingBtn" role="tab" aria-selected="false"><span class="ic">&#9889;</span>Autotrade &amp; Futures</button>
   </nav>
 
   <!-- ============ OVERVIEW ============ -->
@@ -254,8 +253,15 @@
     </footer>
   </div>
 
+  <!-- ============ AUTOTRADE & FUTURES (combined, sub-tab switch) ============ -->
+  <div class="panel" id="panelTrading">
+    <nav class="term-subnav" role="tablist" aria-label="Autotrade and Futures sub-tabs">
+      <button class="navtab subnavtab active" id="tabAutoBtn" role="tab" aria-selected="true"><span class="ic">&#9889;</span>Autotrade &amp; Balances</button>
+      <button class="navtab subnavtab" id="tabFuturesBtn" role="tab" aria-selected="false"><span class="ic">&#9670;</span>AI Futures Engine</button>
+    </nav>
+
   <!-- ============ AUTOTRADE & BALANCES ============ -->
-  <div class="panel" id="panelAuto">
+  <div class="panel active" id="panelAuto">
 
     <div class="ov-block" style="margin-bottom:18px;">
       <div class="ov-block-title">Connect Exchanges</div>
@@ -535,6 +541,7 @@
       <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet. All five exchanges now have Live/Demo (or Live-only, for MEXC) execution built.<br>
       This is not financial advice.
     </footer>
+  </div>
   </div>
 
 </div>

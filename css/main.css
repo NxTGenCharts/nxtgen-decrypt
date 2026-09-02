@@ -142,3 +142,14 @@ h1,h2,h3{ font-family:var(--disp); margin:0; letter-spacing:.005em; }
 .navtab .ic{ font-size:13px; opacity:.85; }
 .navtab:hover{ color:var(--ink-dim); }
 .navtab.active{ color:var(--ink); border-bottom-color:var(--amber); }
+
+/* Sub-nav inside the combined Autotrade & Futures panel — same visual
+   language as .term-nav/.navtab (so it's obviously "a set of tabs" and
+   not a new pattern to learn) but visually smaller/secondary, so it
+   doesn't get mistaken for a second row of top-level tabs. */
+.term-subnav{
+  display:flex; gap:20px; border-bottom:1px solid var(--line-soft); margin-bottom:18px;
+  overflow-x:auto; scrollbar-width:none; -ms-overflow-style:none;
+}
+.term-subnav::-webkit-scrollbar{ display:none; }
+.navtab.subnavtab{ font-size:12px; padding:8px 2px 10px; }
