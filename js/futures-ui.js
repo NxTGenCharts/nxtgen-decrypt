@@ -323,19 +323,29 @@ async function runLiveCycle(){
     const posCred = liveCred(tracked.exchange, tracked.mode);
     if(!posCred) continue; // can't check right now (key disconnected?) — leave it tracked, try again next cycle
     try{
-      const data = await callProxy('/api/futures/position', { exchange: tracked.exchange, mode: tracked.mode, apiKey: posCred.apiKey, secretKey: posCred.secretKey, passphrase: posCred.passphrase, symbol, openedAtMs: tracked.openedAtMs });
+      const data = await callProxy('/api/futures/position', { exchange: tracked.exchange, mode: tracked.mode, apiKey: posCred.apiKey, secretKey: posCred.secretKey, passphrase: posCred.passphrase, symbol, openedAtMs: tracked.openedAtMs, balanceBeforeUsd: tracked.balanceBeforeUsd });
       if(!data.ok) continue; // transient error — leave it tracked, try again next cycle
       if(!data.open){
         const closed = data.closed;
         const netUsd = closed ? closed.closedPnl : 0;
+        // grossPnl/feesUsd are null for Bybit specifically (its API
+        // doesn't expose a fee breakdown for closed futures positions,
+        // Live or Demo — see getBybitClosedPnl's own comment) — left as
+        // null rather than guessed, and the stat tiles/history below
+        // only add what's actually known.
+        const grossUsd = closed && closed.grossPnl != null ? closed.grossPnl : null;
+        const feesUsd = closed && closed.feesUsd != null ? closed.feesUsd : null;
         f.liveTradeHistory.unshift({
           closedAtMs: Date.now(), time: new Date().toLocaleTimeString(), exchange: tracked.exchange, symbol, side: tracked.side,
           entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
           exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
-          leverage: tracked.leverage, qty: tracked.qty, netUsd, orderId: tracked.orderId,
+          leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
         });
         f.liveTrades++;
         f.liveNetPnlUsd += netUsd;
+        if(grossUsd != null) f.liveGrossPnlUsd += grossUsd;
+        if(feesUsd != null) f.liveFeesUsd += feesUsd;
+        checkAdaptiveCircuitBreaker(netUsd);
         delete f.livePositions[symbol];
       } else if(els.fuLiveOpenPosition){
         els.fuLiveOpenPosition.textContent = `[${tracked.exchange}] ${symbol} ${data.position.side} ${data.position.size} @ ${data.position.avgPrice} (uPnL ${fmtUsd(data.position.unrealisedPnl)})`;
@@ -393,7 +403,12 @@ async function runLiveCycle(){
   const f2 = fu();
   const cfg = {
     exchange, weights: DEFAULT_WEIGHTS, highSelectivity: f2.highSelectivity,
-    minConfidence: f2.minConfidence, minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
+    // The adaptive boost (see checkAdaptiveCircuitBreaker) stacks on top
+    // of whatever Min Confidence is set to, not in place of it — a
+    // losing streak makes live trading pickier than your own setting,
+    // never more lenient than it.
+    minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost),
+    minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
     riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage,
   };
   const dayStateShim = buildLiveDayStateShim(equity);
@@ -407,7 +422,8 @@ async function runLiveCycle(){
 
   const approved = rows.find(r => r.status === 'APPROVED');
   if(!approved){
-    showLiveMessage(`Armed on ${exchange} (${mode}), watching ${LIVE_WATCHLIST.length} symbols — no qualifying signal this cycle.`);
+    const boostNote = f2.liveAdaptiveConfidenceBoost > 0 ? ` (min confidence raised +${f2.liveAdaptiveConfidenceBoost} after recent losses)` : '';
+    showLiveMessage(`Armed on ${exchange} (${mode}), watching ${LIVE_WATCHLIST.length} symbols — no qualifying signal this cycle${boostNote}.`);
     return;
   }
 
@@ -427,7 +443,7 @@ async function runLiveCycle(){
     f.livePositions[approved.symbol] = {
       exchange, mode, orderId: result.orderId, side, qty: result.filledQty, entry: result.avgPrice,
       leverage: result.leverage, stopLossPrice: result.stopLossPrice, takeProfitPrice: result.takeProfitPrice,
-      riskAmountUsd: approved.sizing.riskAmountUsd, openedAtMs,
+      riskAmountUsd: approved.sizing.riskAmountUsd, openedAtMs, balanceBeforeUsd: equity,
     };
     showLiveMessage(`Real ${mode} position opened: ${approved.symbol} ${side} ${result.filledQty} @ ${result.avgPrice}, SL ${result.stopLossPrice} / TP ${result.takeProfitPrice} (order ${result.orderId}).`);
   }catch(err){
@@ -441,7 +457,7 @@ function renderLiveHistory(){
   const history = fu().liveTradeHistory;
   if(!history.length){ els.fuLiveHistoryRows.innerHTML = '<div class="fu-empty">No live/demo trades yet this session.</div>'; return; }
   els.fuLiveHistoryRows.innerHTML = history.slice(0, 50).map(t => `
-    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr 1.4fr;">
+    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr 1.4fr;">
       <div>${t.time}</div>
       <div>${t.exchange || '—'}</div>
       <div>${t.symbol}</div>
@@ -450,6 +466,8 @@ function renderLiveHistory(){
       <div>${t.exit != null ? Number(t.exit).toFixed(4) : '—'}</div>
       <div>${t.leverage}x</div>
       <div>${t.qty}</div>
+      <div>${t.grossUsd != null ? fmtUsd(t.grossUsd) : '—'}</div>
+      <div>${t.feesUsd != null ? fmtUsd(t.feesUsd) : '—'}</div>
       <div>${fmtUsd(t.netUsd)}</div>
       <div style="font-size:11px;color:var(--dim);">${t.orderId}</div>
     </div>
@@ -459,9 +477,55 @@ function renderLiveHistory(){
 function renderLive(){
   const f = fu();
   if(els.fuLiveTrades) els.fuLiveTrades.textContent = String(f.liveTrades);
+  if(els.fuLiveGrossPnl) els.fuLiveGrossPnl.textContent = fmtUsd(f.liveGrossPnlUsd);
+  if(els.fuLiveFees) els.fuLiveFees.textContent = fmtUsd(f.liveFeesUsd);
   if(els.fuLiveNetPnl) els.fuLiveNetPnl.textContent = fmtUsd(f.liveNetPnlUsd);
   if(Object.keys(f.livePositions).length === 0 && els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = 'None';
   renderLiveHistory();
+}
+
+// =============================================================
+// Adaptive response to REAL trade outcomes — deliberately simple and
+// fully inspectable rather than a black-box "AI learns" claim: a rolling
+// counter and two plain thresholds, both visible right here.
+//
+// 1) Circuit breaker: after too many real losses in a row, stop trading
+//    and force a deliberate re-arm rather than continuing to run a
+//    strategy that is empirically not working right now, on this
+//    account, in current market conditions — Paper mode's synthetic
+//    backtest performance is not evidence that it will, and a losing
+//    streak on real money is not something to wait out silently.
+// 2) Adaptive confidence: every consecutive real loss raises the
+//    confidence bar the NEXT signal has to clear, on top of whatever
+//    Min Confidence is set to — a real loss is treated as information
+//    that current conditions are working against the strategy, so it
+//    gets pickier, not just unluckier. A win resets the boost back to
+//    zero. This is the actual "learn from the losers" mechanism — it
+//    adjusts a real number based on real results, it just isn't a
+//    trained model, and doesn't pretend to be one.
+// =============================================================
+const LIVE_CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES = 4;
+const LIVE_ADAPTIVE_CONFIDENCE_STEP = 8;   // added to the confidence bar per consecutive loss
+const LIVE_ADAPTIVE_CONFIDENCE_MAX = 25;   // cap on how much stricter it can get
+
+function checkAdaptiveCircuitBreaker(netUsd){
+  const f = fu();
+  if(netUsd < 0){
+    f.liveConsecutiveLosses++;
+    f.liveAdaptiveConfidenceBoost = Math.min(LIVE_ADAPTIVE_CONFIDENCE_MAX, f.liveAdaptiveConfidenceBoost + LIVE_ADAPTIVE_CONFIDENCE_STEP);
+  } else {
+    f.liveConsecutiveLosses = 0;
+    f.liveAdaptiveConfidenceBoost = 0;
+  }
+  if(f.liveConsecutiveLosses >= LIVE_CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES && !f.livePausedByCircuitBreaker){
+    f.livePausedByCircuitBreaker = true;
+    if(f.liveRunning) toggleLiveRunning();
+    f.liveArmed = false; // force a deliberate re-arm, not just a re-click of Start
+    if(els.fuLiveConfirmCheck) els.fuLiveConfirmCheck.checked = false;
+    if(els.fuLiveArmRow) els.fuLiveArmRow.style.display = 'none';
+    if(els.fuLiveArmPhrase) els.fuLiveArmPhrase.value = '';
+    showLiveMessage(`Paused automatically after ${f.liveConsecutiveLosses} consecutive real losses on ${f.liveExchange} (${f.liveModeByExchange[f.liveExchange]}). This is what's actually happening on your account right now, not Paper mode's synthetic backtest — review the trade history below before re-arming. Raising Min Confidence, or turning on High Selectivity Mode, before restarting is a reasonable place to start.`, 'error');
+  }
 }
 
 const EXCHANGE_DISPLAY_NAMES = { bybit: 'Bybit', binance: 'Binance', gateio: 'Gate.io', mexc: 'MEXC', bitget: 'Bitget' };
@@ -555,8 +619,13 @@ function resetLiveSession(){
   f.liveStartingEquity = null;
   f.liveTrades = 0;
   f.liveNetPnlUsd = 0;
+  f.liveGrossPnlUsd = 0;
+  f.liveFeesUsd = 0;
   f.liveTradeHistory = [];
   f.livePositions = {};
+  f.liveConsecutiveLosses = 0;
+  f.livePausedByCircuitBreaker = false;
+  f.liveAdaptiveConfidenceBoost = 0;
   if(els.fuLiveConfirmCheck) els.fuLiveConfirmCheck.checked = false;
   if(els.fuLiveArmRow) els.fuLiveArmRow.style.display = 'none';
   if(els.fuLiveArmPhrase) els.fuLiveArmPhrase.value = '';

@@ -240,16 +240,20 @@ export function detectAllSetups(snap, regime){
 // pushes a strategy with no real edge to a high win rate without either
 // a genuine directional edge or re-skewing stop vs. target — which just
 // turns this back into Range Scalp under a different name. This
-// detector's edge is real and measured, not asserted: backtesting it
-// against this mock market (two independent runs, ~135 and ~196 closed
-// trades) landed at 65-76% win rate, ~14 min average time-to-resolve,
-// and a 1.2-1.5 profit factor, net of fees/spread/slippage/funding —
-// because mockMarket.js's "mood" process gives price genuine short-run
-// persistence (see its header comment), and trading with that
-// persistence, confirmed by EMA9 slope + price + a push candle, turned
-// out to capture real edge instead of fighting it the way a naive fade
-// did (see git history / README-SCALP.md for that earlier, ~25-29%-win-
-// rate attempt). That number is a property of THIS synthetic feed's
+// detector's edge comes from trading WITH mockMarket.js's "mood"
+// process (see its header comment) instead of fighting it, confirmed by
+// EMA9 slope + price + a push candle. How strong that edge actually is,
+// though, was measured wrong for a while: the mock generator used a
+// fixed seed, so every "independent backtest run" cited here early on
+// was replaying the same one price sequence, not sampling different
+// ones — see "deterministic seed bug" in README-SCALP.md. With that
+// fixed, genuinely independent runs range from clearly losing to
+// clearly profitable, averaging close to breakeven — a real, if much
+// less confident, edge instead of the specific win-rate figures
+// (69-73%, later 65-76%) this comment used to quote as settled (that
+// edge is still real relative to the earlier, opposite-direction fade
+// attempt, which measured ~25-29% — see git history). Whatever this
+// edge actually is, it is a property of THIS synthetic feed's
 // momentum, not a guarantee — it will drift with market conditions, and
 // there's no reason to expect it holds unchanged once Phase 2 swaps in
 // real exchange data. What confidence scoring can legitimately do, and
@@ -287,6 +291,16 @@ export function detectAiScalp(snap, regime){
 
   // Don't chase momentum straight into a strong OPPOSING HTF trend —
   // that's a short-term counter-trend pop that's likely to fail fast.
+  //
+  // An earlier revision of this file tried widening this to block WEAK
+  // opposing trends too, and made RSI/volume hard requirements instead
+  // of confidence bonuses — all individually defensible on standard
+  // multi-timeframe-confluence theory. Reverted: tested against this
+  // synthetic feed (the only data available to test against), it turned
+  // profit factor from ~1.5 into ~0.8 — a LOSING strategy — across three
+  // separate runs. Shipping a change with no evidence it helps real
+  // trading and clear evidence it hurts the one thing that could be
+  // measured would be worse than leaving this as-is. See README-SCALP.md.
   if(dir === 'LONG' && regime.regime === REGIMES.STRONG_BEAR) return null;
   if(dir === 'SHORT' && regime.regime === REGIMES.STRONG_BULL) return null;
 

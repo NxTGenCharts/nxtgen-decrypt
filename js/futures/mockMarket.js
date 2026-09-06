@@ -146,7 +146,22 @@ function clamp(x, lo, hi){ return Math.max(lo, Math.min(hi, x)); }
 class MockMarket {
   constructor(){
     this.series = new Map();
-    SYMBOLS.forEach((sym, i) => this.series.set(sym, new SymbolSeries(sym, 1337 + i * 97)));
+    // Seeded from the moment this module loads (a fresh page load, a
+    // fresh server process, a fresh `node run.mjs`) rather than a fixed
+    // constant — this used to be `1337 + i*97` for every symbol, every
+    // time, forever, which meant every "backtest run" this whole build
+    // was validated against — including the win-rate/profit-factor
+    // numbers already written into this codebase's own comments and
+    // README-SCALP.md — was silently replaying prefixes of the exact
+    // same one price sequence, not independent samples of one. (Every
+    // random draw in _stepOneMinute/tick uses this.rng, the seeded
+    // PRNG below — never Math.random — so that determinism was total,
+    // not partial.) This doesn't retroactively fix anything already
+    // measured, but it means testing FROM HERE ON actually explores
+    // different synthetic scenarios each time, which is what "backtest
+    // across multiple runs" was always supposed to mean.
+    const sessionSeed = Date.now() & 0xffffffff;
+    SYMBOLS.forEach((sym, i) => this.series.set(sym, new SymbolSeries(sym, (sessionSeed + i * 97) | 0)));
   }
 
   get symbols(){ return SYMBOLS.slice(); }

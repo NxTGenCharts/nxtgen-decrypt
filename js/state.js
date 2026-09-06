@@ -135,6 +135,8 @@ export const els = {
   fuLiveBalance: document.getElementById('fuLiveBalance'),
   fuLiveOpenPosition: document.getElementById('fuLiveOpenPosition'),
   fuLiveTrades: document.getElementById('fuLiveTrades'),
+  fuLiveGrossPnl: document.getElementById('fuLiveGrossPnl'),
+  fuLiveFees: document.getElementById('fuLiveFees'),
   fuLiveNetPnl: document.getElementById('fuLiveNetPnl'),
   fuLiveHistoryRows: document.getElementById('fuLiveHistoryRows'),
   fuMinConfidence: document.getElementById('fuMinConfidence'),
@@ -286,7 +288,14 @@ export const state = {
     liveTimer: null,
     livePositions: {},      // symbol -> { orderId, side, qty, entry, stopLossPrice, takeProfitPrice, leverage, openedAt }
     liveTradeHistory: [],
-    liveTrades: 0, liveNetPnlUsd: 0, liveStartingEquity: null,
+    liveTrades: 0, liveNetPnlUsd: 0, liveGrossPnlUsd: 0, liveFeesUsd: 0, liveStartingEquity: null,
+    // Rolling real-performance tracking, used for the adaptive confidence/
+    // circuit-breaker system — see js/futures-ui.js recordLiveTradeOutcome.
+    // Every one of these resets with the rest of the session on any
+    // exchange/network switch — an adaptive adjustment tuned against one
+    // account's recent results has no business carrying over to a
+    // different one.
+    liveConsecutiveLosses: 0, livePausedByCircuitBreaker: false, liveAdaptiveConfidenceBoost: 0,
   },
 };
 

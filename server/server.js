@@ -643,17 +643,26 @@ async function getBybitPosition(mode, apiKey, secretKey, symbol){
 // realized result for it — the definitive P&L figure (Bybit's own
 // closedPnl, which already nets out entry+exit fees) rather than
 // something reconstructed from separate fill records.
-async function getBybitClosedPnl(mode, apiKey, secretKey, symbol){
-  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
-  const data = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/position/closed-pnl', `category=linear&symbol=${symbol}&limit=1`);
-  const row = data.result?.list?.[0];
-  if(!row) return null;
-  return {
-    avgEntryPrice: parseFloat(row.avgEntryPrice || '0'), avgExitPrice: parseFloat(row.avgExitPrice || '0'),
-    closedPnl: parseFloat(row.closedPnl || '0'), qty: parseFloat(row.qty || row.closedSize || '0'),
-    side: row.side, leverage: parseFloat(row.leverage || '0'),
-    createdTime: parseInt(row.createdTime, 10) || null, updatedTime: parseInt(row.updatedTime, 10) || null,
-  };
+// IMPORTANT: /v5/position/closed-pnl does NOT work on Bybit Demo accounts
+// at all — it rejects with ErrCode 10032 ("Demo trading are not
+// supported"), confirmed from Bybit's own SDK issue trackers, not
+// assumed. Silently swallowing that error (the position route's own
+// .catch(()=>null) would do exactly that) meant every Demo trade was
+// closing with $0 P&L recorded, even though a real result happened on
+// Bybit's own books — a real bug, not a hypothetical one. Fixed the same
+// way the analogous spot-Autotrade bug was fixed earlier: measure the
+// actual change in account balance across the position's lifetime
+// (balanceBeforeUsd, captured by the caller right before opening, vs a
+// fresh balance read now) instead of trusting an endpoint that doesn't
+// work in one of the two modes this is used for. This also means Bybit
+// doesn't expose a separate fee breakdown the way Binance/Gate.io/MEXC/
+// Bitget's ledger-sum approaches do — closedPnl here is a true net
+// figure, but grossPnl/feesUsd for Bybit are reported as null (unknown)
+// rather than guessed.
+async function getBybitClosedPnl(mode, apiKey, secretKey, symbol, passphrase, openedAtMs, balanceBeforeUsd){
+  if(balanceBeforeUsd == null) return null; // caller didn't have a starting balance to diff against — can't compute this safely
+  const afterUsd = await bybitAssetBalance(mode, apiKey, secretKey, 'USDT');
+  return { closedPnl: afterUsd - balanceBeforeUsd, grossPnl: null, feesUsd: null, entries: 1 };
 }
 
 // =============================================================
@@ -678,13 +687,12 @@ function bybitCandlesFromKline(raw){
 
 async function bybitBuildFuturesSnapshot(symbol){
   const base = BYBIT_BASE.live;
-  const [m5Res, m15Res, h1Res, tickerRes] = await Promise.all([
-    fetch(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=5&limit=150`),
-    fetch(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=15&limit=150`),
-    fetch(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=60&limit=80`),
-    fetch(`${base}/v5/market/tickers?category=linear&symbol=${symbol}`),
+  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([
+    fetchJSON(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=5&limit=150`),
+    fetchJSON(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=15&limit=150`),
+    fetchJSON(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=60&limit=80`),
+    fetchJSON(`${base}/v5/market/tickers?category=linear&symbol=${symbol}`),
   ]);
-  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([m5Res.json(), m15Res.json(), h1Res.json(), tickerRes.json()]);
 
   const m5 = bybitCandlesFromKline(m5Data);
   const m15 = bybitCandlesFromKline(m15Data);
@@ -721,16 +729,13 @@ function binanceCandlesFromKline(raw){
 }
 async function binanceBuildFuturesSnapshot(symbol){
   const base = BINANCE_FAPI_BASE.live; // public market data — same regardless of Live/Demo trading mode
-  const [m5Res, m15Res, h1Res, bookRes, premiumRes, tickerRes] = await Promise.all([
-    fetch(`${base}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=150`),
-    fetch(`${base}/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=150`),
-    fetch(`${base}/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=80`),
-    fetch(`${base}/fapi/v1/ticker/bookTicker?symbol=${symbol}`),
-    fetch(`${base}/fapi/v1/premiumIndex?symbol=${symbol}`),
-    fetch(`${base}/fapi/v1/ticker/24hr?symbol=${symbol}`),
-  ]);
   const [m5Raw, m15Raw, h1Raw, book, premium, ticker24h] = await Promise.all([
-    m5Res.json(), m15Res.json(), h1Res.json(), bookRes.json(), premiumRes.json(), tickerRes.json(),
+    fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=150`),
+    fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=150`),
+    fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=80`),
+    fetchJSON(`${base}/fapi/v1/ticker/bookTicker?symbol=${symbol}`),
+    fetchJSON(`${base}/fapi/v1/premiumIndex?symbol=${symbol}`),
+    fetchJSON(`${base}/fapi/v1/ticker/24hr?symbol=${symbol}`),
   ]);
 
   const m5 = binanceCandlesFromKline(m5Raw);
@@ -767,13 +772,12 @@ function gateioCandlesFromKline(raw){
 async function gateioBuildFuturesSnapshot(symbol){
   const base = GATEIO_FAPI_BASE.live; // public market data — same regardless of Live/Demo trading mode
   const contract = toGateioContract(symbol);
-  const [m5Res, m15Res, h1Res, tickerRes] = await Promise.all([
-    fetch(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=5m&limit=150`),
-    fetch(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=15m&limit=150`),
-    fetch(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=1h&limit=80`),
-    fetch(`${base}/api/v4/futures/usdt/tickers?contract=${contract}`),
+  const [m5Raw, m15Raw, h1Raw, tickerRaw] = await Promise.all([
+    fetchJSON(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=5m&limit=150`),
+    fetchJSON(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=15m&limit=150`),
+    fetchJSON(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=1h&limit=80`),
+    fetchJSON(`${base}/api/v4/futures/usdt/tickers?contract=${contract}`),
   ]);
-  const [m5Raw, m15Raw, h1Raw, tickerRaw] = await Promise.all([m5Res.json(), m15Res.json(), h1Res.json(), tickerRes.json()]);
 
   const m5 = gateioCandlesFromKline(m5Raw);
   const m15 = gateioCandlesFromKline(m15Raw);
@@ -820,13 +824,12 @@ function mexcCandlesFromKline(raw){
 }
 async function mexcBuildFuturesSnapshot(symbol){
   const contract = toMexcContract(symbol);
-  const [m5Res, m15Res, h1Res, tickerRes] = await Promise.all([
-    fetch(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min5`),
-    fetch(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min15`),
-    fetch(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min60`),
-    fetch(`${MEXC_FAPI_BASE}/api/v1/contract/ticker?symbol=${contract}`),
+  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min5`),
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min15`),
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min60`),
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/ticker?symbol=${contract}`),
   ]);
-  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([m5Res.json(), m15Res.json(), h1Res.json(), tickerRes.json()]);
 
   const m5 = mexcCandlesFromKline(m5Data && m5Data.data);
   const m15 = mexcCandlesFromKline(m15Data && m15Data.data);
@@ -1184,8 +1187,11 @@ async function getGateioFuturesRealizedResult(mode, apiKey, secretKey, symbol, p
   if(!Array.isArray(rows) || rows.length === 0) return null;
   const relevant = rows.filter(r => ['pnl', 'fee', 'fund'].includes(r.type));
   if(relevant.length === 0) return null;
-  const closedPnl = relevant.reduce((a, r) => a + parseFloat(r.change || '0'), 0);
-  return { closedPnl, entries: relevant.length };
+  const grossPnl = relevant.filter(r => r.type === 'pnl').reduce((a, r) => a + parseFloat(r.change || '0'), 0);
+  const feesUsd = relevant.filter(r => r.type === 'fee').reduce((a, r) => a + parseFloat(r.change || '0'), 0); // negative
+  const fundingUsd = relevant.filter(r => r.type === 'fund').reduce((a, r) => a + parseFloat(r.change || '0'), 0);
+  const closedPnl = grossPnl + feesUsd + fundingUsd;
+  return { closedPnl, grossPnl, feesUsd, fundingUsd, entries: relevant.length };
 }
 
 // =============================================================
@@ -1335,7 +1341,10 @@ async function getMexcFuturesRealizedResult(mode, apiKey, secretKey, symbol, pas
   const list = Array.isArray(history) ? history : (history && history.resultList) || [];
   const row = list[0]; // most recent closed position for this contract
   if(!row) return null;
-  return { closedPnl: parseFloat(row.realised || '0'), entries: 1 };
+  const grossPnl = parseFloat(row.closeProfitLoss || '0');
+  const feesUsd = -Math.abs(parseFloat(row.fee || row.closeFee || row.openFee || '0')); // MEXC reports fee as a positive magnitude; normalize to a negative delta like the other exchanges
+  const closedPnl = parseFloat(row.realised != null ? row.realised : (grossPnl + feesUsd));
+  return { closedPnl, grossPnl, feesUsd, entries: 1 };
 }
 
 // =============================================================
@@ -1453,8 +1462,11 @@ async function getBitgetFuturesRealizedResult(mode, apiKey, secretKey, symbol, p
   if(bills.length === 0) return null;
   const relevant = bills.filter(b => ['open_long', 'close_long', 'open_short', 'close_short', 'contract_settle_fee'].includes(b.businessType));
   if(relevant.length === 0) return null;
-  const closedPnl = relevant.reduce((a, b) => a + (parseFloat(b.amount || '0') + parseFloat(b.fee || '0')), 0);
-  return { closedPnl, entries: relevant.length };
+  const grossPnl = relevant.filter(b => ['open_long', 'close_long', 'open_short', 'close_short'].includes(b.businessType)).reduce((a, b) => a + parseFloat(b.amount || '0'), 0);
+  const feesUsd = relevant.reduce((a, b) => a + parseFloat(b.fee || '0'), 0); // Bitget reports a fee alongside every bill entry, regardless of businessType
+  const fundingUsd = relevant.filter(b => b.businessType === 'contract_settle_fee').reduce((a, b) => a + parseFloat(b.amount || '0'), 0);
+  const closedPnl = grossPnl + feesUsd + fundingUsd;
+  return { closedPnl, grossPnl, feesUsd, fundingUsd, entries: relevant.length };
 }
 
 // ---- Bitget Futures real market data. Klines use the same "candles"
@@ -1467,13 +1479,12 @@ function bitgetFuturesCandlesFromKline(raw){
 }
 async function bitgetBuildFuturesSnapshot(symbol){
   const base = BITGET_BASE;
-  const [m5Res, m15Res, h1Res, tickerRes] = await Promise.all([
-    fetch(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=5m&limit=150`),
-    fetch(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=15m&limit=150`),
-    fetch(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=1H&limit=80`),
-    fetch(`${base}/api/v2/mix/market/ticker?symbol=${symbol}&productType=USDT-FUTURES`),
+  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([
+    fetchJSON(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=5m&limit=150`),
+    fetchJSON(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=15m&limit=150`),
+    fetchJSON(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=1H&limit=80`),
+    fetchJSON(`${base}/api/v2/mix/market/ticker?symbol=${symbol}&productType=USDT-FUTURES`),
   ]);
-  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([m5Res.json(), m15Res.json(), h1Res.json(), tickerRes.json()]);
 
   const m5 = bitgetFuturesCandlesFromKline(m5Data && m5Data.data);
   const m15 = bitgetFuturesCandlesFromKline(m15Data && m15Data.data);
@@ -1655,8 +1666,11 @@ async function getBinanceFuturesRealizedResult(mode, apiKey, secretKey, symbol, 
   if(!Array.isArray(income) || income.length === 0) return null;
   const relevant = income.filter(e => ['REALIZED_PNL', 'COMMISSION', 'FUNDING_FEE'].includes(e.incomeType));
   if(relevant.length === 0) return null;
-  const closedPnl = relevant.reduce((a, e) => a + parseFloat(e.income), 0);
-  return { closedPnl, entries: relevant.length };
+  const grossPnl = relevant.filter(e => e.incomeType === 'REALIZED_PNL').reduce((a, e) => a + parseFloat(e.income), 0);
+  const feesUsd = relevant.filter(e => e.incomeType === 'COMMISSION').reduce((a, e) => a + parseFloat(e.income), 0); // negative
+  const fundingUsd = relevant.filter(e => e.incomeType === 'FUNDING_FEE').reduce((a, e) => a + parseFloat(e.income), 0);
+  const closedPnl = grossPnl + feesUsd + fundingUsd;
+  return { closedPnl, grossPnl, feesUsd, fundingUsd, entries: relevant.length };
 }
 
 
@@ -1785,7 +1799,7 @@ app.post('/api/futures/order', async (req, res) => {
 });
 
 app.post('/api/futures/position', async (req, res) => {
-  const { exchange, mode, apiKey, secretKey, symbol, passphrase, openedAtMs } = req.body || {};
+  const { exchange, mode, apiKey, secretKey, symbol, passphrase, openedAtMs, balanceBeforeUsd } = req.body || {};
   if(!exchange || !apiKey || !secretKey || !symbol){
     return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, and symbol are all required.' });
   }
@@ -1805,7 +1819,7 @@ app.post('/api/futures/position', async (req, res) => {
     }
     // Not open anymore — pull the realized result, if we can, so the
     // caller can record what actually happened rather than just "it's gone".
-    const closed = closedPnlGetter ? await closedPnlGetter(netMode, apiKey, secretKey, symbol, passphrase, openedAtMs).catch(() => null) : null;
+    const closed = closedPnlGetter ? await closedPnlGetter(netMode, apiKey, secretKey, symbol, passphrase, openedAtMs, balanceBeforeUsd).catch(() => null) : null;
     return res.json({ ok:true, open: false, closed });
   }catch(err){
     if(err instanceof VerifyRejected){
@@ -1835,8 +1849,30 @@ async function fetchJSON(url, timeoutMs = 10_000){
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try{
     const res = await fetch(url, { signal: ctrl.signal });
-    if(!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.json();
+    const bodyText = await res.text();
+    if(!res.ok){
+      // Surfacing the real status + body is what makes a *recurring*
+      // "could not fetch market data" error diagnosable instead of a
+      // mystery. In particular: HTTP 451 means the exchange is geo-
+      // blocking this server's own IP (Binance in particular is known
+      // to aggressively block certain regions even for public,
+      // unauthenticated market data — not just trading); HTTP 429/418
+      // means rate-limited or IP-banned; anything else is exchange-
+      // specific. Previously this only said "HTTP <code>", which looks
+      // identical whether the cause is a geo-block, a rate limit, or
+      // something else entirely — not useful for someone trying to
+      // figure out why it keeps happening.
+      let detail = bodyText.slice(0, 200);
+      try{ const j = JSON.parse(bodyText); detail = j.msg || j.message || j.error || detail; }catch(e){ /* body wasn't JSON — keep the raw text above */ }
+      const hint = res.status === 451 ? ' (this usually means the exchange is geo-blocking this server\'s IP)'
+        : (res.status === 429 || res.status === 418) ? ' (rate limited)' : '';
+      throw new Error(`HTTP ${res.status}${hint} — ${detail}`);
+    }
+    try{
+      return JSON.parse(bodyText);
+    }catch(e){
+      throw new Error(`Non-JSON response: ${bodyText.slice(0, 200)}`);
+    }
   } finally {
     clearTimeout(timer);
   }

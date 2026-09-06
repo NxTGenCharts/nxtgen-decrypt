@@ -389,7 +389,7 @@
   <div class="panel" id="panelFutures">
 
     <div class="warn-banner">
-      <b>PAPER MODE only, synthetic market data.</b> This engine is Phase 1 of the build: the scoring/regime/setup/risk/no-trade logic is real and runs every cycle, but the price data driving it is currently a seeded random-walk generator across a 35-symbol watchlist (see <code>js/futures/mockMarket.js</code>), not live Binance/Bybit futures feeds — that's Phase 2. Nothing here places, or is capable of placing, a real order; there is no LIVE MODE in this build. Whatever win rate / expectancy you see below is whatever the synthetic price path actually produced against these rules — it is not tuned to look good. The active strategy, AI Scalp, trades a genuine 1:1 stop:target; it backtested at a 65-76% win rate on this synthetic feed by trading WITH the mock market's built-in short-term momentum rather than against it — a real, measured result on THIS feed, not a guarantee, and not necessarily representative of how it would perform once Phase 2 swaps in real market data.
+      <b>PAPER MODE only, synthetic market data.</b> This engine is Phase 1 of the build: the scoring/regime/setup/risk/no-trade logic is real and runs every cycle, but the price data driving it is currently a seeded random-walk generator across a 35-symbol watchlist (see <code>js/futures/mockMarket.js</code>), not live Binance/Bybit futures feeds — that's Phase 2. Nothing here places, or is capable of placing, a real order; there is no LIVE MODE in this build. Whatever win rate / expectancy you see below is whatever the synthetic price path actually produced against these rules — it is not tuned to look good. The active strategy, AI Scalp, trades a genuine 1:1 stop:target by trading WITH the mock market's built-in short-term momentum rather than against it. <b>An earlier version of this notice quoted a specific win-rate range (69-73%, later 65-76%) as a settled result — that was wrong, not just optimistic: the synthetic generator turned out to use a fixed seed, so every "independent backtest run" used to produce those numbers was replaying the same one price sequence, not sampling different scenarios.</b> Fixed now — genuinely independent runs against the corrected generator show results ranging from clearly losing to clearly profitable, averaging close to breakeven. See "deterministic seed bug" in README-SCALP.md for the full account, including why this also helps explain a large gap reported between Paper backtest and real Live/Demo results.
     </div>
 
     <div class="ov-head">
@@ -518,17 +518,24 @@
         </div>
       </div>
 
-      <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);margin-top:16px;">
+      <div class="ov-grid" style="grid-template-columns:repeat(3, 1fr);margin-top:16px;">
         <div class="ov-card ov-highlight"><span class="ov-label">Real Balance (USDT)</span><span class="ov-value" id="fuLiveBalance">—</span></div>
         <div class="ov-card"><span class="ov-label">Open Position</span><span class="ov-value" id="fuLiveOpenPosition" style="font-size:14px;">None</span></div>
         <div class="ov-card"><span class="ov-label">Trades (session)</span><span class="ov-value" id="fuLiveTrades">0</span></div>
+      </div>
+      <div class="ov-grid" style="grid-template-columns:repeat(3, 1fr);margin-top:10px;">
+        <div class="ov-card"><span class="ov-label">Gross P&amp;L</span><span class="ov-value" id="fuLiveGrossPnl">$0.00</span></div>
+        <div class="ov-card"><span class="ov-label">Fees</span><span class="ov-value" id="fuLiveFees">-$0.00</span></div>
         <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value" id="fuLiveNetPnl">$0.00</span></div>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-top:6px;">
+        Gross/Fees aren't available from every exchange the same way — Bybit's API doesn't expose a fee breakdown for closed futures positions (Live or Demo), so its trades show Net only, with Gross/Fees left blank rather than guessed. Binance, Gate.io, MEXC, and Bitget all report a real breakdown.
       </div>
 
       <div class="ov-block" style="margin-top:14px;">
         <div class="ov-block-title" style="font-size:13px;">Live/Demo Trade History</div>
-        <div class="fu-hrow fu-head" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr 1.4fr;">
-          <div>Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Net</div><div>Order ID</div>
+        <div class="fu-hrow fu-head" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr 1.4fr;">
+          <div>Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Order ID</div>
         </div>
         <div id="fuLiveHistoryRows"><div class="fu-empty">No live/demo trades yet this session.</div></div>
       </div>

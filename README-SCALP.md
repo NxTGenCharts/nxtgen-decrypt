@@ -121,11 +121,11 @@ The fix was to flip the detector to trade **with** that momentum instead
 — M5 EMA9 sloping in the trade direction, price confirming on the
 momentum side of it, a push candle, RSI in a continuation (not yet
 exhausted) zone, and a volume expansion behind the move. Same 1:1
-construction, opposite thesis. That backtested at:
+construction, opposite thesis. That backtested at (numbers superseded — see "Update: a much bigger bug" further down):
 
-- **Win rate: 65-76%** across two independent runs (135 and 196 closed trades)
-- **Avg time-to-resolve: ~14 minutes** (target band was 8-16 min)
-- **Profit factor: 1.2-1.5**, net of fees/spread/slippage/funding
+- Win rate ~69-73% across two runs (135 and 196 closed trades)
+- Avg time-to-resolve: ~14 minutes (target band was 8-16 min)
+- Profit factor: 1.2-1.5, net of fees/spread/slippage/funding
 
 This is a real, measured property of trading with THIS synthetic feed's
 built-in momentum — not a hardcoded number, not a re-skewed stop/target
@@ -181,9 +181,9 @@ notional at 90% of `equity x leverage` — the dollar amount actually put
 at risk on a very-tight-stop trade now legitimately comes in under the
 nominal 1% target (that's what a real leveraged account does too, not a
 bug to hide), and fees now scale off a position size that could actually
-be opened. Re-running the backtest after both fixes: still 65-76% win
-rate, profit factor improved slightly to ~1.5-1.7 (fees now a smaller,
-realistic drag rather than an inflated one).
+be opened. This backtest was measured before the deterministic-seed bug
+below was found and fixed, so the specific numbers here are superseded —
+see "Update: a much bigger bug" further down for the corrected picture.
 
 ## Update: Live/Demo trading, Bybit only (first exchange)
 
@@ -456,3 +456,137 @@ full Live+Demo, MEXC Live-only). Same standing caveat as every exchange
 before it: none of this has been tested against a real account from
 this codebase's own testing — that's not something an AI assistant can
 do for you.
+
+## Update: a much bigger bug — the mock market's seed was never random
+
+While investigating a report of a ~30% real-money win rate on Binance
+Demo (dramatically worse than this file's own quoted 65-76%), a much
+more fundamental problem turned up: `mockMarket.js` seeded its random
+walk with a **fixed constant** (`1337 + i*97` per symbol) — not derived
+from the time, not derived from anything session-specific. Every random
+draw in the price generator, including ongoing ticks during a live
+session (not just the initial seed history), pulled from that same
+seeded PRNG.
+
+The practical effect: **every "backtest run" ever cited in this file, in
+this codebase's code comments, and in the app's own Paper-mode banner
+was replaying prefixes of the exact same one price sequence** — not
+independent samples of different market scenarios. A fresh `node
+run.mjs` process, or a fresh page load, always generated identical
+prices. Apparent "variation" between runs earlier in this project's
+history came entirely from *how many ticks* a wall-clock time budget
+happened to consume before cutting off — different-length windows into
+one deterministic path — not from genuine re-randomization. This is a
+weaker form of evidence than "backtested across many independent runs"
+ever implied, and every specific number quoted (69-73%, then 65-76%
+after later fixes, 1.2-1.7 profit factor) inherited that weakness
+without anyone — including the several prior passes through this exact
+file — noticing.
+
+**Fixed**: `MockMarket`'s constructor now seeds from `Date.now()` at
+module load instead of a fixed constant, so every fresh session
+generates a genuinely different synthetic history. Re-running the
+(now actually independent) backtest six times:
+
+| Run | Win rate | Profit factor |
+|-----|----------|----------------|
+| 1 | 62.0% | 0.82 |
+| 2 | 59.0% | 0.79 |
+| 3 | 72.0% | 1.36 |
+| 4 | 59.5% | 0.79 |
+| 5 | 61.0% | 0.86 |
+| 6 | 70.0% | 1.28 |
+
+Averaging roughly breakeven with real spread between clearly-losing and
+clearly-profitable runs — nowhere near the confident 65-76% previously
+documented. This doesn't retroactively fix anything that was already
+measured under the bug, and it doesn't explain the full gap to a real
+30% win rate on real data — but it does mean the synthetic baseline
+itself was never as strong as this file claimed, which makes that gap
+somewhat less alarming (though not okay) than it first looked.
+
+**A strategy change was attempted and reverted, on the record:** given
+the real-world report, a tightening of the detector was tried — RSI and
+volume confirmation promoted from confidence bonuses to hard
+requirements, blocking weak (not just strong) opposing-trend regimes,
+and a stricter momentum-slope floor. All individually defensible on
+standard multi-timeframe-confluence theory. Tested against the
+(then-still-buggy-seed) synthetic feed across three runs, it turned
+profit factor from ~1.5 into ~0.80-0.86 — a losing strategy — every
+time. Shipping a change with no evidence it helps and clear evidence it
+hurts the only thing measurable would have been worse than not shipping
+it, so it was reverted rather than kept on the theory that it was
+"probably right anyway."
+
+**What was actually added instead**, since a real strategy fix can't be
+responsibly claimed without real historical data to validate against
+(which this app has no infrastructure to fetch/store — see "What's
+next" in the app's footer):
+
+- **Adaptive confidence**: every consecutive REAL Live/Demo loss raises
+  the confidence bar the next signal has to clear (+8 per loss, capped
+  at +25), on top of whatever Min Confidence is set to. A win resets it
+  to zero. This is a plain rolling counter and two numbers, fully
+  visible in `js/futures-ui.js` — not a trained model, and not described
+  as one — but it is a genuine, inspectable way for live trading to get
+  pickier in response to what's actually happening on the account, which
+  is what "learn from the losers" can honestly mean without a real
+  backtesting pipeline behind it.
+- **Circuit breaker**: 4 consecutive real losses on the same
+  exchange/network auto-pauses Live/Demo trading, force-disarms it (not
+  just stops the loop — the typed arm-phrase has to be re-entered), and
+  says plainly why. This exists specifically because Paper mode's
+  backtest — even the corrected version — is not evidence about how a
+  session will go on real money; a losing streak should stop and get
+  reviewed, not run until the user notices.
+
+## Update: fee/gross P&L transparency, and a second real accounting bug (Bybit Demo)
+
+Live/Demo trading's stat tiles used to show Net P&L only — no Gross or
+Fees, unlike Paper mode's own dashboard, which has always broken those
+out. Binance, Gate.io, MEXC, and Bitget's closed-PnL getters already had
+the raw components on hand (they were just being summed blind); each
+now returns `{closedPnl, grossPnl, feesUsd}` (Binance/Bitget also
+`fundingUsd`) instead of one opaque number, surfaced as two new stat
+tiles and two new trade-history columns.
+
+**Bybit is the exception, and for a real reason, not an oversight**:
+`/v5/position/closed-pnl` — the endpoint the original implementation
+used — **does not work on Bybit Demo accounts at all**, rejecting with
+`ErrCode 10032, "Demo trading are not supported"` (confirmed from
+Bybit's own SDK issue trackers). The position-check route's own
+`.catch(() => null)` was silently swallowing that rejection, which means
+**every closed Bybit Demo trade has likely been recording $0 P&L**
+regardless of what actually happened on the account — a real accounting
+bug, not just a missing feature. Fixed the same way the earlier
+spot-Autotrade P&L bug was fixed: measure the actual account balance
+before opening and after closing (`balanceBeforeUsd`, captured by the
+client and threaded through to the position-check call) instead of
+trusting an endpoint that doesn't work in one of the two modes it's used
+for. Bybit's Gross/Fees now show as unavailable ("—") rather than
+guessed, since that balance-delta approach only yields one net number,
+not a breakdown — which is the honest tradeoff for fixing something that
+was previously silently wrong 100% of the time.
+
+## Update: diagnosable market-data fetch failures (all five exchanges)
+
+Every one of the five `*BuildFuturesSnapshot` functions called `fetch()`
+directly and never checked `res.ok` — if an exchange returned a 429
+(rate limited), 451 (geo-blocked), 418 (IP banned), or any other non-2xx
+status, the error BODY got parsed as if it were valid kline/ticker data,
+producing a generic downstream "not enough kline history" error that
+gave no indication of the real cause. Reported specifically as a
+recurring Binance failure ("could not fetch real BTC market data").
+
+Fixed by routing all five through one shared `fetchJSON` helper that
+checks `res.ok`, includes a 10s timeout (none of the five had one
+before, so a hung connection could previously stall a whole cycle
+indefinitely), and — the actually useful part — surfaces the real HTTP
+status and response body in the thrown error, with an explicit hint for
+451 ("this usually means the exchange is geo-blocking this server's
+IP") and 429/418 ("rate limited"). Binance in particular is known to
+aggressively geo-block certain regions even for public, unauthenticated
+market data, not just trading — if this keeps happening, the new error
+message will say so plainly instead of leaving it a mystery, and the fix
+at that point is deploying the server to a different region, not
+anything in this codebase.
