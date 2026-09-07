@@ -51,44 +51,38 @@ function buildLevels(snap, direction, setupType){
   const atrPct = (atrM15 / entry) * 100;
 
   if(setupType === 'AI Scalp'){
-    // Genuine 1:1 stop:target (see setups.js for why this strategy
-    // specifically doesn't carry Range Scalp's skew). Distance is
-    // ATR-scaled so it self-adjusts to each symbol's/moment's own
-    // volatility instead of a fixed %, which is what keeps the average
-    // time-to-resolve landing in roughly the same band across very
-    // different symbols. The 1.05x multiplier and 0.15-0.42% clamp were
-    // tuned empirically (not guessed) against this mock market: looser
-    // clamps resolve slower but clear costs more comfortably; tighter
-    // ones resolve faster but shrink the gross target enough that
-    // round-trip costs start dominating it (profit factor dropped under
-    // 1 in testing at a 0.10-0.35% clamp). This setting landed on ~14
-    // min average time-to-resolve with profit factor comfortably above 1.
+    // Stop distance is ATR-scaled so it self-adjusts to each symbol's/
+    // moment's own volatility instead of a fixed %, which is what keeps
+    // the average time-to-resolve landing in roughly the same band
+    // across very different symbols. The 1.05x multiplier and 0.15-0.42%
+    // clamp were tuned empirically against this mock market.
+    // Target is set from the stop distance via the configured
+    // reward:risk ratio (applyRewardRiskFloor below), NOT a fixed 1:1 —
+    // seeded at 1:1 here as a floor that ratio will always raise to.
     const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
     const atrPct5 = (atrM5 / entry) * 100;
     const distPct = clamp(atrPct5 * 1.05, 0.15, 0.42);
     const stopPrice = direction === 'LONG' ? entry * (1 - distPct / 100) : entry * (1 + distPct / 100);
     const sign = direction === 'LONG' ? 1 : -1;
     const tp1 = entry * (1 + sign * distPct / 100);
-    // Single-exit at the one 1:1 target — no partial-scale levels for a strategy this fast.
+    // Single-exit — no partial-scale levels for a strategy this fast.
     return { entry, stopPrice, stopDistancePct: distPct, tp1, tp2: tp1, tp3: tp1, tp1Pct: distPct, tp2Pct: distPct, tp3Pct: distPct, atrPct: atrPct5 };
   }
 
   if(setupType === 'Range Scalp'){
-    // Deliberately asymmetric: a tight target close to the mean it's
-    // fading back to, and a stop wide enough to sit outside normal
-    // noise. This is what produces a high hit-rate — see README-SCALP.md
-    // for the math on why the stop has to be this much wider, and what
-    // that implies about the rare loss when it happens.
-    // NOTE: a 5.5:1 stop:target skew (theoretical ~85% hit rate) was tried
-    // first here and pulled from this build — the target came out smaller
-    // than round-trip costs (fees+spread+slippage), so it was a guaranteed
-    // net loser on every single win. This ~2.2:1 skew (theoretical ~69%
-    // hit rate) is the tightest skew that still clears costs with room to
-    // spare. See README-SCALP.md for the numbers.
+    // Stop sits outside normal noise (wide enough that the mean-reversion
+    // thesis is genuinely invalidated, not just noise) — same ATR-scaled
+    // stop distance as before. The target is NO LONGER a tight skewed
+    // fraction of the stop (that shape needs a very high win rate just to
+    // break even, and in live use didn't reliably reach it — small wins,
+    // occasional large losses, net negative even near a 50% hit rate).
+    // Target is now derived from the stop distance via the configured
+    // reward:risk ratio (applyRewardRiskFloor below), same as every other
+    // setup, seeded at a small placeholder here that the floor will raise.
     const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
     const atrPct5 = (atrM5 / entry) * 100;
     const stopDistancePct = clamp(atrPct5 * 1.8, 0.35, 1.0);
-    const tp1Pct = clamp(stopDistancePct / 2.2, 0.16, 0.5);
+    const tp1Pct = clamp(stopDistancePct / 2.2, 0.16, 0.5); // placeholder — applyRewardRiskFloor raises this to stopDistancePct * riskRewardRatio
     const stopPrice = direction === 'LONG' ? entry * (1 - stopDistancePct / 100) : entry * (1 + stopDistancePct / 100);
     const sign = direction === 'LONG' ? 1 : -1;
     const tp1 = entry * (1 + sign * tp1Pct / 100);
@@ -118,6 +112,32 @@ function buildLevels(snap, direction, setupType){
   const tp3 = entry * (1 + sign * tp3Pct / 100);
 
   return { entry, stopPrice, stopDistancePct, tp1, tp2, tp3, tp1Pct, tp2Pct, tp3Pct, atrPct };
+}
+
+// Guarantees every trade's actual reward:risk meets the configured
+// minimum, regardless of which setup produced it — this is what makes
+// the "Min risk/reward" field a real, enforced target rather than just a
+// filter that quietly lets underpowered setups (Range Scalp/AI Scalp
+// previously) through with their own much smaller built-in floors. If
+// the setup's own structure/ATR-based target already clears the ratio,
+// it's left alone (a bigger natural target is never scaled down); if
+// not, tp1/tp2/tp3 are scaled up together (preserving their relative
+// spacing) so tp1 lands at exactly stopDistancePct * riskRewardRatio —
+// e.g. a 1% stop with the 1.2 default targets 1.2%, so a $10 loss is
+// matched by a $12 win.
+function applyRewardRiskFloor(levels, direction, riskRewardRatio){
+  if(!(levels.stopDistancePct > 0) || !(levels.tp1Pct > 0)) return levels;
+  const targetPct = levels.stopDistancePct * riskRewardRatio;
+  if(levels.tp1Pct >= targetPct) return levels;
+  const scale = targetPct / levels.tp1Pct;
+  const sign = direction === 'LONG' ? 1 : -1;
+  const tp1Pct = levels.tp1Pct * scale, tp2Pct = levels.tp2Pct * scale, tp3Pct = levels.tp3Pct * scale;
+  return {
+    ...levels, tp1Pct, tp2Pct, tp3Pct,
+    tp1: levels.entry * (1 + sign * tp1Pct / 100),
+    tp2: levels.entry * (1 + sign * tp2Pct / 100),
+    tp3: levels.entry * (1 + sign * tp3Pct / 100),
+  };
 }
 
 // Produces one row per symbol: APPROVED opportunities plus REJECTED
@@ -161,7 +181,16 @@ export function runScanCycle(cfg, dayState, opts){
     let confidence = weightedScore(factorScores, weights);
     confidence = Math.round((confidence + ensemble.ensembleConfidence) / 2);
 
-    const levels = buildLevels(snap, direction, primary.type);
+    // The reward:risk ratio is fully configurable (default 1.2 — see
+    // RISK_DEFAULTS.riskRewardRatio, and the "Min risk/reward" field)
+    // and applies uniformly to every setup: it's now both the minimum
+    // gate AND the actual target construction, so a trade can no longer
+    // be approved with a smaller built-in target than this ratio calls
+    // for. High Selectivity Mode raises the bar further to 1.5, same as
+    // it already tightens confidence.
+    const targetRiskReward = cfg.highSelectivity ? Math.max(1.5, cfg.minRiskReward || RISK_DEFAULTS.riskRewardRatio)
+      : (cfg.minRiskReward ?? RISK_DEFAULTS.riskRewardRatio);
+    const levels = applyRewardRiskFloor(buildLevels(snap, direction, primary.type), direction, targetRiskReward);
     const volExp = volumeExpansion(snap.m5, 10);
     const execution = decideExecution({ setupType: primary.type, volExpansionRatio: volExp });
     const holdMinutes = primary.type === 'AI Scalp' ? 12 : primary.type === 'Range Scalp' ? 20 : 90; // scalp strategies are meant to resolve fast; used for funding-cost estimation
@@ -183,22 +212,24 @@ export function runScanCycle(cfg, dayState, opts){
     const isAltcoin = symbol !== 'BTCUSDT';
 
     const minConfidence = cfg.highSelectivity ? 82 : (cfg.minConfidence ?? 60);
-    // Range Scalp is intentionally a high-win-rate / low-R:R strategy
-    // (small target, wider stop) — the R:R filter that makes sense for
-    // the old trend/breakout setups would reject every scalp signal by
-    // design, so it gets its own, much lower floor. AI Scalp is a
-    // genuine 1:1, so its floor sits just under 1.0 (allowing for ATR
-    // rounding) rather than inheriting either extreme. Net-profit-after-
-    // costs (below) stays the same purpose for every setup — that's the
-    // filter that actually protects you here, not R:R.
-    const minRR = primary.type === 'AI Scalp' ? (cfg.aiScalpMinRiskReward ?? 0.9)
-      : primary.type === 'Range Scalp' ? (cfg.scalpMinRiskReward ?? 0.35)
-      : (cfg.highSelectivity ? 1.5 : (cfg.minRiskReward ?? 1.2));
-    // Same reasoning as minRR: both scalp strategies' gross targets are
-    // deliberately small, so the default 0.30% net-profit floor (sized
-    // for the old bigger-target setups) would reject nearly every scalp
-    // signal even when it clears costs. Each still has to clear costs,
-    // just not by as much.
+    // Every setup is now held to the SAME reward:risk floor — the one
+    // just used to actually build the target above — instead of Range
+    // Scalp/AI Scalp getting their own much lower floors (0.35 / 0.9).
+    // That old split is what let both scalp setups through with a
+    // built-in target smaller than their stop, which needs a very high
+    // win rate just to break even and in live use wasn't reliably
+    // hitting one (small wins, occasional large losses, net negative
+    // even near a 50% hit rate). Since applyRewardRiskFloor already
+    // guarantees every trade's actual ratio meets targetRiskReward, this
+    // check should effectively never fire — it's a safety net, not the
+    // primary mechanism, anymore.
+    const minRR = targetRiskReward;
+    // This floor is unrelated to R:R — it's still true that both scalp
+    // strategies' gross targets are comparatively small in absolute %
+    // terms, so the default 0.30% net-profit floor (sized for the
+    // bigger trend/breakout targets) would reject nearly every scalp
+    // signal even when it clears round-trip costs. Each still has to
+    // clear costs, just not by as much.
     const minNetProfit = primary.type === 'AI Scalp' ? (cfg.aiScalpMinNetProfitPct ?? 0.03)
       : primary.type === 'Range Scalp' ? (cfg.scalpMinNetProfitPct ?? 0.04)
       : (cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT);

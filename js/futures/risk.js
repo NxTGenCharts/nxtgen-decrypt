@@ -5,16 +5,30 @@
 // =============================================================
 
 export const RISK_DEFAULTS = {
-  riskPctPerTrade: 1.0,        // default risk per trade, as a % of simulation equity
+  riskPctPerTrade: 1.0,        // default risk per trade, as a % of equity — STRICT: this is the max $ lost on
+                                // a losing trade (position size is derived backwards from this + the stop
+                                // distance, never a fixed dollar amount), adjustable via the "Risk per trade
+                                // (%)" field up to maxRiskPctPerTrade below.
   maxRiskPctPerTrade: 2.0,
   maxSimultaneousPositions: 3,
   maxPortfolioRiskPct: 3.0,    // scales with riskPctPerTrade so 3 positions at the default 1% still fit
-  defaultLeverage: 2,
-  maxLeverage: 3,
+  defaultLeverage: 5,
+  maxLeverage: 10,
   maintenanceMarginRate: 0.5,  // % — rough cross-margin estimate for liquidation distance
   maxDailyLossPct: 2.0,
   maxConsecutiveLosses: 3,
   coolingOffMinutes: 60,
+  // Every trade is now constructed so its take-profit sits at least this
+  // multiple of its stop-loss distance away (see engine.js's
+  // enforceRewardRiskFloor) — a 1% loss targets a 1.2% (=1% x 1.2) gain.
+  // At this ratio the strategy is profitable at any win rate above
+  // ~45.5% (1/(1+1.2)), instead of needing a high win rate to offset
+  // small wins against large losses. Adjustable via the "Min risk/reward"
+  // field, which now drives BOTH the approval floor and the actual
+  // target construction for every setup — previously the scalp setups
+  // built deliberately small targets against wide stops and only the
+  // trend/breakout setup honored this field at all.
+  riskRewardRatio: 1.2,
 };
 
 // Position size from account equity + stop distance — NOT a fixed dollar amount.

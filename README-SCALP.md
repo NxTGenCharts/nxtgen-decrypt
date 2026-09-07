@@ -1,5 +1,21 @@
 # What changed, and why the numbers are what they are
 
+## UPDATE — the skewed stop:target shape below was replaced
+Everything in this file up to this point (the 2.2:1 Range Scalp skew,
+the "genuine 1:1" AI Scalp target) reflects the design as it stood
+before live trading exposed the problem with it: at a real ~50-55% win
+rate, small wins against occasionally-large losses came out net
+negative even though the theoretical hit-rate math below looked fine on
+paper. `js/futures/engine.js` now builds every setup's target from its
+stop distance via a single configurable reward:risk ratio
+(`RISK_DEFAULTS.riskRewardRatio`, default 1.2, same field as the "Min
+risk/reward" UI control — see `applyRewardRiskFloor()`), instead of the
+per-setup skews described below. A 1% stop now targets 1.2%, for every
+setup, so the strategy is profitable at any win rate above ~45.5%
+instead of needing 69-85% to break even. The reasoning below is kept as
+a record of what was tried and why it didn't hold up live, not as a
+description of the current behavior.
+
 ## 1. Why the strategy kept changing
 The old `detectAllSetups()` ran **four independent detectors** every cycle
 (Trend Continuation, Breakout + Retest, Range Reversal, Liquidity Sweep

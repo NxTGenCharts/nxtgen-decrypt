@@ -411,7 +411,7 @@
         <input id="fuMinConfidence" type="number" min="0" max="100" step="1" value="60">
       </div>
       <div class="field">
-        <label for="fuMinRR">Min risk/reward</label>
+        <label for="fuMinRR" title="Both the minimum approved ratio AND the actual target every trade is built to: a stop of $10 targets $10 x this value. 1.2 stays profitable at any win rate above ~45.5%.">Reward:Risk (target &amp; minimum)</label>
         <input id="fuMinRR" type="number" min="0.5" max="5" step="0.1" value="1.2">
       </div>
       <div class="field">
@@ -419,12 +419,12 @@
         <input id="fuMinNetProfit" type="number" min="0" max="3" step="0.05" value="0.30">
       </div>
       <div class="field">
-        <label for="fuRiskPct">Risk per trade (%)</label>
+        <label for="fuRiskPct" title="Max % of equity lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount.">Risk per trade (%)</label>
         <input id="fuRiskPct" type="number" min="0.1" max="2" step="0.05" value="1">
       </div>
       <div class="field">
         <label for="fuLeverage">Leverage</label>
-        <input id="fuLeverage" type="number" min="1" max="3" step="1" value="2">
+        <input id="fuLeverage" type="number" min="1" max="10" step="1" value="5">
       </div>
       <div class="field">
         <label for="fuSelectivityToggle" title="Minimum confidence 82, minimum R:R 1.5, and every other filter tightened. May take zero trades for long stretches — that's by design.">High Selectivity Mode</label>
@@ -518,10 +518,11 @@
         </div>
       </div>
 
-      <div class="ov-grid" style="grid-template-columns:repeat(3, 1fr);margin-top:16px;">
+      <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);margin-top:16px;">
         <div class="ov-card ov-highlight"><span class="ov-label">Real Balance (USDT)</span><span class="ov-value" id="fuLiveBalance">—</span></div>
         <div class="ov-card"><span class="ov-label">Open Position</span><span class="ov-value" id="fuLiveOpenPosition" style="font-size:14px;">None</span></div>
         <div class="ov-card"><span class="ov-label">Trades (session)</span><span class="ov-value" id="fuLiveTrades">0</span></div>
+        <div class="ov-card ov-highlight"><span class="ov-label">Win Rate</span><span class="ov-value" id="fuLiveWinRate">—</span></div>
       </div>
       <div class="ov-grid" style="grid-template-columns:repeat(3, 1fr);margin-top:10px;">
         <div class="ov-card"><span class="ov-label">Gross P&amp;L</span><span class="ov-value" id="fuLiveGrossPnl">$0.00</span></div>
@@ -529,8 +530,9 @@
         <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value" id="fuLiveNetPnl">$0.00</span></div>
       </div>
       <div style="font-size:11px;color:var(--dim);margin-top:6px;">
-        Gross/Fees aren't available from every exchange the same way — Bybit's API doesn't expose a fee breakdown for closed futures positions (Live or Demo), so its trades show Net only, with Gross/Fees left blank rather than guessed. Binance, Gate.io, MEXC, and Bitget all report a real breakdown.
+        Gross/Fees are now read from every exchange's own real trade/execution history, Bybit included (via its execution list endpoint, which works in both Live and Demo) — if a figure ever can't be confirmed from the exchange for a specific trade, it's left blank rather than guessed.
       </div>
+
 
       <div class="ov-block" style="margin-top:14px;">
         <div class="ov-block-title" style="font-size:13px;">Live/Demo Trade History</div>

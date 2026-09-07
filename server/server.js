@@ -50,6 +50,38 @@ function hmacSha256Base64(secret, message){
 
 class VerifyRejected extends Error {}
 
+// =============================================================
+// Binance IP ban/rate-limit cooldown tracker.
+//
+// Binance's 418 response for a hard IP ban embeds the exact epoch-ms
+// timestamp the ban lifts ("...banned until 1788811138276...") — every
+// retry sent before that time does nothing but risk extending the ban
+// further, and Binance's own error message explicitly asks callers to
+// back off. Previously this app had no memory of a ban between cycles:
+// every single 8-second Live/Demo cycle (balance check, market-data
+// snapshot, or both) would just try again, unconditionally, for as long
+// as the user left the engine running — actively working against the
+// exact backoff Binance's own error text was asking for, and plausibly
+// why the ban kept recurring ("most times unable to scan").
+// This is IP-wide, not per-account, so it applies equally to the public
+// market-data calls (binanceBuildFuturesSnapshot) and the signed account
+// calls (binanceFuturesSignedRequest/verifyBinance) — one shared cooldown
+// per network (live vs demo hit different hosts, so they're tracked
+// separately) rather than one per call site.
+const BINANCE_BAN_UNTIL_MS = { live: 0, demo: 0 };
+
+function checkBinanceBan(mode){
+  const until = BINANCE_BAN_UNTIL_MS[mode] || 0;
+  if(Date.now() < until){
+    throw new VerifyRejected(`Binance rate-limited/banned this server's IP until ${new Date(until).toLocaleTimeString()} — no further requests are being sent until then so as not to extend it. This is a temporary, time-based lock from Binance's side, not something retrying sooner will clear.`);
+  }
+}
+function recordBinanceBanIfPresent(mode, message){
+  const m = /banned until (\d+)/i.exec(String(message || ''));
+  if(m) BINANCE_BAN_UNTIL_MS[mode] = Math.max(BINANCE_BAN_UNTIL_MS[mode] || 0, parseInt(m[1], 10));
+}
+
+
 // Base URLs per network. "demo" is each exchange's own separate sandbox
 // environment (its own keys, created from that exchange's own Demo/Testnet
 // UI) — never the same account as Live. See each exchange's docs:
@@ -640,29 +672,41 @@ async function getBybitPosition(mode, apiKey, secretKey, symbol){
 }
 
 // Once getBybitPosition reports a symbol closed, this pulls the actual
-// realized result for it — the definitive P&L figure (Bybit's own
-// closedPnl, which already nets out entry+exit fees) rather than
-// something reconstructed from separate fill records.
-// IMPORTANT: /v5/position/closed-pnl does NOT work on Bybit Demo accounts
-// at all — it rejects with ErrCode 10032 ("Demo trading are not
-// supported"), confirmed from Bybit's own SDK issue trackers, not
-// assumed. Silently swallowing that error (the position route's own
-// .catch(()=>null) would do exactly that) meant every Demo trade was
-// closing with $0 P&L recorded, even though a real result happened on
-// Bybit's own books — a real bug, not a hypothetical one. Fixed the same
-// way the analogous spot-Autotrade bug was fixed earlier: measure the
-// actual change in account balance across the position's lifetime
-// (balanceBeforeUsd, captured by the caller right before opening, vs a
-// fresh balance read now) instead of trusting an endpoint that doesn't
-// work in one of the two modes this is used for. This also means Bybit
-// doesn't expose a separate fee breakdown the way Binance/Gate.io/MEXC/
-// Bitget's ledger-sum approaches do — closedPnl here is a true net
-// figure, but grossPnl/feesUsd for Bybit are reported as null (unknown)
-// rather than guessed.
+// realized result for it — the net P&L via balance diff (Bybit's
+// /v5/position/closed-pnl does NOT work on Demo accounts — ErrCode 10032
+// "Demo trading are not supported", confirmed from Bybit's own SDK issue
+// trackers, not assumed — so a plain balance-before/balance-after diff is
+// used instead, same trick as the analogous spot-Autotrade fix), PLUS a
+// real fee breakdown pulled from /v5/execution/list, which — unlike
+// closed-pnl — IS listed in Bybit's own Demo Trading API availability
+// table ("Get Trade History | /v5/execution/list"), so this works in
+// both Live and Demo.
+async function getBybitExecutionFees(mode, apiKey, secretKey, symbol, openedAtMs){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const startTime = String(openedAtMs || (Date.now() - 24 * 60 * 60 * 1000));
+  const data = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/execution/list', `category=linear&symbol=${symbol}&startTime=${startTime}&endTime=${Date.now()}&limit=100`);
+  const list = data.result?.list || [];
+  if(list.length === 0) return null;
+  // execFee is Bybit's per-fill cost (positive = fee paid, small negative
+  // = maker rebate) — stored here as a NEGATIVE figure, matching the sign
+  // convention every other exchange's fee getter in this file already
+  // uses (a "change" that closedPnl already had subtracted out of it).
+  const feesUsd = -list.reduce((a, e) => a + parseFloat(e.execFee || '0'), 0);
+  return { feesUsd, entries: list.length };
+}
+
 async function getBybitClosedPnl(mode, apiKey, secretKey, symbol, passphrase, openedAtMs, balanceBeforeUsd){
   if(balanceBeforeUsd == null) return null; // caller didn't have a starting balance to diff against — can't compute this safely
   const afterUsd = await bybitAssetBalance(mode, apiKey, secretKey, 'USDT');
-  return { closedPnl: afterUsd - balanceBeforeUsd, grossPnl: null, feesUsd: null, entries: 1 };
+  const closedPnl = afterUsd - balanceBeforeUsd;
+  // Best-effort: if the execution list can't be read for any reason (rate
+  // limit, transient error, a Demo-account restriction that turns out to
+  // apply after all), fall back to the net-only figure exactly as before
+  // rather than blocking the result on it.
+  const fees = await getBybitExecutionFees(mode, apiKey, secretKey, symbol, openedAtMs).catch(() => null);
+  if(!fees) return { closedPnl, grossPnl: null, feesUsd: null, entries: 1 };
+  const grossPnl = closedPnl - fees.feesUsd; // feesUsd is negative, so this adds the cost back to get the pre-fee result
+  return { closedPnl, grossPnl, feesUsd: fees.feesUsd, entries: fees.entries };
 }
 
 // =============================================================
@@ -728,15 +772,22 @@ function binanceCandlesFromKline(raw){
   }));
 }
 async function binanceBuildFuturesSnapshot(symbol){
+  checkBinanceBan('live'); // public data always hits the live host regardless of Live/Demo trading mode — see the base comment below
   const base = BINANCE_FAPI_BASE.live; // public market data — same regardless of Live/Demo trading mode
-  const [m5Raw, m15Raw, h1Raw, book, premium, ticker24h] = await Promise.all([
-    fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=150`),
-    fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=150`),
-    fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=80`),
-    fetchJSON(`${base}/fapi/v1/ticker/bookTicker?symbol=${symbol}`),
-    fetchJSON(`${base}/fapi/v1/premiumIndex?symbol=${symbol}`),
-    fetchJSON(`${base}/fapi/v1/ticker/24hr?symbol=${symbol}`),
-  ]);
+  let m5Raw, m15Raw, h1Raw, book, premium, ticker24h;
+  try{
+    [m5Raw, m15Raw, h1Raw, book, premium, ticker24h] = await Promise.all([
+      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=150`),
+      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=150`),
+      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=80`),
+      fetchJSON(`${base}/fapi/v1/ticker/bookTicker?symbol=${symbol}`),
+      fetchJSON(`${base}/fapi/v1/premiumIndex?symbol=${symbol}`),
+      fetchJSON(`${base}/fapi/v1/ticker/24hr?symbol=${symbol}`),
+    ]);
+  }catch(err){
+    recordBinanceBanIfPresent('live', err.message);
+    throw err;
+  }
 
   const m5 = binanceCandlesFromKline(m5Raw);
   const m15 = binanceCandlesFromKline(m15Raw);
@@ -1538,6 +1589,7 @@ const ORDER_PLACERS = { binance: placeBinanceOrder, bybit: placeBybitOrder, mexc
 const BINANCE_FAPI_BASE = { live: 'https://fapi.binance.com', demo: 'https://testnet.binancefuture.com' };
 
 async function binanceFuturesSignedRequest(method, path, params, apiKey, secretKey, mode){
+  checkBinanceBan(mode);
   const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
   const qs = new URLSearchParams({ ...params, timestamp: String(Date.now()), recvWindow: '5000' });
   const signature = hmacSha256Hex(secretKey, qs.toString());
@@ -1550,18 +1602,22 @@ async function binanceFuturesSignedRequest(method, path, params, apiKey, secretK
   });
   const data = await res.json().catch(() => null);
   if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
-    throw new VerifyRejected(data && data.msg ? data.msg : `HTTP ${res.status}`);
+    const message = data && data.msg ? data.msg : `HTTP ${res.status}`;
+    recordBinanceBanIfPresent(mode, message);
+    throw new VerifyRejected(message);
   }
   return data;
 }
 
 async function binanceFuturesBalance(mode, apiKey, secretKey){
-  const data = await binanceFuturesSignedRequest('GET', '/fapi/v3/positionRisk', {}, apiKey, secretKey, mode).catch(() => null);
-  // positionRisk isn't the balance — used here only to confirm the key
-  // works against futures at all before the real balance call below,
-  // since a spot-only key will fail THIS call with a clear permissions
-  // error rather than a confusing one on the balance endpoint.
-  void data;
+  // Previously also called /fapi/v3/positionRisk first purely to give a
+  // clearer permissions error before the real balance call — but that
+  // doubled the request weight of every single balance poll (this runs
+  // once per Live/Demo cycle whenever no position is open, i.e. very
+  // frequently) for a marginal error-message improvement. /fapi/v2/account
+  // itself already returns a clear permissions error on a spot-only key,
+  // so the probe call is gone; this halves Binance weight usage for the
+  // single most-frequent call in the Live/Demo loop.
   const account = await binanceFuturesSignedRequest('GET', '/fapi/v2/account', {}, apiKey, secretKey, mode);
   const usdt = (account.assets || []).find(a => a.asset === 'USDT');
   return usdt ? parseFloat(usdt.availableBalance) : null;

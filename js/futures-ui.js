@@ -89,7 +89,7 @@ function readSettingsFromInputs(){
   if(els.fuMinRR) f.minRiskReward = Number(els.fuMinRR.value) || 1.2;
   if(els.fuMinNetProfit) f.minNetProfitPct = Number(els.fuMinNetProfit.value) || 0.30;
   if(els.fuRiskPct) f.riskPctPerTrade = Number(els.fuRiskPct.value) || 1.0;
-  if(els.fuLeverage) f.leverage = Number(els.fuLeverage.value) || 2;
+  if(els.fuLeverage) f.leverage = Number(els.fuLeverage.value) || RISK_DEFAULTS.defaultLeverage;
   f.highSelectivity = !!(els.fuSelectivityToggle && els.fuSelectivityToggle.checked);
 }
 
@@ -328,11 +328,12 @@ async function runLiveCycle(){
       if(!data.open){
         const closed = data.closed;
         const netUsd = closed ? closed.closedPnl : 0;
-        // grossPnl/feesUsd are null for Bybit specifically (its API
-        // doesn't expose a fee breakdown for closed futures positions,
-        // Live or Demo — see getBybitClosedPnl's own comment) — left as
-        // null rather than guessed, and the stat tiles/history below
-        // only add what's actually known.
+        // grossPnl/feesUsd can still come back null for any exchange on
+        // a given trade if that specific lookup failed (rate limit,
+        // transient error) — every exchange, Bybit included, now
+        // reports a real breakdown when its history read succeeds (see
+        // getBybitExecutionFees in server.js), so this is a per-trade
+        // fallback, not a standing per-exchange gap.
         const grossUsd = closed && closed.grossPnl != null ? closed.grossPnl : null;
         const feesUsd = closed && closed.feesUsd != null ? closed.feesUsd : null;
         f.liveTradeHistory.unshift({
@@ -342,6 +343,7 @@ async function runLiveCycle(){
           leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
         });
         f.liveTrades++;
+        if(netUsd > 0) f.liveWins++; else f.liveLosses++;
         f.liveNetPnlUsd += netUsd;
         if(grossUsd != null) f.liveGrossPnlUsd += grossUsd;
         if(feesUsd != null) f.liveFeesUsd += feesUsd;
@@ -477,6 +479,7 @@ function renderLiveHistory(){
 function renderLive(){
   const f = fu();
   if(els.fuLiveTrades) els.fuLiveTrades.textContent = String(f.liveTrades);
+  if(els.fuLiveWinRate) els.fuLiveWinRate.textContent = f.liveTrades ? ((f.liveWins / f.liveTrades) * 100).toFixed(1) + '%' : '—';
   if(els.fuLiveGrossPnl) els.fuLiveGrossPnl.textContent = fmtUsd(f.liveGrossPnlUsd);
   if(els.fuLiveFees) els.fuLiveFees.textContent = fmtUsd(f.liveFeesUsd);
   if(els.fuLiveNetPnl) els.fuLiveNetPnl.textContent = fmtUsd(f.liveNetPnlUsd);
@@ -618,6 +621,8 @@ function resetLiveSession(){
   f.liveArmed = false;
   f.liveStartingEquity = null;
   f.liveTrades = 0;
+  f.liveWins = 0;
+  f.liveLosses = 0;
   f.liveNetPnlUsd = 0;
   f.liveGrossPnlUsd = 0;
   f.liveFeesUsd = 0;
