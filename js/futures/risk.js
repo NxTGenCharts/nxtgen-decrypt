@@ -9,9 +9,13 @@ export const RISK_DEFAULTS = {
                                 // a losing trade (position size is derived backwards from this + the stop
                                 // distance, never a fixed dollar amount), adjustable via the "Risk per trade
                                 // (%)" field up to maxRiskPctPerTrade below.
-  maxRiskPctPerTrade: 2.0,
+  maxRiskPctPerTrade: 50.0,    // user-adjustable ceiling — the "Risk per trade (%)" field accepts 1-50% of
+                                // whichever exchange's futures-account equity is selected, so the user can
+                                // size as conservatively or aggressively as they choose. positionSize() below
+                                // is unchanged either way: size is always derived from equity x riskPct and
+                                // the stop distance, never a fixed dollar amount, and is still capped by real
+                                // available margin (see maxNotionalByMargin).
   maxSimultaneousPositions: 3,
-  maxPortfolioRiskPct: 3.0,    // scales with riskPctPerTrade so 3 positions at the default 1% still fit
   defaultLeverage: 5,
   maxLeverage: 10,
   maintenanceMarginRate: 0.5,  // % — rough cross-margin estimate for liquidation distance
@@ -30,6 +34,17 @@ export const RISK_DEFAULTS = {
   // trend/breakout setup honored this field at all.
   riskRewardRatio: 1.2,
 };
+
+// Total risk allowed open across all simultaneous positions at once. This
+// is derived from whatever "Risk per trade (%)" is actually set to,
+// rather than a fixed number — a fixed 3% cap (sized for the old 1%
+// default x 3 positions) would silently block trading altogether once a
+// user raised risk-per-trade past ~1%, since a single position's risk
+// could already exceed the fixed cap on its own. Always leaves room for
+// maxSimultaneousPositions positions at the user's chosen per-trade risk.
+export function maxPortfolioRiskPct(riskPctPerTrade){
+  return (riskPctPerTrade || RISK_DEFAULTS.riskPctPerTrade) * RISK_DEFAULTS.maxSimultaneousPositions;
+}
 
 // Position size from account equity + stop distance — NOT a fixed dollar amount.
 export function positionSize({ equity, riskPct, entryPrice, stopPrice, leverage, maxMarginUtilizationPct }){
@@ -96,8 +111,9 @@ export function checkLiquidationSafety({ entryPrice, stopPrice, side, leverage, 
 }
 
 // Daily risk-control gate: consecutive losses, daily loss cap, cooling-off window.
-export function checkDailyRiskControls(dayState){
+export function checkDailyRiskControls(dayState, riskPctPerTrade){
   const reasons = [];
+  const portfolioCapPct = maxPortfolioRiskPct(riskPctPerTrade);
   if(dayState.dailyPnlPct <= -RISK_DEFAULTS.maxDailyLossPct){
     reasons.push(`Daily loss limit reached (${dayState.dailyPnlPct.toFixed(2)}% <= -${RISK_DEFAULTS.maxDailyLossPct}%) — trading stopped for the day`);
   }
@@ -110,8 +126,8 @@ export function checkDailyRiskControls(dayState){
   if(dayState.openPositions >= RISK_DEFAULTS.maxSimultaneousPositions){
     reasons.push(`Max simultaneous positions (${RISK_DEFAULTS.maxSimultaneousPositions}) already open`);
   }
-  if(dayState.openRiskPct >= RISK_DEFAULTS.maxPortfolioRiskPct){
-    reasons.push(`Max portfolio risk (${RISK_DEFAULTS.maxPortfolioRiskPct}%) already committed`);
+  if(dayState.openRiskPct >= portfolioCapPct){
+    reasons.push(`Max portfolio risk (${portfolioCapPct}%) already committed`);
   }
   return { allowed: reasons.length === 0, reasons };
 }

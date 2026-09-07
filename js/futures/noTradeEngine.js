@@ -5,14 +5,15 @@
 // opportunity. Any single reason is enough to reject.
 // =============================================================
 import { REGIMES } from './regime.js';
-import { RISK_DEFAULTS } from './risk.js';
+import { RISK_DEFAULTS, maxPortfolioRiskPct } from './risk.js';
 
 export function evaluateNoTradeFilters({
   snap, regime, confidence, minConfidence, netTargetPct, minNetProfitPct,
   riskRewardRatio, minRiskReward, liquidationSafety, dayState, btcShock, isAltcoin,
-  fundingCostPct, grossTargetPct, nowMs,
+  fundingCostPct, grossTargetPct, nowMs, riskPctPerTrade,
 }){
   const reasons = [];
+  const portfolioCapPct = maxPortfolioRiskPct(riskPctPerTrade);
 
   if(snap.meta.spreadPct > 0.08) reasons.push(`Spread too wide (${snap.meta.spreadPct.toFixed(3)}%)`);
   if(snap.meta.liquidityScore < 35) reasons.push(`Liquidity too low (score ${snap.meta.liquidityScore})`);
@@ -33,7 +34,7 @@ export function evaluateNoTradeFilters({
       }
     }
     if(dayState.openPositions >= RISK_DEFAULTS.maxSimultaneousPositions) reasons.push('Max simultaneous positions already open');
-    if(dayState.openRiskPct >= RISK_DEFAULTS.maxPortfolioRiskPct) reasons.push('Max portfolio risk already committed');
+    if(dayState.openRiskPct >= portfolioCapPct) reasons.push(`Max portfolio risk (${portfolioCapPct}%) already committed`);
   }
 
   return { allowed: reasons.length === 0, reasons };

@@ -28,6 +28,18 @@ import { atr, swingLevels, volumeExpansion, clamp } from './indicators.js';
 function getSnapshot(symbol){ return mockMarket.snapshot(symbol); }
 function getBtcShock(){ return mockMarket.btcShock(); }
 
+// BTC, ETH and SOL carry disproportionately high fees relative to the
+// rest of the futures watchlist on every exchange this app supports, so
+// they're excluded from the tradeable/scanned set everywhere — Paper mode
+// (below), Live/Demo mode (see js/futures-ui.js's LIVE_TRADEABLE_WATCHLIST),
+// on all five exchanges alike. This only removes them from being scanned,
+// scored, or opened as positions: BTCUSDT's own price data is still read
+// separately for the cross-market "BTC shock" filter (getBtcShock above /
+// isAltcoin below), which every remaining altcoin signal is still checked
+// against.
+export const EXCLUDED_FUTURES_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
+export const TRADEABLE_FUTURES_SYMBOLS = FUTURES_SYMBOLS.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s));
+
 // Ensemble: each setup already carries its own direction+confidence.
 // If setups disagree on direction, NO TRADE. If they agree, combine
 // via a simple confidence-weighted average and take the strongest
@@ -144,7 +156,7 @@ function applyRewardRiskFloor(levels, direction, riskRewardRatio){
 // ones (kept so the scanner table can show "why not" transparently,
 // matching the No-Trade Engine's job of explaining a pass).
 export function runScanCycle(cfg, dayState, opts){
-  const symbols = (opts && opts.symbols) || FUTURES_SYMBOLS;
+  const symbols = (opts && opts.symbols) || TRADEABLE_FUTURES_SYMBOLS;
   const snapshotFor = (opts && opts.getSnapshot) || getSnapshot;
   const nowFn = (opts && opts.now) || (() => mockMarket.now());
   const btcShock = (opts && opts.getBtcShock) ? opts.getBtcShock() : getBtcShock();
@@ -234,17 +246,19 @@ export function runScanCycle(cfg, dayState, opts){
       : primary.type === 'Range Scalp' ? (cfg.scalpMinNetProfitPct ?? 0.04)
       : (cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT);
 
+    const riskPctPerTrade = clamp(cfg.riskPctPerTrade || RISK_DEFAULTS.riskPctPerTrade, 0.1, RISK_DEFAULTS.maxRiskPctPerTrade);
+
     const gate = evaluateNoTradeFilters({
       snap, regime, confidence, minConfidence,
       netTargetPct: costs.netTargetPct, minNetProfitPct: minNetProfit,
       riskRewardRatio, minRiskReward: minRR,
       liquidationSafety: liqSafety, dayState, btcShock, isAltcoin,
       fundingCostPct: costs.fundingCostPct, grossTargetPct: levels.tp1Pct,
-      nowMs: nowFn(),
+      nowMs: nowFn(), riskPctPerTrade,
     });
 
     const sizing = positionSize({
-      equity: dayState.equity, riskPct: cfg.riskPctPerTrade || RISK_DEFAULTS.riskPctPerTrade,
+      equity: dayState.equity, riskPct: riskPctPerTrade,
       entryPrice: levels.entry, stopPrice: levels.stopPrice, leverage,
     });
 

@@ -20,7 +20,7 @@
 // =============================================================
 import { els, state } from './state.js';
 import { fmtPct } from './utils.js';
-import { runScanCycle, openPosition, managePositions, recomputeOpenRisk } from './futures/engine.js';
+import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS } from './futures/engine.js';
 import { mockMarket } from './futures/mockMarket.js';
 import { RISK_DEFAULTS } from './futures/risk.js';
 import { DEFAULT_WEIGHTS } from './futures/scoring.js';
@@ -31,9 +31,14 @@ const LIVE_CYCLE_MS = 8000; // real API calls — a slower, deliberately conserv
 // A smaller, curated watchlist than Paper's full 35 symbols — keeps real
 // API call volume reasonable and every symbol here is liquid enough that
 // the spread/liquidity gates in noTradeEngine.js should rarely be the
-// thing standing between a real signal and a trade. Must include
-// BTCUSDT: the shock filter (see runLiveCycle) reads it directly.
-const LIVE_WATCHLIST = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOGEUSDT', 'LTCUSDT'];
+// thing standing between a real signal and a trade.
+// BTC, ETH and SOL are excluded from the tradeable set on every exchange
+// (see EXCLUDED_FUTURES_SYMBOLS in engine.js — they carry disproportionately
+// high fees relative to the rest of the watchlist), but BTCUSDT is still
+// fetched every cycle since the shock filter below reads it directly.
+const LIVE_TRADEABLE_WATCHLIST = ['BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOGEUSDT', 'LTCUSDT']
+  .filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s)); // defensive — none of these are in the excluded set today, but keeps this list honoring it if it's ever extended
+const LIVE_WATCHLIST = ['BTCUSDT', ...LIVE_TRADEABLE_WATCHLIST]; // BTCUSDT fetched for the shock filter only — never scanned or traded, per EXCLUDED_FUTURES_SYMBOLS
 const ARM_PHRASE = 'PLACE REAL ORDERS';
 
 function fu(){ return state.futures; }
@@ -88,7 +93,12 @@ function readSettingsFromInputs(){
   if(els.fuMinConfidence) f.minConfidence = Number(els.fuMinConfidence.value) || 60;
   if(els.fuMinRR) f.minRiskReward = Number(els.fuMinRR.value) || 1.2;
   if(els.fuMinNetProfit) f.minNetProfitPct = Number(els.fuMinNetProfit.value) || 0.30;
-  if(els.fuRiskPct) f.riskPctPerTrade = Number(els.fuRiskPct.value) || 1.0;
+  // Clamped server-side-of-the-UI (not just via the input's min/max
+  // attributes) so a 0/negative/absurd value typed directly, or the
+  // attributes being bypassed, can never size a trade — the user can
+  // still choose anywhere from 1% to RISK_DEFAULTS.maxRiskPctPerTrade
+  // (50%) of the selected exchange's futures-account equity.
+  if(els.fuRiskPct) f.riskPctPerTrade = Math.min(RISK_DEFAULTS.maxRiskPctPerTrade, Math.max(1, Number(els.fuRiskPct.value) || 1.0));
   if(els.fuLeverage) f.leverage = Number(els.fuLeverage.value) || RISK_DEFAULTS.defaultLeverage;
   f.highSelectivity = !!(els.fuSelectivityToggle && els.fuSelectivityToggle.checked);
 }
@@ -415,7 +425,7 @@ async function runLiveCycle(){
   };
   const dayStateShim = buildLiveDayStateShim(equity);
   const { rows } = runScanCycle(cfg, dayStateShim, {
-    symbols: LIVE_WATCHLIST,
+    symbols: LIVE_TRADEABLE_WATCHLIST,
     getSnapshot: symbol => snapshots[symbol] || null,
     now: () => Date.now(),
     getBtcShock: () => computeBtcShock(snapshots.BTCUSDT.m5),
@@ -425,7 +435,7 @@ async function runLiveCycle(){
   const approved = rows.find(r => r.status === 'APPROVED');
   if(!approved){
     const boostNote = f2.liveAdaptiveConfidenceBoost > 0 ? ` (min confidence raised +${f2.liveAdaptiveConfidenceBoost} after recent losses)` : '';
-    showLiveMessage(`Armed on ${exchange} (${mode}), watching ${LIVE_WATCHLIST.length} symbols — no qualifying signal this cycle${boostNote}.`);
+    showLiveMessage(`Armed on ${exchange} (${mode}), watching ${LIVE_TRADEABLE_WATCHLIST.length} symbols (BTC/ETH/SOL excluded — high fees) — no qualifying signal this cycle${boostNote}.`);
     return;
   }
 
