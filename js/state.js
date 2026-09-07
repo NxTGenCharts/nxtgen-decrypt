@@ -144,6 +144,7 @@ export const els = {
   fuMinRR: document.getElementById('fuMinRR'),
   fuMinNetProfit: document.getElementById('fuMinNetProfit'),
   fuRiskPct: document.getElementById('fuRiskPct'),
+  fuLiveRiskPct: document.getElementById('fuLiveRiskPct'),
   fuLeverage: document.getElementById('fuLeverage'),
   fuRegime: document.getElementById('fuRegime'),
   fuBalance: document.getElementById('fuBalance'),

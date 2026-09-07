@@ -98,6 +98,13 @@ function readSettingsFromInputs(){
   // attributes being bypassed, can never size a trade — the user can
   // still choose anywhere from 1% to RISK_DEFAULTS.maxRiskPctPerTrade
   // (50%) of the selected exchange's futures-account equity.
+  // Risk per trade (%) has TWO inputs — fuRiskPct (Paper Engine
+  // section, above) and fuLiveRiskPct (Live/Demo Trading section,
+  // visible right next to the exchange picker so it doesn't require
+  // scrolling back up before arming) — both editing the exact same
+  // f.riskPctPerTrade value. syncRiskPctInputs (below, wired to each
+  // field's own input listener) is what keeps them mirrored; this just
+  // reads whichever was most recently edited/is currently in the DOM.
   if(els.fuRiskPct) f.riskPctPerTrade = Math.min(RISK_DEFAULTS.maxRiskPctPerTrade, Math.max(1, Number(els.fuRiskPct.value) || 1.0));
   if(els.fuLeverage) f.leverage = Number(els.fuLeverage.value) || RISK_DEFAULTS.defaultLeverage;
   f.highSelectivity = !!(els.fuSelectivityToggle && els.fuSelectivityToggle.checked);
@@ -697,11 +704,35 @@ function toggleRunning(){
   render();
 }
 
+// Keeps fuRiskPct (Paper Engine section) and fuLiveRiskPct (Live/Demo
+// Trading section) mirrored to the same value — they control the exact
+// same f.riskPctPerTrade, just exposed in two places so the Live/Demo
+// panel doesn't require scrolling back up to Paper's settings before
+// arming. Called from each field's own 'input' listener with whichever
+// one the user just edited.
+function syncRiskPctInputs(rawValue){
+  const f = fu();
+  const clamped = Math.min(RISK_DEFAULTS.maxRiskPctPerTrade, Math.max(1, Number(rawValue) || 1.0));
+  f.riskPctPerTrade = clamped;
+  if(els.fuRiskPct) els.fuRiskPct.value = clamped;
+  if(els.fuLiveRiskPct) els.fuLiveRiskPct.value = clamped;
+}
+
+function initRiskPctInputs(){
+  const f = fu();
+  const initial = f.riskPctPerTrade || RISK_DEFAULTS.riskPctPerTrade;
+  if(els.fuRiskPct) els.fuRiskPct.value = initial;
+  if(els.fuLiveRiskPct) els.fuLiveRiskPct.value = initial;
+  if(els.fuRiskPct) els.fuRiskPct.addEventListener('input', () => syncRiskPctInputs(els.fuRiskPct.value));
+  if(els.fuLiveRiskPct) els.fuLiveRiskPct.addEventListener('input', () => syncRiskPctInputs(els.fuLiveRiskPct.value));
+}
+
 export function initFuturesEngine(){
   ensureDayState();
   if(els.fuStartingBalance) els.fuStartingBalance.value = String(fu().dayState.startingEquity);
   if(els.fuModeBtn) els.fuModeBtn.addEventListener('click', toggleRunning);
   if(els.fuResetSessionBtn) els.fuResetSessionBtn.addEventListener('click', resetSession);
+  initRiskPctInputs();
   initLiveTradingControls();
   renderLive();
   render();

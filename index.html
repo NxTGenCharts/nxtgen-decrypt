@@ -497,6 +497,11 @@
 
       <div class="fu-live-exch-rows" id="fuLiveExchRows"><!-- rendered by js/futures-ui.js — one row per exchange, click to select, click Live/Demo to set that exchange's network --></div>
 
+      <div class="field" style="max-width:320px;margin:14px 0 10px;">
+        <label for="fuLiveRiskPct" title="Max % of the SELECTED exchange's real futures-account equity (the Real Balance figure below) lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount. Adjustable 1-50%. Same setting as the Paper Engine's 'Risk per trade' field above — changing either one updates both.">Risk per trade (%)</label>
+        <input id="fuLiveRiskPct" type="number" min="1" max="50" step="0.5" value="1">
+      </div>
+
       <div class="field" style="max-width:320px;margin-bottom:10px;">
         <label>Status</label>
         <div class="ov-value" id="fuLiveStatusLabel" style="font-size:14px;">Select an exchange above to begin.</div>
@@ -544,7 +549,7 @@
     </div>
 
     <footer>
-      <b>Scope —</b> USDT-margined perpetuals across a 35-symbol watchlist. Default risk 1% of equity per trade (configurable 0.1–2%), max 3 simultaneous positions, max 3% total portfolio risk, max 2% daily loss, pause after 3 consecutive losses — all enforced by the No-Trade Engine before any position opens.<br>
+      <b>Scope —</b> USDT-margined perpetuals across a 35-symbol watchlist, excluding BTC, ETH and SOL on every exchange (highest fees of the watchlist — see <code>EXCLUDED_FUTURES_SYMBOLS</code> in <code>js/futures/engine.js</code>; BTC price data is still used internally for the shock filter, just never traded). Default risk 1% of equity per trade (configurable 1–50%, see the "Risk per trade (%)" field above), max 3 simultaneous positions, max total portfolio risk scaling with that setting, max 2% daily loss, pause after 3 consecutive losses — all enforced by the No-Trade Engine before any position opens.<br>
       <b>Win rate vs. expectancy —</b> the dashboard reports whatever win rate and profit factor the session's trades actually produced. A high win rate with poor expectancy is not something this build is tuned toward, and it will show a losing session honestly if that's what happens against the current (synthetic, Paper-mode) price data.<br>
       <b>Live/Demo trading</b> (Bybit, Binance, Gate.io, MEXC, and Bitget — MEXC is Live only, no Demo) places real orders through <code>server/server.js</code> with a native/exchange-enforced stop-loss and take-profit on every position — see the Live/Demo Trading section above and <code>server/README.md</code> before arming it with a Live key.<br>
       <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet. All five exchanges now have Live/Demo (or Live-only, for MEXC) execution built.<br>
