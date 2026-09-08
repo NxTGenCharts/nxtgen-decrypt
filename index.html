@@ -616,7 +616,7 @@
       </div>
       <div id="aiStatusNote" style="font-size:12px;color:var(--dim);margin-top:10px;">No AI provider key saved yet.</div>
       <div style="font-size:11px;color:var(--dim);margin-top:10px;">
-        Model/endpoint details for each provider are implemented against their current published API docs but, like the newer exchange integrations in this app, haven't been exercised against a live account from this codebase's own testing — use Test Connection above and watch a few Live/Demo cycles closely before trusting it further.
+        Model names drift fast on these providers — Gemini's original model here was confirmed retired by a real Test Connection call and fixed (now uses Google's own auto-updating "latest" alias instead of a pinned name); OpenAI's and xAI's were found stale too and updated when that happened. Anthropic's was checked and is still current. None of this guarantees they'll stay current — if Test Connection ever comes back with a "model not found" style error again, that's expected provider-side churn, not a deeper bug.
       </div>
     </div>
   </div>

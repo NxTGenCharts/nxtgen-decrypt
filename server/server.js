@@ -2186,11 +2186,21 @@ app.post('/api/balance', async (req, res) => {
 // HONESTY NOTE, matching this file's own standard for less-tested
 // exchange integrations (see the Bitget/MEXC Demo comments elsewhere):
 // each provider's endpoint/model/request-shape below is implemented
-// against that provider's documented API, but has NOT been exercised
-// against a live account from this codebase's own testing. Providers
-// rename or retire model IDs periodically — if a call starts failing with
-// a "model not found"-style error, check that provider's current docs and
-// update the model constant below.
+// against that provider's documented API. This has now actually been
+// exercised against a real account once — Google's Gemini call was
+// confirmed broken by a live Test Connection: 'gemini-1.5-flash' had
+// been fully retired, unrelated to anything else in this app. Fixed by
+// switching to Google's own 'gemini-flash-latest' alias instead of a
+// pinned dated name (see callGemini below). The other three model names
+// (OpenAI/Anthropic/xAI) were re-verified against each provider's current
+// docs at the same time and updated where they'd also gone stale
+// (OpenAI's and xAI's had; Anthropic's hadn't). None of the four have
+// been confirmed against a real account beyond that one Gemini test.
+// These providers rename/retire model IDs every few months as a matter
+// of course — if a call ever starts failing with a "model not found"-
+// style error again, that's expected drift, not a deeper bug: check that
+// provider's current docs, update the model constant below, and use Test
+// Connection (API Keys tab) to confirm before trusting it again.
 // =============================================================
 const AI_TIMEOUT_MS = 12_000;
 const AI_PROVIDER_LABELS = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', xai: 'xAI' };
@@ -2258,7 +2268,12 @@ async function callAnthropic(apiKey, system, user){
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-5', // check Anthropic's current model list if this ever 404s — see file header note
+      // Verified current as of this fix: 'claude-sonnet-4-5' is a
+      // maintained alias (resolves to the latest 4.5 snapshot), still
+      // listed and working alongside newer 4.6/5-generation releases —
+      // not the retired situation callGemini below just hit. Still worth
+      // rechecking Anthropic's model list if this ever 404s.
+      model: 'claude-sonnet-4-5',
       max_tokens: 200,
       system,
       messages: [{ role: 'user', content: user }],
@@ -2271,7 +2286,17 @@ async function callAnthropic(apiKey, system, user){
 }
 
 async function callGemini(apiKey, system, user){
-  const model = 'gemini-1.5-flash'; // check Google's current model list if this ever 404s — see file header note
+  // 'gemini-1.5-flash' is fully retired (Gemini 1.5 line is end-of-life) —
+  // this is exactly the failure mode the file-header note above warned
+  // about, now confirmed live. Using Google's own maintained "-latest"
+  // alias instead of a pinned dated model name this time, specifically
+  // BECAUSE Google has been retiring/renaming models every few months
+  // (2.0 -> 2.5 -> 3.x through 2026) — 'gemini-flash-latest' is Google's
+  // own pointer to whatever their current recommended Flash model is
+  // (currently a Gemini 3.x Flash build), so this stops needing a manual
+  // fix every time they ship a new generation. It's also squarely within
+  // what Google's free API tier covers (Flash/Flash-Lite only, not Pro).
+  const model = 'gemini-flash-latest';
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2288,10 +2313,19 @@ async function callGemini(apiKey, system, user){
 }
 
 const AI_PROVIDERS = {
-  openai: (apiKey, system, user) => callOpenAiCompatible('https://api.openai.com/v1', 'gpt-4o-mini', apiKey, system, user),
+  // gpt-4o-mini's whole model family (4o/4.1/o4-mini) has been retired
+  // from ChatGPT and OpenAI has fully moved the ecosystem to the GPT-5
+  // line — gpt-5-mini is their current lightweight/cost-efficient model,
+  // same role gpt-4o-mini used to fill.
+  openai: (apiKey, system, user) => callOpenAiCompatible('https://api.openai.com/v1', 'gpt-5-mini', apiKey, system, user),
   anthropic: (apiKey, system, user) => callAnthropic(apiKey, system, user),
   google: (apiKey, system, user) => callGemini(apiKey, system, user),
-  xai: (apiKey, system, user) => callOpenAiCompatible('https://api.x.ai/v1', 'grok-2-latest', apiKey, system, user),
+  // grok-2-latest is long gone — xAI has retired the entire Grok 2/3/4
+  // (original) lines; grok-4.3 is their current mid-tier "standard
+  // workhorse" model, a reasonable cost/capability match for gpt-5-mini
+  // and claude-sonnet-4-5 above rather than paying flagship pricing for
+  // a one-line trade-signal check.
+  xai: (apiKey, system, user) => callOpenAiCompatible('https://api.x.ai/v1', 'grok-4.3', apiKey, system, user),
 };
 
 app.use('/api/ai/confirm', rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true, legacyHeaders: false }));
