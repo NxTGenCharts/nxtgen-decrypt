@@ -616,7 +616,7 @@
       </div>
       <div id="aiStatusNote" style="font-size:12px;color:var(--dim);margin-top:10px;">No AI provider key saved yet.</div>
       <div style="font-size:11px;color:var(--dim);margin-top:10px;">
-        Model names drift fast on these providers — Gemini's original model here was confirmed retired by a real Test Connection call and fixed (now uses Google's own auto-updating "latest" alias instead of a pinned name); OpenAI's and xAI's were found stale too and updated when that happened. Anthropic's was checked and is still current. None of this guarantees they'll stay current — if Test Connection ever comes back with a "model not found" style error again, that's expected provider-side churn, not a deeper bug.
+        Model names drift fast on these providers, and the models themselves keep changing shape underneath the same names — Gemini's original model here was confirmed retired by a real Test Connection call (fixed: now uses Flash-Lite specifically, Google's fast/cheap tier); a follow-up real test then caught a second, subtler bug — the newer default models on Google, OpenAI, and xAI alike now "think" internally before answering, silently eating the same token budget the actual answer needs, which is what produced the timeout and the "no JSON object found" error. Token budgets were raised and reasoning kept minimal to fix it; OpenAI's GPT-5 line also turned out to reject the old temperature/max_tokens fields outright, which is fixed too. None of this guarantees they'll stay current — if Test Connection ever comes back with a similar error again, that's expected provider-side churn, not a deeper bug.
       </div>
     </div>
   </div>

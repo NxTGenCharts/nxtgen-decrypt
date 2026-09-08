@@ -2202,7 +2202,10 @@ app.post('/api/balance', async (req, res) => {
 // provider's current docs, update the model constant below, and use Test
 // Connection (API Keys tab) to confirm before trusting it again.
 // =============================================================
-const AI_TIMEOUT_MS = 12_000;
+// Raised from 12s: several of these providers now default to internal
+// "reasoning"/"thinking" before answering (see the max-tokens note below),
+// which adds real latency even for a one-line JSON verdict.
+const AI_TIMEOUT_MS = 20_000;
 const AI_PROVIDER_LABELS = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', xai: 'xAI' };
 
 function withTimeout(promise, ms, label){
@@ -2245,17 +2248,28 @@ function parseAiVerdict(text){
 }
 
 // OpenAI and xAI (Grok) both speak the same Chat Completions request/
-// response shape, so one function covers both.
-async function callOpenAiCompatible(baseUrl, model, apiKey, system, user){
+// response shape in the common case, but GPT-5-family models specifically
+// broke compatibility with two long-standing fields: they 400 on any
+// `temperature` other than their own default (1, so omit it rather than
+// send 0.2), and `max_tokens` was renamed `max_completion_tokens` (the
+// old name also 400s). opts lets the two callers below opt into GPT-5's
+// stricter shape instead of assuming every OpenAI-compatible API still
+// takes the classic one.
+async function callOpenAiCompatible(baseUrl, model, apiKey, system, user, opts = {}){
+  const body = {
+    model,
+    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+  };
+  if(!opts.omitTemperature) body.temperature = 0.2;
+  // 1024, not 200: gpt-5-mini and grok-4.3 both reason by default before
+  // answering, drawing on this same token budget — 200 was enough for
+  // the JSON verdict alone but left no room for any reasoning ahead of it.
+  body[opts.maxCompletionTokens ? 'max_completion_tokens' : 'max_tokens'] = 1024;
+  if(opts.reasoningEffort) body.reasoning_effort = opts.reasoningEffort;
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      temperature: 0.2,
-      max_tokens: 200,
-    }),
+    body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => null);
   if(!res.ok) throw new Error((data && (data.error?.message || data.message)) || `HTTP ${res.status}`);
@@ -2274,7 +2288,7 @@ async function callAnthropic(apiKey, system, user){
       // not the retired situation callGemini below just hit. Still worth
       // rechecking Anthropic's model list if this ever 404s.
       model: 'claude-sonnet-4-5',
-      max_tokens: 200,
+      max_tokens: 300,
       system,
       messages: [{ role: 'user', content: user }],
     }),
@@ -2288,22 +2302,31 @@ async function callAnthropic(apiKey, system, user){
 async function callGemini(apiKey, system, user){
   // 'gemini-1.5-flash' is fully retired (Gemini 1.5 line is end-of-life) —
   // this is exactly the failure mode the file-header note above warned
-  // about, now confirmed live. Using Google's own maintained "-latest"
-  // alias instead of a pinned dated model name this time, specifically
-  // BECAUSE Google has been retiring/renaming models every few months
-  // (2.0 -> 2.5 -> 3.x through 2026) — 'gemini-flash-latest' is Google's
-  // own pointer to whatever their current recommended Flash model is
-  // (currently a Gemini 3.x Flash build), so this stops needing a manual
-  // fix every time they ship a new generation. It's also squarely within
-  // what Google's free API tier covers (Flash/Flash-Lite only, not Pro).
-  const model = 'gemini-flash-latest';
+  // about, now confirmed live. Using Flash-LITE specifically (not just
+  // "-flash-latest"): Flash-Lite is Google's fast/cheap tier and, per
+  // their own docs, defaults to little-to-no internal "thinking" before
+  // answering, unlike the full Flash line which reasons by default now.
+  // 'gemini-flash-lite-latest' is Google's own maintained alias for it,
+  // so this keeps following whatever their current Flash-Lite build is
+  // instead of needing a manual fix every time they ship a new
+  // generation — and it's squarely within the free API tier (Flash/
+  // Flash-Lite only, not Pro).
+  const model = 'gemini-flash-lite-latest';
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: system }] },
       contents: [{ role: 'user', parts: [{ text: user }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 200 },
+      // 1024, not 200: even Flash-Lite isn't guaranteed fully thinking-
+      // off on every build Google ships under this alias (their own docs
+      // say Gemini 3-generation Flash/Flash-Lite "do not support full
+      // thinking-off"), and any thinking tokens draw on this same
+      // budget before the model gets to write the actual JSON answer —
+      // which is exactly what produced the "no JSON object found"
+      // error: 200 was enough for the verdict alone, not for any
+      // reasoning ahead of it.
+      generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
     }),
   });
   const data = await res.json().catch(() => null);
@@ -2316,15 +2339,19 @@ const AI_PROVIDERS = {
   // gpt-4o-mini's whole model family (4o/4.1/o4-mini) has been retired
   // from ChatGPT and OpenAI has fully moved the ecosystem to the GPT-5
   // line — gpt-5-mini is their current lightweight/cost-efficient model,
-  // same role gpt-4o-mini used to fill.
-  openai: (apiKey, system, user) => callOpenAiCompatible('https://api.openai.com/v1', 'gpt-5-mini', apiKey, system, user),
+  // same role gpt-4o-mini used to fill. GPT-5-family-specific request
+  // shape (see callOpenAiCompatible above): no temperature,
+  // max_completion_tokens instead of max_tokens, reasoning kept minimal.
+  openai: (apiKey, system, user) => callOpenAiCompatible('https://api.openai.com/v1', 'gpt-5-mini', apiKey, system, user, { omitTemperature: true, maxCompletionTokens: true, reasoningEffort: 'minimal' }),
   anthropic: (apiKey, system, user) => callAnthropic(apiKey, system, user),
   google: (apiKey, system, user) => callGemini(apiKey, system, user),
   // grok-2-latest is long gone — xAI has retired the entire Grok 2/3/4
   // (original) lines; grok-4.3 is their current mid-tier "standard
   // workhorse" model, a reasonable cost/capability match for gpt-5-mini
   // and claude-sonnet-4-5 above rather than paying flagship pricing for
-  // a one-line trade-signal check.
+  // a one-line trade-signal check. Uses the classic Chat Completions
+  // shape (temperature + max_tokens both still accepted) — it's only
+  // OpenAI's own GPT-5 line that broke that compatibility, not xAI's.
   xai: (apiKey, system, user) => callOpenAiCompatible('https://api.x.ai/v1', 'grok-4.3', apiKey, system, user),
 };
 
