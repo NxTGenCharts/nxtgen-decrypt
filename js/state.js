@@ -39,6 +39,9 @@ export const els = {
   tabTriBtn: document.getElementById('tabTriBtn'),
   tabXBtn: document.getElementById('tabXBtn'),
   tabTradingBtn: document.getElementById('tabTradingBtn'),
+  tabKeysBtn: document.getElementById('tabKeysBtn'),
+  panelKeys: document.getElementById('panelKeys'),
+  goToKeysBtn: document.getElementById('goToKeysBtn'),
   panelTrading: document.getElementById('panelTrading'),
   panelTri: document.getElementById('panelTri'),
   panelX: document.getElementById('panelX'),
@@ -166,6 +169,15 @@ export const els = {
   fuHistoryRows: document.getElementById('fuHistoryRows'),
   fuExplain: document.getElementById('fuExplain'),
   fuMessages: document.getElementById('fuMessages'),
+  // --- AI Signal Provider (API Keys tab) ---
+  aiProviderSelect: document.getElementById('aiProviderSelect'),
+  aiApiKeyInput: document.getElementById('aiApiKeyInput'),
+  aiKeyRevealBtn: document.getElementById('aiKeyRevealBtn'),
+  aiSaveBtn: document.getElementById('aiSaveBtn'),
+  aiTestBtn: document.getElementById('aiTestBtn'),
+  aiRemoveBtn: document.getElementById('aiRemoveBtn'),
+  aiEnabledToggle: document.getElementById('aiEnabledToggle'),
+  aiStatusNote: document.getElementById('aiStatusNote'),
 };
 
 // Single mutable state object. Every other module imports `state` and
@@ -268,7 +280,7 @@ export const state = {
     highSelectivity: false,
     exchange: 'binance',
     minConfidence: 60,
-    minRiskReward: 1.2,
+    minRiskReward: 2.0, // fixed system-wide — see js/futures/risk.js RISK_DEFAULTS.riskRewardRatio
     minNetProfitPct: 0.30,
     riskPctPerTrade: 1.0,
     leverage: 5,
@@ -298,6 +310,20 @@ export const state = {
     // account's recent results has no business carrying over to a
     // different one.
     liveConsecutiveLosses: 0, livePausedByCircuitBreaker: false, liveAdaptiveConfidenceBoost: 0,
+  },
+
+  // ---- AI Signal Provider (optional, experimental) — a second opinion
+  // from a user-supplied LLM key, consulted only on Live/Demo signals the
+  // AI Futures Engine's own scoring/risk/no-trade logic has ALREADY
+  // approved (see js/ai-signal.js and server/server.js's /api/ai/confirm).
+  // Persisted separately from exchangeCreds (own localStorage key, see
+  // ai-signal.js) since it's a conceptually distinct credential, not an
+  // exchange one. ----
+  aiSignal: {
+    provider: 'openai',   // 'openai' | 'anthropic' | 'google' | 'xai'
+    apiKey: null,          // never rendered back in full; only ever sent to OUR OWN server per-check, which forwards it straight to the provider and keeps nothing
+    enabled: false,
+    lastVerdict: null,     // { ok, approve, confidence, reason, provider, symbol, at } — most recent check's result, for display
   },
 };
 

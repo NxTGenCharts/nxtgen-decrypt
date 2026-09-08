@@ -606,3 +606,66 @@ market data, not just trading — if this keeps happening, the new error
 message will say so plainly instead of leaving it a mystery, and the fix
 at that point is deploying the server to a different region, not
 anything in this codebase.
+
+## Update: the fee-drag bug — real Bybit Demo trading, not a misreading
+
+Reported directly from a live session: 6 real Bybit Demo trades, 50%
+win rate, **Gross P&L +$2.89** but **Fees -$117.09**, netting **-$114.20**.
+The instinct was "the app must be miscalculating fees" — it wasn't. The
+fee shown ($25.12 on a $22,857 LTCUSDT position) matches Bybit's real
+published 0.055% taker rate almost exactly. The bug was upstream of the
+fee calculation entirely.
+
+**The actual mechanism**: AI Scalp's stop-distance floor was 0.15% of
+price. Real round-trip futures taker fees run ~0.10-0.12% on four of the
+five exchanges here (0.06% one-way on Bitget, the highest — see
+`DEFAULT_FEE_CONFIG` in `js/futures/costs.js`, sourced from each
+exchange's own published fee schedule; Bitget's own 0.02%/0.06% entry
+was missing from that table entirely until this fix, silently falling
+back to Binance's slightly lower rate). At a 0.15% stop, round-trip fees
+alone could be **70-80% of the entire risk budget on every trade** —
+before the market even had to move against you. Worse, `positionSize()`'s
+pre-existing margin cap (see `risk.js`) kicks in on stops this tight,
+capping notional below what the 1%-risk math calls for — which reduces
+the *actual* dollar risk taken below the intended 1%, while fees (which
+scale with the now-capped notional itself, not the smaller actual risk)
+end up an even larger fraction of what was really at stake. Combined
+with the reward:risk ratio being only 1.2, a real trade's math looked
+roughly like: lose (stop + fees) ≈ 0.15% + 0.12% = 0.27% on a loser,
+net (target - fees) ≈ 0.18% - 0.12% = 0.06% on a winner — which needs
+something like a **79-82% win rate just to break even**, not the ~50%
+this build's own detector was ever designed or measured to produce (see
+the sections above). A near-coin-flip win rate against a bar that high
+was always going to net sharply negative, exactly as the real numbers
+showed.
+
+**Fixed at the source, not by hiding the symptom**:
+- AI Scalp's stop-distance floor raised from 0.15% to 0.35% (cap raised
+  0.42% → 0.9%) — see `buildLevels` in `engine.js`.
+- Reward:risk changed from a user-adjustable 1.2 default to a **fixed
+  2.0 (1:2) for every trade, no longer configurable** — see
+  `RISK_DEFAULTS.riskRewardRatio` in `risk.js`; the "Reward:Risk" field
+  in the UI is now read-only.
+- AI Scalp's net-profit floor raised from 0.03% to 0.15% — the old
+  figure left almost no margin above real fees once spread/slippage
+  were added on top.
+- A new no-trade gate rejects any setup where round-trip fees exceed
+  35% of its own stop distance — a direct, general-purpose backstop for
+  this exact failure mode, independent of which setup produces the
+  signal in the future.
+- Bitget's fee entry added to `DEFAULT_FEE_CONFIG` (0.02%/0.06%, its own
+  published rate) instead of silently inheriting Binance's.
+- LTCUSDT and DOGEUSDT added to `EXCLUDED_FUTURES_SYMBOLS` (joining
+  BTC/ETH/SOL) per an explicit request to remove them specifically, on
+  top of the general fix above.
+
+**The math after the fix**, at the worst-case fee (Bitget, 0.12%
+round-trip) and the new stop floor: a loser costs 0.35% + 0.12% =
+0.47%, a winner nets 0.70% - 0.12% = 0.58%. Breakeven win rate works
+out to roughly **37-45%** depending on exchange and where ATR places
+the stop in its new range — down from ~79-82%. That is a real, checked
+number, not a promise about what this build's actual win rate will be
+live: no amount of stop/ratio engineering manufactures an edge that
+isn't there, it only changes how much edge is required to survive real
+costs. See the AI Futures Engine tab's own footer for the same account
+in the app itself.

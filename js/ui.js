@@ -62,9 +62,9 @@ export function renderOverview(){
 }
 
 // Single source of truth for tab switching across all panels.
-const TAB_KEYS = ['overview', 'tri', 'x', 'trading'];
-const TAB_BTN_ELS = { overview: 'tabOverviewBtn', tri: 'tabTriBtn', x: 'tabXBtn', trading: 'tabTradingBtn' };
-const TAB_PANEL_ELS = { overview: 'panelOverview', tri: 'panelTri', x: 'panelX', trading: 'panelTrading' };
+const TAB_KEYS = ['overview', 'tri', 'x', 'trading', 'keys'];
+const TAB_BTN_ELS = { overview: 'tabOverviewBtn', tri: 'tabTriBtn', x: 'tabXBtn', trading: 'tabTradingBtn', keys: 'tabKeysBtn' };
+const TAB_PANEL_ELS = { overview: 'panelOverview', tri: 'panelTri', x: 'panelX', trading: 'panelTrading', keys: 'panelKeys' };
 
 export function switchTabAll(which){
   TAB_KEYS.forEach(key => {

@@ -10,7 +10,7 @@ import { RISK_DEFAULTS, maxPortfolioRiskPct } from './risk.js';
 export function evaluateNoTradeFilters({
   snap, regime, confidence, minConfidence, netTargetPct, minNetProfitPct,
   riskRewardRatio, minRiskReward, liquidationSafety, dayState, btcShock, isAltcoin,
-  fundingCostPct, grossTargetPct, nowMs, riskPctPerTrade,
+  fundingCostPct, grossTargetPct, nowMs, riskPctPerTrade, feeToStopRatioPct,
 }){
   const reasons = [];
   const portfolioCapPct = maxPortfolioRiskPct(riskPctPerTrade);
@@ -24,6 +24,13 @@ export function evaluateNoTradeFilters({
   if(liquidationSafety && !liquidationSafety.safe) reasons.push('Liquidation price too close to stop-loss for chosen leverage');
   if(fundingCostPct > Math.abs(grossTargetPct) * 0.35) reasons.push(`Funding cost eats too much of the expected move`);
   if(isAltcoin && btcShock && btcShock.shocked) reasons.push(`BTC shock detected (${btcShock.movePct.toFixed(2)}% in the last hour) — altcoin entries paused`);
+  // A stop that's tight relative to real round-trip fees is the single
+  // biggest cause of a strategy that looks fine gross but bleeds net —
+  // see README-SCALP.md and the fee-vs-stop postmortem it links. Reject
+  // outright rather than let net-of-fee math alone catch it (a thin
+  // stop can still clear a modest net-profit floor on the win side while
+  // making every LOSS disproportionately fee-heavy).
+  if(feeToStopRatioPct != null && feeToStopRatioPct > 35) reasons.push(`Round-trip fees are ${feeToStopRatioPct.toFixed(0)}% of the stop distance (cap 35%) — too fee-heavy relative to risk`);
 
   if(dayState){
     if(dayState.dailyPnlPct <= -RISK_DEFAULTS.maxDailyLossPct) reasons.push('Daily drawdown limit reached — trading stopped for the day');

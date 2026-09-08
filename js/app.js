@@ -10,15 +10,20 @@ import { runScan, startLiveScan, stopLiveScan } from './triangular.js';
 import { runXScan } from './cross-exchange.js';
 import { initAutotrade } from './autotrade.js';
 import { initFuturesEngine } from './futures-ui.js';
+import { initAiSignal } from './ai-signal.js';
 
 els.tabOverviewBtn.addEventListener('click', () => switchTabAll('overview'));
 els.ovRunBtn.addEventListener('click', () => { runScan(); runXScan(); });
 
-// Route the tri/x/trading tab buttons through the same switchTabAll used for
-// Overview above, so clicking them also deactivates the other panels correctly.
+// Route the tri/x/trading/keys tab buttons through the same switchTabAll used
+// for Overview above, so clicking them also deactivates the other panels correctly.
 els.tabTriBtn.addEventListener('click', () => switchTabAll('tri'));
 els.tabXBtn.addEventListener('click', () => switchTabAll('x'));
 els.tabTradingBtn.addEventListener('click', () => switchTabAll('trading'));
+els.tabKeysBtn.addEventListener('click', () => switchTabAll('keys'));
+// Pointer button left in the Autotrade & Balances sub-panel where "Connect
+// Exchanges" used to live — jumps straight to the now-separate API Keys tab.
+if(els.goToKeysBtn) els.goToKeysBtn.addEventListener('click', () => switchTabAll('keys'));
 
 // Within the combined Autotrade & Futures panel, tabAutoBtn/tabFuturesBtn
 // are now the sub-tab switch, not top-level tabs — see switchSubTab.
@@ -33,3 +38,4 @@ els.xScanBtn.addEventListener('click', runXScan);
 window.addEventListener('load', runScan);
 initAutotrade();
 initFuturesEngine();
+initAiSignal();

@@ -52,6 +52,7 @@
     <button class="navtab" id="tabTriBtn" role="tab" aria-selected="false"><span class="ic">&#9651;</span>Triangular Arbitrage</button>
     <button class="navtab" id="tabXBtn" role="tab" aria-selected="false"><span class="ic">&#8645;</span>Cross-Exchange</button>
     <button class="navtab" id="tabTradingBtn" role="tab" aria-selected="false"><span class="ic">&#9889;</span>Autotrade &amp; Futures</button>
+    <button class="navtab" id="tabKeysBtn" role="tab" aria-selected="false"><span class="ic">&#128273;</span>API Keys</button>
   </nav>
 
   <!-- ============ OVERVIEW ============ -->
@@ -264,17 +265,18 @@
   <div class="panel active" id="panelAuto">
 
     <div class="ov-block" style="margin-bottom:18px;">
-      <div class="ov-block-title">Connect Exchanges</div>
-      <div class="field" style="max-width:560px; margin:12px 0 4px;">
-        <label for="atProxyUrl">Verification proxy <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);" title="This is pre-configured for every device — nothing to enter here.">MANAGED</span></label>
-        <input id="atProxyUrl" type="text" readonly aria-readonly="true" title="Managed automatically — verification is pre-configured for every device, no setup needed.">
-        <div style="font-size:11px;color:var(--dim);margin-top:4px;">Balance verification is pre-configured for this site — nothing to set up on any device.</div>
+      <div class="ov-block-title">Exchange API Keys</div>
+      <div style="font-size:12px;color:var(--dim);margin:10px 0;line-height:1.5;">
+        Connecting and managing exchange API keys now lives in its own <b>API Keys</b> tab — one place to bind a key per exchange, shared by Autotrade (Spot, below) and the AI Futures Engine (Futures) alike, instead of being buried inside this page. Nothing to reconnect: keys you already saved are still there.
       </div>
-      <div id="connectRows" class="connect-list"></div>
+      <button type="button" class="primary ghost" id="goToKeysBtn">Open API Keys tab</button>
     </div>
 
     <div class="ov-block" style="margin-bottom:18px;">
       <div class="ov-block-title">Balances (Spot)</div>
+      <div style="font-size:11px;color:var(--dim);margin:8px 0;">
+        Read from each exchange's own SPOT balance endpoint only — separate from the Futures balance shown in the AI Futures Engine tab's Live/Demo section, which is read from that exchange's separate FUTURES balance endpoint. A deposit, trade, or transfer on one side is never assumed to change the other.
+      </div>
       <div id="balanceRows" class="balance-list"></div>
     </div>
 
@@ -411,8 +413,8 @@
         <input id="fuMinConfidence" type="number" min="0" max="100" step="1" value="60">
       </div>
       <div class="field">
-        <label for="fuMinRR" title="Both the minimum approved ratio AND the actual target every trade is built to: a stop of $10 targets $10 x this value. 1.2 stays profitable at any win rate above ~45.5%.">Reward:Risk (target &amp; minimum)</label>
-        <input id="fuMinRR" type="number" min="0.5" max="5" step="0.1" value="1.2">
+        <label for="fuMinRR" title="Fixed system-wide at 1:2 — no longer user-adjustable. A thin ratio on a tight stop let round-trip fees erase most of a winning trade's edge in real Live/Demo trading; see the API Keys/Futures footer notes.">Reward:Risk (fixed)</label>
+        <input id="fuMinRR" type="number" value="2.0" readonly aria-readonly="true" title="Fixed at 1:2 — see js/futures/risk.js RISK_DEFAULTS.riskRewardRatio.">
       </div>
       <div class="field">
         <label for="fuMinNetProfit">Min expected net profit (%)</label>
@@ -427,7 +429,7 @@
         <input id="fuLeverage" type="number" min="1" max="10" step="1" value="5">
       </div>
       <div class="field">
-        <label for="fuSelectivityToggle" title="Minimum confidence 82, minimum R:R 1.5, and every other filter tightened. May take zero trades for long stretches — that's by design.">High Selectivity Mode</label>
+        <label for="fuSelectivityToggle" title="Minimum confidence 82 and every other filter tightened (reward:risk is already fixed at 1:2 for everyone — this toggle no longer changes it). May take zero trades for long stretches — that's by design.">High Selectivity Mode</label>
         <label class="toggle-check">
           <input id="fuSelectivityToggle" type="checkbox">
           <span>fewer, higher-conviction setups only</span>
@@ -524,7 +526,7 @@
       </div>
 
       <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);margin-top:16px;">
-        <div class="ov-card ov-highlight"><span class="ov-label">Real Balance (USDT)</span><span class="ov-value" id="fuLiveBalance">—</span></div>
+        <div class="ov-card ov-highlight"><span class="ov-label">Real Balance — Futures (USDT)</span><span class="ov-value" id="fuLiveBalance">—</span></div>
         <div class="ov-card"><span class="ov-label">Open Position</span><span class="ov-value" id="fuLiveOpenPosition" style="font-size:14px;">None</span></div>
         <div class="ov-card"><span class="ov-label">Trades (session)</span><span class="ov-value" id="fuLiveTrades">0</span></div>
         <div class="ov-card ov-highlight"><span class="ov-label">Win Rate</span><span class="ov-value" id="fuLiveWinRate">—</span></div>
@@ -549,13 +551,74 @@
     </div>
 
     <footer>
-      <b>Scope —</b> USDT-margined perpetuals across a 35-symbol watchlist, excluding BTC, ETH and SOL on every exchange (highest fees of the watchlist — see <code>EXCLUDED_FUTURES_SYMBOLS</code> in <code>js/futures/engine.js</code>; BTC price data is still used internally for the shock filter, just never traded). Default risk 1% of equity per trade (configurable 1–50%, see the "Risk per trade (%)" field above), max 3 simultaneous positions, max total portfolio risk scaling with that setting, max 2% daily loss, pause after 3 consecutive losses — all enforced by the No-Trade Engine before any position opens.<br>
+      <b>Scope —</b> USDT-margined perpetuals across a 35-symbol watchlist, excluding BTC, ETH, SOL, LTC and DOGE on every exchange (see <code>EXCLUDED_FUTURES_SYMBOLS</code> in <code>js/futures/engine.js</code>; BTC price data is still used internally for the shock filter, just never traded). Default risk 1% of equity per trade (configurable 1–50%, see the "Risk per trade (%)" field above), a FIXED 1:2 reward:risk on every trade (no longer user-adjustable), max 3 simultaneous positions, max total portfolio risk scaling with your risk-per-trade setting, max 2% daily loss, pause after 3 consecutive losses — all enforced by the No-Trade Engine before any position opens.<br>
+      <b>Fee-drag fix —</b> real Live/Demo trading on Bybit surfaced a genuine bug, not a misunderstanding: AI Scalp's stop distance could be as tight as 0.15% of price, while real round-trip futures fees run ~0.10-0.12% on most of these exchanges (0.06% taker one-way on Bitget, the highest of the five — see <code>DEFAULT_FEE_CONFIG</code> in <code>js/futures/costs.js</code>, sourced from each exchange's own published fee schedule) — so fees alone could eat 70%+ of the risk on every trade regardless of signal quality, turning a near-breakeven gross win rate sharply net-negative. Fixed at the source: the stop-distance floor is now 0.35%, the reward:risk is fixed at 1:2 instead of 1.2, the AI Scalp net-profit floor was raised, and a new gate rejects any setup where round-trip fees exceed 35% of its own stop distance. None of this changes what confidence score a setup gets — it changes what a stop and target are actually allowed to look like once one fires.<br>
+      <b>On win rate —</b> we won't invent a number here. A specific win-rate range isn't something any of this can honestly promise in live markets, and this build has been burned by an overclaim before (see the deterministic-seed postmortem in <code>README-SCALP.md</code>) — it won't repeat that. What changed above is the breakeven bar itself: at the old 1.2 ratio and 0.15% stop floor, the math required roughly a 79-82% win rate just to break even against real round-trip fees — a bar this kind of momentum scalp was never going to clear, which is exactly what real trading exposed. At the new fixed 1:2 ratio and 0.35% stop floor, breakeven drops to roughly 37-45% depending on exchange fees and where the stop lands in its range — a bar a genuine, even modest, edge can plausibly clear. That's a real, computed shift in what's required to be profitable, not a claim about what win rate you'll actually get. The optional AI Signal check (API Keys tab) adds an independent second filter on top, which may or may not move the real number further — judge it against your own Live/Demo trade history, not a claim made here.<br>
       <b>Win rate vs. expectancy —</b> the dashboard reports whatever win rate and profit factor the session's trades actually produced. A high win rate with poor expectancy is not something this build is tuned toward, and it will show a losing session honestly if that's what happens against the current (synthetic, Paper-mode) price data.<br>
       <b>Live/Demo trading</b> (Bybit, Binance, Gate.io, MEXC, and Bitget — MEXC is Live only, no Demo) places real orders through <code>server/server.js</code> with a native/exchange-enforced stop-loss and take-profit on every position — see the Live/Demo Trading section above and <code>server/README.md</code> before arming it with a Live key.<br>
+      <b>AI Signal (optional)</b> — if enabled in the API Keys tab, every APPROVED Live/Demo signal also gets a second opinion from whichever model provider you've connected there before an order is placed. It can only make the bot MORE cautious (reject a signal the engine above already approved) — it cannot approve a signal the engine rejected, size a position, or touch any risk control on this page. See the API Keys tab for the honest caveats on that feature; it is not tuned or proven to raise win rate.<br>
       <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet. All five exchanges now have Live/Demo (or Live-only, for MEXC) execution built.<br>
       This is not financial advice.
     </footer>
   </div>
+  </div>
+
+  <!-- ============ API KEYS ============ -->
+  <div class="panel" id="panelKeys">
+    <div class="ov-head">
+      <h2>API Keys</h2>
+    </div>
+    <div style="font-size:12px;color:var(--dim);margin-bottom:18px;line-height:1.5;">
+      One place to bind every credential this app uses — exchange keys (shared by Autotrade's Spot trading and the AI Futures Engine's Live/Demo trading) and, optionally, an AI model provider key for the AI Futures Engine's second-opinion signal check. Every key here lives only in this browser (and, for the one signed call each needs, in this server's request memory for the length of that call) — see <code>server/README.md</code>. Nothing on this page places an order by itself.
+    </div>
+
+    <div class="ov-block" style="margin-bottom:18px;">
+      <div class="ov-block-title">Exchange API Keys</div>
+      <div class="field" style="max-width:560px; margin:12px 0 4px;">
+        <label for="atProxyUrl">Verification proxy <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);" title="This is pre-configured for every device — nothing to enter here.">MANAGED</span></label>
+        <input id="atProxyUrl" type="text" readonly aria-readonly="true" title="Managed automatically — verification is pre-configured for every device, no setup needed.">
+        <div style="font-size:11px;color:var(--dim);margin-top:4px;">Balance verification is pre-configured for this site — nothing to set up on any device.</div>
+      </div>
+      <div id="connectRows" class="connect-list"></div>
+      <div style="font-size:11px;color:var(--dim);margin-top:10px;">
+        One key per exchange, used everywhere that exchange appears in this app — Autotrade (Spot, in the Autotrade &amp; Balances tab) and the AI Futures Engine (Futures, Live/Demo section) both read the same saved key instead of asking you to connect twice.
+      </div>
+    </div>
+
+    <div class="ov-block" style="border-color:var(--amber-dim);">
+      <div class="ov-block-title">AI Signal Provider <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">OPTIONAL · EXPERIMENTAL</span></div>
+      <div style="font-size:12px;color:var(--dim);margin:10px 0;line-height:1.5;">
+        Bind your own API key for ChatGPT (OpenAI), Claude (Anthropic), Gemini (Google), or Grok (xAI) to have that model give a second opinion on every Live/Demo signal the AI Futures Engine's own scoring/risk/no-trade logic has ALREADY approved, right before an order is placed. The model can only reject a signal the engine approved — it never sees, and cannot override, anything the engine already rejected, and it has no access to position sizing, leverage, or any risk control. <b>This is not proven to improve win rate</b> — it's an extra, independent filter you can turn on and judge for yourself against the Live/Demo trade history, not a guarantee. Costs whatever the provider bills you for each API call it makes (roughly one small call per approved signal). Your key is sent straight through to that provider's own API on each check and is never stored on this app's server.
+      </div>
+      <div class="field" style="max-width:280px;">
+        <label for="aiProviderSelect">Provider</label>
+        <select id="aiProviderSelect">
+          <option value="openai">ChatGPT (OpenAI)</option>
+          <option value="anthropic">Claude (Anthropic)</option>
+          <option value="google">Gemini (Google)</option>
+          <option value="xai">Grok (xAI)</option>
+        </select>
+      </div>
+      <div class="kv-field" style="max-width:480px;margin-top:10px;">
+        <input id="aiApiKeyInput" type="password" placeholder="Enter this provider's API key">
+        <button type="button" class="reveal-btn" id="aiKeyRevealBtn" title="Show/hide">SHOW</button>
+      </div>
+      <div class="btn-row" style="margin-top:10px;">
+        <button type="button" class="primary ghost" id="aiSaveBtn">Save Key</button>
+        <button type="button" class="primary ghost" id="aiTestBtn">Test Connection</button>
+        <button type="button" class="primary ghost" id="aiRemoveBtn">Remove Key</button>
+      </div>
+      <div style="margin-top:12px;">
+        <label class="toggle-check">
+          <input id="aiEnabledToggle" type="checkbox">
+          <span>Use this provider to double-check Live/Demo signals before an order is placed</span>
+        </label>
+      </div>
+      <div id="aiStatusNote" style="font-size:12px;color:var(--dim);margin-top:10px;">No AI provider key saved yet.</div>
+      <div style="font-size:11px;color:var(--dim);margin-top:10px;">
+        Model/endpoint details for each provider are implemented against their current published API docs but, like the newer exchange integrations in this app, haven't been exercised against a live account from this codebase's own testing — use Test Connection above and watch a few Live/Demo cycles closely before trusting it further.
+      </div>
+    </div>
   </div>
 
 </div>

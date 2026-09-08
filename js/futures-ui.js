@@ -25,6 +25,7 @@ import { mockMarket } from './futures/mockMarket.js';
 import { RISK_DEFAULTS } from './futures/risk.js';
 import { DEFAULT_WEIGHTS } from './futures/scoring.js';
 import { computeBtcShock } from './futures/indicators.js';
+import { getAiConfirmation } from './ai-signal.js';
 
 const CYCLE_MS = 4000; // one synthetic "cycle" every 4s; each cycle advances the mock clock by a few minutes
 const LIVE_CYCLE_MS = 8000; // real API calls — a slower, deliberately conservative cadence than Paper's
@@ -32,12 +33,13 @@ const LIVE_CYCLE_MS = 8000; // real API calls — a slower, deliberately conserv
 // API call volume reasonable and every symbol here is liquid enough that
 // the spread/liquidity gates in noTradeEngine.js should rarely be the
 // thing standing between a real signal and a trade.
-// BTC, ETH and SOL are excluded from the tradeable set on every exchange
-// (see EXCLUDED_FUTURES_SYMBOLS in engine.js — they carry disproportionately
-// high fees relative to the rest of the watchlist), but BTCUSDT is still
-// fetched every cycle since the shock filter below reads it directly.
-const LIVE_TRADEABLE_WATCHLIST = ['BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOGEUSDT', 'LTCUSDT']
-  .filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s)); // defensive — none of these are in the excluded set today, but keeps this list honoring it if it's ever extended
+// BTC, ETH, SOL, LTC and DOGE are excluded from the tradeable set on
+// every exchange (see EXCLUDED_FUTURES_SYMBOLS in engine.js), but BTCUSDT
+// is still fetched every cycle since the shock filter below reads it
+// directly. TRXUSDT/DOTUSDT added here to keep the live watchlist at a
+// reasonable breadth after LTC/DOGE came out.
+const LIVE_TRADEABLE_WATCHLIST = ['BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'TRXUSDT', 'DOTUSDT', 'DOGEUSDT', 'LTCUSDT']
+  .filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s)); // the actual enforcement point — anything added to EXCLUDED_FUTURES_SYMBOLS in engine.js drops out of live trading here automatically, no second list to maintain
 const LIVE_WATCHLIST = ['BTCUSDT', ...LIVE_TRADEABLE_WATCHLIST]; // BTCUSDT fetched for the shock filter only — never scanned or traded, per EXCLUDED_FUTURES_SYMBOLS
 const ARM_PHRASE = 'PLACE REAL ORDERS';
 
@@ -91,7 +93,10 @@ function readSettingsFromInputs(){
   const f = fu();
   if(els.fuExchange) f.exchange = els.fuExchange.value;
   if(els.fuMinConfidence) f.minConfidence = Number(els.fuMinConfidence.value) || 60;
-  if(els.fuMinRR) f.minRiskReward = Number(els.fuMinRR.value) || 1.2;
+  // Fixed at 2.0 (1:2) — the field is now readonly (see index.html) but
+  // this still guards against a stale localStorage value from before the
+  // ratio became non-configurable.
+  if(els.fuMinRR) f.minRiskReward = 2.0;
   if(els.fuMinNetProfit) f.minNetProfitPct = Number(els.fuMinNetProfit.value) || 0.30;
   // Clamped server-side-of-the-UI (not just via the input's min/max
   // attributes) so a 0/negative/absurd value typed directly, or the
@@ -442,8 +447,29 @@ async function runLiveCycle(){
   const approved = rows.find(r => r.status === 'APPROVED');
   if(!approved){
     const boostNote = f2.liveAdaptiveConfidenceBoost > 0 ? ` (min confidence raised +${f2.liveAdaptiveConfidenceBoost} after recent losses)` : '';
-    showLiveMessage(`Armed on ${exchange} (${mode}), watching ${LIVE_TRADEABLE_WATCHLIST.length} symbols (BTC/ETH/SOL excluded — high fees) — no qualifying signal this cycle${boostNote}.`);
+    showLiveMessage(`Armed on ${exchange} (${mode}), watching ${LIVE_TRADEABLE_WATCHLIST.length} symbols (BTC/ETH/SOL/LTC/DOGE excluded) — no qualifying signal this cycle${boostNote}.`);
     return;
+  }
+
+  // Optional AI second opinion (see js/ai-signal.js) — consulted ONLY here,
+  // on a row the engine above has ALREADY approved through every existing
+  // scoring/risk/no-trade check. It can only cancel this one order; it
+  // never sees a rejected row and never touches sizing/leverage/risk.
+  if(state.aiSignal.enabled && state.aiSignal.apiKey){
+    showLiveMessage(`Engine approved ${approved.symbol} ${approved.direction} — checking with ${approved.symbol ? state.aiSignal.provider : ''}…`);
+    const verdict = await getAiConfirmation({
+      symbol: approved.symbol, exchange, direction: approved.direction, setup: approved.setup,
+      regime: approved.regime, confidence: approved.confidence, entry: approved.entry, stop: approved.stop,
+      tp1: approved.tp1, riskRewardRatio: approved.riskReward, expectedNetPct: approved.expectedNetPct,
+      liquidityScore: approved.liquidityScore, reasons: approved.reasons,
+    });
+    if(verdict && verdict.ok && verdict.approve === false){
+      showLiveMessage(`AI signal check rejected ${approved.symbol} ${approved.direction} despite the engine's approval: "${verdict.reason||'no reason given'}" — no order placed this cycle.`, 'error');
+      return;
+    }
+    if(verdict && !verdict.ok){
+      showLiveMessage(`AI signal check couldn't complete (${verdict.message||'unknown error'}) — proceeding on the engine's own approval alone.`);
+    }
   }
 
   const side = approved.direction === 'LONG' ? 'Buy' : 'Sell'; // server normalizes casing per exchange — see FUTURES_SIDE_CASING in server.js

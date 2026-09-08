@@ -28,16 +28,20 @@ import { atr, swingLevels, volumeExpansion, clamp } from './indicators.js';
 function getSnapshot(symbol){ return mockMarket.snapshot(symbol); }
 function getBtcShock(){ return mockMarket.btcShock(); }
 
-// BTC, ETH and SOL carry disproportionately high fees relative to the
-// rest of the futures watchlist on every exchange this app supports, so
-// they're excluded from the tradeable/scanned set everywhere — Paper mode
-// (below), Live/Demo mode (see js/futures-ui.js's LIVE_TRADEABLE_WATCHLIST),
-// on all five exchanges alike. This only removes them from being scanned,
-// scored, or opened as positions: BTCUSDT's own price data is still read
-// separately for the cross-market "BTC shock" filter (getBtcShock above /
-// isAltcoin below), which every remaining altcoin signal is still checked
-// against.
-export const EXCLUDED_FUTURES_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
+// BTC, ETH, SOL, LTC and DOGE are excluded from the tradeable/scanned set
+// everywhere — Paper mode (below), Live/Demo mode (see js/futures-ui.js's
+// LIVE_TRADEABLE_WATCHLIST), on all five exchanges alike. BTC/ETH/SOL:
+// disproportionately high fees relative to the rest of the watchlist.
+// LTC/DOGE: added after real Bybit Live/Demo trading showed round-trip
+// fees eating most or all of a thin-stop scalp's edge on them specifically
+// — see the AI Scalp stop-distance/fee-ratio fix below, which is the real,
+// general-purpose fix; excluding these two on top of that is the belt-
+// and-suspenders version the user explicitly asked for. This only removes
+// them from being scanned, scored, or opened as positions: BTCUSDT's own
+// price data is still read separately for the cross-market "BTC shock"
+// filter (getBtcShock above / isAltcoin below), which every remaining
+// altcoin signal is still checked against.
+export const EXCLUDED_FUTURES_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'LTCUSDT', 'DOGEUSDT']);
 export const TRADEABLE_FUTURES_SYMBOLS = FUTURES_SYMBOLS.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s));
 
 // Ensemble: each setup already carries its own direction+confidence.
@@ -64,16 +68,21 @@ function buildLevels(snap, direction, setupType){
 
   if(setupType === 'AI Scalp'){
     // Stop distance is ATR-scaled so it self-adjusts to each symbol's/
-    // moment's own volatility instead of a fixed %, which is what keeps
-    // the average time-to-resolve landing in roughly the same band
-    // across very different symbols. The 1.05x multiplier and 0.15-0.42%
-    // clamp were tuned empirically against this mock market.
-    // Target is set from the stop distance via the configured
-    // reward:risk ratio (applyRewardRiskFloor below), NOT a fixed 1:1 —
-    // seeded at 1:1 here as a floor that ratio will always raise to.
+    // moment's own volatility instead of a fixed %. The floor was
+    // previously 0.15% — against real round-trip taker fees of roughly
+    // 0.10-0.12% (Bybit/Binance/Gate.io/Bitget; see costs.js), that meant
+    // fees alone could eat 70-80%+ of the stop, which is what real
+    // Live/Demo trading exposed: a near-breakeven GROSS win rate turning
+    // sharply net-negative purely on fee drag, not a bad signal. Floor
+    // raised to 0.35% so fees are a materially smaller, survivable slice
+    // of the risk on every trade — the noTradeEngine.js fee-to-stop-ratio
+    // gate is the general-purpose backstop for this; this floor is the
+    // fix at the source. Target is set from the stop distance via the
+    // fixed 1:2 reward:risk ratio (applyRewardRiskFloor + RISK_DEFAULTS.
+    // riskRewardRatio — no longer user-configurable, see risk.js).
     const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
     const atrPct5 = (atrM5 / entry) * 100;
-    const distPct = clamp(atrPct5 * 1.05, 0.15, 0.42);
+    const distPct = clamp(atrPct5 * 1.1, 0.35, 0.9);
     const stopPrice = direction === 'LONG' ? entry * (1 - distPct / 100) : entry * (1 + distPct / 100);
     const sign = direction === 'LONG' ? 1 : -1;
     const tp1 = entry * (1 + sign * distPct / 100);
@@ -126,17 +135,16 @@ function buildLevels(snap, direction, setupType){
   return { entry, stopPrice, stopDistancePct, tp1, tp2, tp3, tp1Pct, tp2Pct, tp3Pct, atrPct };
 }
 
-// Guarantees every trade's actual reward:risk meets the configured
-// minimum, regardless of which setup produced it — this is what makes
-// the "Min risk/reward" field a real, enforced target rather than just a
-// filter that quietly lets underpowered setups (Range Scalp/AI Scalp
-// previously) through with their own much smaller built-in floors. If
-// the setup's own structure/ATR-based target already clears the ratio,
-// it's left alone (a bigger natural target is never scaled down); if
-// not, tp1/tp2/tp3 are scaled up together (preserving their relative
-// spacing) so tp1 lands at exactly stopDistancePct * riskRewardRatio —
-// e.g. a 1% stop with the 1.2 default targets 1.2%, so a $10 loss is
-// matched by a $12 win.
+// Guarantees every trade's actual reward:risk meets the fixed 1:2 ratio
+// (RISK_DEFAULTS.riskRewardRatio — see risk.js), regardless of which setup
+// produced it — this is what makes 1:2 a real, enforced target rather
+// than just a filter that quietly lets underpowered setups through with
+// their own much smaller built-in targets. If the setup's own structure/
+// ATR-based target already clears the ratio, it's left alone (a bigger
+// natural target is never scaled down); if not, tp1/tp2/tp3 are scaled up
+// together (preserving their relative spacing) so tp1 lands at exactly
+// stopDistancePct * riskRewardRatio — e.g. a 1% stop targets 2%, so a $10
+// loss is matched by a $20 win.
 function applyRewardRiskFloor(levels, direction, riskRewardRatio){
   if(!(levels.stopDistancePct > 0) || !(levels.tp1Pct > 0)) return levels;
   const targetPct = levels.stopDistancePct * riskRewardRatio;
@@ -193,15 +201,16 @@ export function runScanCycle(cfg, dayState, opts){
     let confidence = weightedScore(factorScores, weights);
     confidence = Math.round((confidence + ensemble.ensembleConfidence) / 2);
 
-    // The reward:risk ratio is fully configurable (default 1.2 — see
-    // RISK_DEFAULTS.riskRewardRatio, and the "Min risk/reward" field)
-    // and applies uniformly to every setup: it's now both the minimum
-    // gate AND the actual target construction, so a trade can no longer
-    // be approved with a smaller built-in target than this ratio calls
-    // for. High Selectivity Mode raises the bar further to 1.5, same as
-    // it already tightens confidence.
-    const targetRiskReward = cfg.highSelectivity ? Math.max(1.5, cfg.minRiskReward || RISK_DEFAULTS.riskRewardRatio)
-      : (cfg.minRiskReward ?? RISK_DEFAULTS.riskRewardRatio);
+    // Reward:risk is now FIXED at 1:2 system-wide (RISK_DEFAULTS.
+    // riskRewardRatio — see risk.js) — no longer a user-configurable "Min
+    // risk/reward" field. This is both the floor AND the actual target
+    // construction, so a trade can never be approved with a smaller
+    // built-in target than 2x its stop. Combined with the wider AI Scalp
+    // stop floor above, this is what actually fixes the fee-drag problem:
+    // at a 0.35% stop and 0.70% target, a ~0.11% round-trip fee costs a
+    // loser 0.46% and a winner nets 0.59% — profitable even at a 50% win
+    // rate, unlike the old 1.2 ratio on a 0.15% stop.
+    const targetRiskReward = RISK_DEFAULTS.riskRewardRatio;
     const levels = applyRewardRiskFloor(buildLevels(snap, direction, primary.type), direction, targetRiskReward);
     const volExp = volumeExpansion(snap.m5, 10);
     const execution = decideExecution({ setupType: primary.type, volExpansionRatio: volExp });
@@ -241,12 +250,24 @@ export function runScanCycle(cfg, dayState, opts){
     // terms, so the default 0.30% net-profit floor (sized for the
     // bigger trend/breakout targets) would reject nearly every scalp
     // signal even when it clears round-trip costs. Each still has to
-    // clear costs, just not by as much.
-    const minNetProfit = primary.type === 'AI Scalp' ? (cfg.aiScalpMinNetProfitPct ?? 0.03)
+    // clear costs, just not by as much. Raised from 0.03% to 0.15% for
+    // AI Scalp after real Live/Demo trading showed 0.03% left almost no
+    // margin above real round-trip fees (~0.10-0.12%) once spread and
+    // slippage were added on top — trades were clearing the floor on
+    // paper while being fee-negative in practice.
+    const minNetProfit = primary.type === 'AI Scalp' ? (cfg.aiScalpMinNetProfitPct ?? 0.15)
       : primary.type === 'Range Scalp' ? (cfg.scalpMinNetProfitPct ?? 0.04)
       : (cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT);
 
     const riskPctPerTrade = clamp(cfg.riskPctPerTrade || RISK_DEFAULTS.riskPctPerTrade, 0.1, RISK_DEFAULTS.maxRiskPctPerTrade);
+
+    // How much of the stop distance itself is round-trip fees — the
+    // direct measure of "is this stop too tight to survive real costs"
+    // that a net-profit floor on the WIN side alone can't catch (see
+    // noTradeEngine.js's cap on this).
+    const feeToStopRatioPct = levels.stopDistancePct > 0
+      ? ((costs.entryFeePct + costs.exitFeePct) / levels.stopDistancePct) * 100
+      : null;
 
     const gate = evaluateNoTradeFilters({
       snap, regime, confidence, minConfidence,
@@ -254,7 +275,7 @@ export function runScanCycle(cfg, dayState, opts){
       riskRewardRatio, minRiskReward: minRR,
       liquidationSafety: liqSafety, dayState, btcShock, isAltcoin,
       fundingCostPct: costs.fundingCostPct, grossTargetPct: levels.tp1Pct,
-      nowMs: nowFn(), riskPctPerTrade,
+      nowMs: nowFn(), riskPctPerTrade, feeToStopRatioPct,
     });
 
     const sizing = positionSize({

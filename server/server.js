@@ -2169,6 +2169,150 @@ app.post('/api/balance', async (req, res) => {
   }
 });
 
+// =============================================================
+// AI SIGNAL CONFIRMATION (optional, experimental) — an optional second
+// opinion from a user-supplied LLM provider key (OpenAI/ChatGPT,
+// Anthropic/Claude, Google/Gemini, or xAI/Grok), called ONLY on a signal
+// js/futures/engine.js's own scoring/risk/no-trade logic has ALREADY
+// approved (see js/ai-signal.js and js/futures-ui.js's runLiveCycle). It
+// can only reject that one signal — it has no way to approve one the
+// engine rejected, size a position, set leverage, or touch any of this
+// app's other risk controls.
+//
+// Same "key never touches disk/log/database" handling as /api/verify
+// above: the provider key lives in this request's local variables for the
+// lifetime of this one call and nowhere else.
+//
+// HONESTY NOTE, matching this file's own standard for less-tested
+// exchange integrations (see the Bitget/MEXC Demo comments elsewhere):
+// each provider's endpoint/model/request-shape below is implemented
+// against that provider's documented API, but has NOT been exercised
+// against a live account from this codebase's own testing. Providers
+// rename or retire model IDs periodically — if a call starts failing with
+// a "model not found"-style error, check that provider's current docs and
+// update the model constant below.
+// =============================================================
+const AI_TIMEOUT_MS = 12_000;
+const AI_PROVIDER_LABELS = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', xai: 'xAI' };
+
+function withTimeout(promise, ms, label){
+  let t;
+  const timeout = new Promise((_, reject) => { t = setTimeout(() => reject(new Error(`${label} request timed out after ${ms}ms`)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+}
+
+function buildAiPrompt(signal){
+  const {
+    symbol, exchange, direction, setup, regime, confidence,
+    entry, stop, tp1, riskRewardRatio, expectedNetPct, liquidityScore, reasons,
+  } = signal || {};
+  const system = 'You are a risk-averse trading-signal reviewer for a futures scalping bot. '
+    + 'You are given ONE trade signal that has ALREADY passed the bot\'s own risk and no-trade filters, and must decide whether you would ALSO approve it. '
+    + 'You can only make the bot MORE cautious, never less — your job is to catch signals that look statistically fine on paper but are contextually weak. '
+    + 'Reply with ONLY a compact JSON object and nothing else, no markdown fence, no prose outside it: {"approve": true or false, "confidence": a number 0-100, "reason": "one short sentence"}.';
+  const user = [
+    `Exchange: ${exchange}`, `Symbol: ${symbol}`, `Direction: ${direction}`, `Setup: ${setup}`,
+    `Market regime: ${regime}`, `Bot confidence: ${confidence}/100`, `Entry: ${entry}`, `Stop: ${stop}`,
+    `Target (TP1): ${tp1}`, `Risk:Reward: ${riskRewardRatio}`, `Expected net return: ${expectedNetPct}%`,
+    `Liquidity score (0-100): ${liquidityScore}`, `Bot's stated reasons: ${(reasons||[]).join('; ') || 'none given'}`,
+    '', 'Should this specific trade be taken right now? Respond with ONLY the JSON object described.',
+  ].join('\n');
+  return { system, user };
+}
+
+function parseAiVerdict(text){
+  if(!text) throw new Error('empty response from model');
+  const cleaned = String(text).trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if(!match) throw new Error('no JSON object found in the model\'s response');
+  const parsed = JSON.parse(match[0]);
+  if(typeof parsed.approve !== 'boolean') throw new Error('response is missing a boolean "approve" field');
+  return {
+    approve: parsed.approve,
+    confidence: Number.isFinite(parsed.confidence) ? Math.max(0, Math.min(100, parsed.confidence)) : null,
+    reason: typeof parsed.reason === 'string' ? parsed.reason.slice(0, 300) : '',
+  };
+}
+
+// OpenAI and xAI (Grok) both speak the same Chat Completions request/
+// response shape, so one function covers both.
+async function callOpenAiCompatible(baseUrl, model, apiKey, system, user){
+  const res = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      temperature: 0.2,
+      max_tokens: 200,
+    }),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok) throw new Error((data && (data.error?.message || data.message)) || `HTTP ${res.status}`);
+  const text = data?.choices?.[0]?.message?.content;
+  return parseAiVerdict(text);
+}
+
+async function callAnthropic(apiKey, system, user){
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5', // check Anthropic's current model list if this ever 404s — see file header note
+      max_tokens: 200,
+      system,
+      messages: [{ role: 'user', content: user }],
+    }),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok) throw new Error((data && (data.error?.message || data.message)) || `HTTP ${res.status}`);
+  const text = Array.isArray(data?.content) ? data.content.map(b => b.text || '').join('') : '';
+  return parseAiVerdict(text);
+}
+
+async function callGemini(apiKey, system, user){
+  const model = 'gemini-1.5-flash'; // check Google's current model list if this ever 404s — see file header note
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: system }] },
+      contents: [{ role: 'user', parts: [{ text: user }] }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 200 },
+    }),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok) throw new Error((data && data.error?.message) || `HTTP ${res.status}`);
+  const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+  return parseAiVerdict(text);
+}
+
+const AI_PROVIDERS = {
+  openai: (apiKey, system, user) => callOpenAiCompatible('https://api.openai.com/v1', 'gpt-4o-mini', apiKey, system, user),
+  anthropic: (apiKey, system, user) => callAnthropic(apiKey, system, user),
+  google: (apiKey, system, user) => callGemini(apiKey, system, user),
+  xai: (apiKey, system, user) => callOpenAiCompatible('https://api.x.ai/v1', 'grok-2-latest', apiKey, system, user),
+};
+
+app.use('/api/ai/confirm', rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true, legacyHeaders: false }));
+app.post('/api/ai/confirm', async (req, res) => {
+  const { provider, apiKey, signal } = req.body || {};
+  if(!provider || !apiKey || !signal){
+    return res.status(400).json({ ok:false, message:'provider, apiKey and signal are all required.' });
+  }
+  const caller = AI_PROVIDERS[provider];
+  if(!caller){
+    return res.status(400).json({ ok:false, message:`Unknown AI provider "${provider}" — only openai, anthropic, google, and xai are supported.` });
+  }
+  const { system, user } = buildAiPrompt(signal);
+  try{
+    const verdict = await withTimeout(caller(apiKey, system, user), AI_TIMEOUT_MS, AI_PROVIDER_LABELS[provider] || provider);
+    return res.json({ ok:true, ...verdict });
+  }catch(err){
+    return res.json({ ok:false, message: `${AI_PROVIDER_LABELS[provider] || provider} request failed: ${err.message}` });
+  }
+});
+
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err.message); // never log req.body here
   res.status(500).json({ verified:false, rejected:false, message:'Internal error.' });
