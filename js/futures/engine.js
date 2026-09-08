@@ -28,20 +28,20 @@ import { atr, swingLevels, volumeExpansion, clamp } from './indicators.js';
 function getSnapshot(symbol){ return mockMarket.snapshot(symbol); }
 function getBtcShock(){ return mockMarket.btcShock(); }
 
-// BTC, ETH, SOL, LTC and DOGE are excluded from the tradeable/scanned set
-// everywhere — Paper mode (below), Live/Demo mode (see js/futures-ui.js's
-// LIVE_TRADEABLE_WATCHLIST), on all five exchanges alike. BTC/ETH/SOL:
-// disproportionately high fees relative to the rest of the watchlist.
-// LTC/DOGE: added after real Bybit Live/Demo trading showed round-trip
-// fees eating most or all of a thin-stop scalp's edge on them specifically
-// — see the AI Scalp stop-distance/fee-ratio fix below, which is the real,
-// general-purpose fix; excluding these two on top of that is the belt-
-// and-suspenders version the user explicitly asked for. This only removes
-// them from being scanned, scored, or opened as positions: BTCUSDT's own
-// price data is still read separately for the cross-market "BTC shock"
-// filter (getBtcShock above / isAltcoin below), which every remaining
-// altcoin signal is still checked against.
-export const EXCLUDED_FUTURES_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'LTCUSDT', 'DOGEUSDT']);
+// BTC, ETH, SOL, LTC, DOGE and BNB are excluded from the tradeable/scanned
+// set everywhere — Paper mode (below), Live/Demo mode (see
+// js/futures-ui.js's LIVE_TRADEABLE_WATCHLIST), on all five exchanges
+// alike. BTC/ETH/SOL: disproportionately high fees relative to the rest
+// of the watchlist. LTC/DOGE/BNB: excluded on explicit request, on top of
+// the general fee-vs-stop fix elsewhere in this file (see buildLevels'
+// stop-distance floor and the fee-to-stop-ratio gate in noTradeEngine.js)
+// which is what actually addresses the underlying fee-drag problem for
+// every symbol, not just these three specifically. This only removes them
+// from being scanned, scored, or opened as positions: BTCUSDT's own price
+// data is still read separately for the cross-market "BTC shock" filter
+// (getBtcShock above / isAltcoin below), which every remaining altcoin
+// signal is still checked against.
+export const EXCLUDED_FUTURES_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'LTCUSDT', 'DOGEUSDT', 'BNBUSDT']);
 export const TRADEABLE_FUTURES_SYMBOLS = FUTURES_SYMBOLS.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s));
 
 // Ensemble: each setup already carries its own direction+confidence.

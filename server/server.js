@@ -70,11 +70,56 @@ class VerifyRejected extends Error {}
 // separately) rather than one per call site.
 const BINANCE_BAN_UNTIL_MS = { live: 0, demo: 0 };
 
+// Proactive companion to the reactive ban-memory above. Binance's
+// weight limit is per-IP, and this app's own Binance call volume alone
+// (measured: ~9 weight per symbol per Live/Demo cycle, ~540/min across
+// the whole watchlist at the 8s cadence) sits well under Binance's
+// documented 2400/min cap on its own — which points at Render's shared
+// outbound IP being the real culprit: OTHER tenants' traffic sharing
+// that same egress IP can push the aggregate over the limit regardless
+// of how little this app itself sends. A fixed call cadence can't see
+// that coming; Binance's own `X-MBX-USED-WEIGHT-1M` response header,
+// present on every fapi.binance.com response, can — it reports the
+// REAL current usage against the shared IP's budget, from any tenant.
+// Reading it and backing off before it's exhausted is the one thing
+// actually within this app's control for a shared-IP problem; getting
+// Render's traffic off a shared IP entirely (a static outbound IP,
+// registered as this key's sole allowed IP on Binance) is the real fix
+// and isn't something code here can do — see the AI Futures Engine
+// footer for that operational note.
+const BINANCE_WEIGHT_STATE = { live: { used: 0, atMs: 0 }, demo: { used: 0, atMs: 0 } };
+const BINANCE_WEIGHT_PAUSE_UNTIL_MS = { live: 0, demo: 0 };
+const BINANCE_WEIGHT_SOFT_CAP = 1900; // ~80% of the documented 2400/min cap — leaves headroom for the call currently in flight plus whatever other tenants send in the same window
+const BINANCE_WEIGHT_BACKOFF_MS = 10_000;
+
+function recordBinanceWeight(mode, headers){
+  const raw = headers && (headers.get('x-mbx-used-weight-1m') || headers.get('X-MBX-USED-WEIGHT-1M'));
+  const used = raw != null ? parseInt(raw, 10) : NaN;
+  if(Number.isFinite(used)) BINANCE_WEIGHT_STATE[mode] = { used, atMs: Date.now() };
+}
+
+function checkBinanceWeightBudget(mode){
+  const until = BINANCE_WEIGHT_PAUSE_UNTIL_MS[mode] || 0;
+  if(Date.now() < until){
+    throw new VerifyRejected(`Binance's shared IP weight usage was running high a moment ago (most likely other traffic sharing this server's outbound IP, not this app alone) — pausing Binance calls until ${new Date(until).toLocaleTimeString()} rather than risk being the request that tips it into a full ban.`);
+  }
+  const s = BINANCE_WEIGHT_STATE[mode];
+  // Binance's 1-minute weight window is rolling, so a reading is only
+  // trustworthy for a few seconds after it arrives — if it's older than
+  // that, assume it's reset rather than freezing this app out on stale
+  // data forever.
+  if(s && Date.now() - s.atMs <= 15_000 && s.used >= BINANCE_WEIGHT_SOFT_CAP){
+    BINANCE_WEIGHT_PAUSE_UNTIL_MS[mode] = Date.now() + BINANCE_WEIGHT_BACKOFF_MS;
+    throw new VerifyRejected(`Binance's shared IP weight usage is at ${s.used}/2400 for this minute (most likely other traffic sharing this server's outbound IP, not this app alone) — pausing Binance calls for ${Math.round(BINANCE_WEIGHT_BACKOFF_MS/1000)}s rather than risk being the request that tips it into a full ban.`);
+  }
+}
+
 function checkBinanceBan(mode){
   const until = BINANCE_BAN_UNTIL_MS[mode] || 0;
   if(Date.now() < until){
     throw new VerifyRejected(`Binance rate-limited/banned this server's IP until ${new Date(until).toLocaleTimeString()} — no further requests are being sent until then so as not to extend it. This is a temporary, time-based lock from Binance's side, not something retrying sooner will clear.`);
   }
+  checkBinanceWeightBudget(mode); // proactive — see the comment above BINANCE_WEIGHT_STATE
 }
 function recordBinanceBanIfPresent(mode, message){
   const m = /banned until (\d+)/i.exec(String(message || ''));
@@ -777,12 +822,12 @@ async function binanceBuildFuturesSnapshot(symbol){
   let m5Raw, m15Raw, h1Raw, book, premium, ticker24h;
   try{
     [m5Raw, m15Raw, h1Raw, book, premium, ticker24h] = await Promise.all([
-      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=150`),
-      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=150`),
-      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=80`),
-      fetchJSON(`${base}/fapi/v1/ticker/bookTicker?symbol=${symbol}`),
-      fetchJSON(`${base}/fapi/v1/premiumIndex?symbol=${symbol}`),
-      fetchJSON(`${base}/fapi/v1/ticker/24hr?symbol=${symbol}`),
+      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=150`, 10_000, h => recordBinanceWeight('live', h)),
+      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=150`, 10_000, h => recordBinanceWeight('live', h)),
+      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=80`, 10_000, h => recordBinanceWeight('live', h)),
+      fetchJSON(`${base}/fapi/v1/ticker/bookTicker?symbol=${symbol}`, 10_000, h => recordBinanceWeight('live', h)),
+      fetchJSON(`${base}/fapi/v1/premiumIndex?symbol=${symbol}`, 10_000, h => recordBinanceWeight('live', h)),
+      fetchJSON(`${base}/fapi/v1/ticker/24hr?symbol=${symbol}`, 10_000, h => recordBinanceWeight('live', h)),
     ]);
   }catch(err){
     recordBinanceBanIfPresent('live', err.message);
@@ -1144,6 +1189,12 @@ async function gateioFuturesSignedRequest(method, path, query, body, apiKey, sec
 function toGateioContract(symbol){
   return symbol.endsWith('USDT') ? `${symbol.slice(0, -4)}_USDT` : symbol;
 }
+// The reverse — Gate.io's "BTC_USDT" back to this app's "BTCUSDT" — needed
+// once symbols are being discovered FROM Gate.io (gateioFuturesUniverse
+// below) rather than only ever converted the other way.
+function fromGateioContract(contract){
+  return String(contract || '').replace('_', '');
+}
 
 async function gateioFuturesBalance(mode, apiKey, secretKey){
   const account = await gateioFuturesSignedRequest('GET', '/api/v4/futures/usdt/accounts', '', null, apiKey, secretKey, mode);
@@ -1314,6 +1365,9 @@ async function mexcFuturesBalance(mode, apiKey, secretKey){
 
 function toMexcContract(symbol){
   return symbol.endsWith('USDT') ? `${symbol.slice(0, -4)}_USDT` : symbol;
+}
+function fromMexcContract(contract){
+  return String(contract || '').replace('_', '');
 }
 
 async function mexcContractInfo(contract){
@@ -1600,6 +1654,7 @@ async function binanceFuturesSignedRequest(method, path, params, apiKey, secretK
     headers: { 'X-MBX-APIKEY': apiKey, ...(method !== 'GET' ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}) },
     ...(method !== 'GET' ? { body: qs.toString() } : {}),
   });
+  recordBinanceWeight(mode, res.headers);
   const data = await res.json().catch(() => null);
   if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
     const message = data && data.msg ? data.msg : `HTTP ${res.status}`;
@@ -1799,6 +1854,149 @@ const FUTURES_SIDE_CASING = {
   bitget: side => side.toLowerCase(),
 };
 
+// =============================================================
+// FUTURES UNIVERSE — each exchange's REAL, FULL current list of USDT-M
+// perpetual symbols (not a hardcoded watchlist), each paired with its
+// own 24h quote volume for ranking. Two public calls per exchange
+// (list-all-symbols + all-tickers), regardless of how many hundreds of
+// pairs that exchange lists — the actual per-symbol detailed indicator
+// data (klines etc, in each exchange's ...BuildFuturesSnapshot function
+// above) is what costs real weight per symbol, so this intentionally
+// stays a cheap, separate, infrequent call: see LIVE_UNIVERSE_CACHE_MS
+// below and js/futures-ui.js's own client-side cache on top of that.
+//
+// This is what makes "scan everything, not a fixed small list" actually
+// work: the excluded set (EXCLUDED_FUTURES_SYMBOLS, js/futures/engine.js)
+// is the only hardcoded part left. Everything else — which symbols exist,
+// which are actually tradeable right now, how liquid each one is — comes
+// from the exchange itself, live, every refresh. What still can't scale
+// to "every symbol, every 8-second cycle" is the DETAILED per-symbol
+// scan (klines/book/funding) that actually finds a signal — an exchange
+// with 300+ USDT perpetuals would need 300 x 4-6 calls every cycle for
+// that, which no exchange's rate limit survives (all five of these have
+// public-endpoint IP caps in the same rough order of magnitude as
+// Binance's 2400/min, which the Binance ban earlier in this file already
+// showed doesn't have that kind of room to spare). The universe below
+// feeds a ranked top-N selection instead (see js/futures-ui.js) — the
+// full real symbol list, minus your exclusions, with the most
+// liquid/active names actually getting scanned each cycle rather than a
+// fixed roster that ignores what's actually moving.
+async function binanceFuturesUniverse(){
+  checkBinanceBan('live');
+  const base = BINANCE_FAPI_BASE.live;
+  let info, tickers;
+  try{
+    [info, tickers] = await Promise.all([
+      fetchJSON(`${base}/fapi/v1/exchangeInfo`, 10_000, h => recordBinanceWeight('live', h)),
+      fetchJSON(`${base}/fapi/v1/ticker/24hr`, 10_000, h => recordBinanceWeight('live', h)),
+    ]);
+  }catch(err){
+    recordBinanceBanIfPresent('live', err.message);
+    throw err;
+  }
+  const tradeable = new Set((info?.symbols || [])
+    .filter(s => s.status === 'TRADING' && s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT')
+    .map(s => s.symbol));
+  return (tickers || [])
+    .filter(t => tradeable.has(t.symbol))
+    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.quoteVolume || '0') }));
+}
+
+async function bybitFuturesUniverse(){
+  const base = BYBIT_BASE.live;
+  const [info, tickers] = await Promise.all([
+    fetchJSON(`${base}/v5/market/instruments-info?category=linear`),
+    fetchJSON(`${base}/v5/market/tickers?category=linear`),
+  ]);
+  const tradeable = new Set((info?.result?.list || [])
+    .filter(s => s.status === 'Trading' && s.quoteCoin === 'USDT' && String(s.contractType || '').includes('Perpetual'))
+    .map(s => s.symbol));
+  return (tickers?.result?.list || [])
+    .filter(t => tradeable.has(t.symbol))
+    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.turnover24h || '0') }));
+}
+
+async function gateioFuturesUniverse(){
+  const base = GATEIO_FAPI_BASE.live;
+  const [contracts, tickers] = await Promise.all([
+    fetchJSON(`${base}/api/v4/futures/usdt/contracts`),
+    fetchJSON(`${base}/api/v4/futures/usdt/tickers`),
+  ]);
+  const tradeable = new Set((Array.isArray(contracts) ? contracts : [])
+    .filter(c => !c.in_delisting)
+    .map(c => c.name));
+  return (Array.isArray(tickers) ? tickers : [])
+    .filter(t => tradeable.has(t.contract))
+    .map(t => ({ symbol: fromGateioContract(t.contract), volume24hUsd: parseFloat(t.volume_24h_quote || t.volume_24h_settle || '0') }));
+}
+
+async function mexcFuturesUniverse(){
+  const [detail, tickers] = await Promise.all([
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/detail`),
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/ticker`),
+  ]);
+  const tradeable = new Set((detail?.data || [])
+    .filter(c => c.state === 0 && c.quoteCoin === 'USDT')
+    .map(c => c.symbol));
+  return (tickers?.data || [])
+    .filter(t => tradeable.has(t.symbol))
+    .map(t => ({ symbol: fromMexcContract(t.symbol), volume24hUsd: parseFloat(t.amount24 || t.volume24 || '0') }));
+}
+
+async function bitgetFuturesUniverse(){
+  const [contracts, tickers] = await Promise.all([
+    fetchJSON(`${BITGET_BASE}/api/v2/mix/market/contracts?productType=USDT-FUTURES`),
+    fetchJSON(`${BITGET_BASE}/api/v2/mix/market/tickers?productType=USDT-FUTURES`),
+  ]);
+  const tradeable = new Set((contracts?.data || [])
+    .filter(c => c.symbolStatus === 'normal' && c.quoteCoin === 'USDT')
+    .map(c => c.symbol));
+  return (tickers?.data || [])
+    .filter(t => tradeable.has(t.symbol))
+    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.usdtVolume || t.quoteVolume || '0') }));
+}
+
+const FUTURES_UNIVERSE_GETTERS = {
+  binance: binanceFuturesUniverse,
+  bybit: bybitFuturesUniverse,
+  gateio: gateioFuturesUniverse,
+  mexc: mexcFuturesUniverse,
+  bitget: bitgetFuturesUniverse,
+};
+
+// Short server-side cache on top of js/futures-ui.js's own client-side
+// one — the symbol list and 24h volume ranking don't meaningfully change
+// inside a 45-second window, so there's no reason for every browser tab
+// polling this app to re-hit an exchange's listing endpoints on its own
+// schedule.
+const FUTURES_UNIVERSE_CACHE_MS = 45_000;
+const FUTURES_UNIVERSE_CACHE = {};
+
+app.post('/api/futures/universe', async (req, res) => {
+  const { exchange } = req.body || {};
+  const getter = FUTURES_UNIVERSE_GETTERS[exchange];
+  if(!getter){
+    return res.status(400).json({ ok:false, message:`No futures universe getter for "${exchange}" — only binance, bybit, gateio, mexc, and bitget are supported.` });
+  }
+  const cached = FUTURES_UNIVERSE_CACHE[exchange];
+  if(cached && Date.now() - cached.atMs < FUTURES_UNIVERSE_CACHE_MS){
+    return res.json({ ok:true, symbols: cached.symbols, cached: true });
+  }
+  try{
+    const symbols = await getter();
+    FUTURES_UNIVERSE_CACHE[exchange] = { symbols, atMs: Date.now() };
+    return res.json({ ok:true, symbols });
+  }catch(err){
+    // Serve a stale cache rather than nothing if the listing call itself
+    // fails but we have an earlier successful one — the symbol universe
+    // changes slowly (exchanges list/delist pairs on the order of days,
+    // not seconds), so a few-minutes-old list is still far better than
+    // stalling Live/Demo trading entirely over one failed refresh.
+    if(cached) return res.json({ ok:true, symbols: cached.symbols, cached: true, stale: true });
+    return res.json({ ok:false, message: `Could not fetch the futures symbol list for ${exchange}: ${err.message}` });
+  }
+});
+
 app.post('/api/futures/balance', async (req, res) => {
   const { exchange, mode, apiKey, secretKey, passphrase } = req.body || {};
   if(!exchange || !apiKey || !secretKey){
@@ -1900,11 +2098,12 @@ app.post('/api/futures/position', async (req, res) => {
 // network the person is on — the front-end just asks this one endpoint
 // and gets a consistent answer every time.
 // =============================================================
-async function fetchJSON(url, timeoutMs = 10_000){
+async function fetchJSON(url, timeoutMs = 10_000, onHeaders){
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try{
     const res = await fetch(url, { signal: ctrl.signal });
+    if(onHeaders) onHeaders(res.headers); // optional — only Binance calls use this today, see recordBinanceWeight below
     const bodyText = await res.text();
     if(!res.ok){
       // Surfacing the real status + body is what makes a *recurring*
@@ -2219,10 +2418,10 @@ function buildAiPrompt(signal){
     symbol, exchange, direction, setup, regime, confidence,
     entry, stop, tp1, riskRewardRatio, expectedNetPct, liquidityScore, reasons,
   } = signal || {};
-  const system = 'You are a risk-averse trading-signal reviewer for a futures scalping bot. '
-    + 'You are given ONE trade signal that has ALREADY passed the bot\'s own risk and no-trade filters, and must decide whether you would ALSO approve it. '
-    + 'You can only make the bot MORE cautious, never less — your job is to catch signals that look statistically fine on paper but are contextually weak. '
-    + 'Reply with ONLY a compact JSON object and nothing else, no markdown fence, no prose outside it: {"approve": true or false, "confidence": a number 0-100, "reason": "one short sentence"}.';
+  const system = 'You are a second, independent reviewer for a futures scalping bot\'s trade signals. '
+    + 'Every signal you see has ALREADY passed the bot\'s own confidence, risk, liquidity, and no-trade filters — those thresholds are not yours to re-litigate, and a metric merely sitting on the lower end of what the bot already approved (e.g. "modest confidence", "low-ish liquidity") is NOT by itself a reason to reject. '
+    + 'APPROVE BY DEFAULT. Only reject when there is a specific, concrete, disqualifying problem a reasonable trader would actually act on — for example the setup\'s direction flatly contradicts the stated market regime, the numbers given are internally inconsistent, or something about the setup itself (not just its score) looks structurally broken. General caution, hedging language, or restating an already-passed metric in more cautious words is not a valid reason to reject. '
+    + 'Reply with ONLY a compact JSON object and nothing else, no markdown fence, no prose outside it: {"approve": true or false, "confidence": a number 0-100, "reason": "one short, specific sentence"}.';
   const user = [
     `Exchange: ${exchange}`, `Symbol: ${symbol}`, `Direction: ${direction}`, `Setup: ${setup}`,
     `Market regime: ${regime}`, `Bot confidence: ${confidence}/100`, `Entry: ${entry}`, `Stop: ${stop}`,

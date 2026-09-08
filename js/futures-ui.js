@@ -29,18 +29,56 @@ import { getAiConfirmation } from './ai-signal.js';
 
 const CYCLE_MS = 4000; // one synthetic "cycle" every 4s; each cycle advances the mock clock by a few minutes
 const LIVE_CYCLE_MS = 8000; // real API calls — a slower, deliberately conservative cadence than Paper's
-// A smaller, curated watchlist than Paper's full 35 symbols — keeps real
-// API call volume reasonable and every symbol here is liquid enough that
-// the spread/liquidity gates in noTradeEngine.js should rarely be the
-// thing standing between a real signal and a trade.
-// BTC, ETH, SOL, LTC and DOGE are excluded from the tradeable set on
-// every exchange (see EXCLUDED_FUTURES_SYMBOLS in engine.js), but BTCUSDT
-// is still fetched every cycle since the shock filter below reads it
-// directly. TRXUSDT/DOTUSDT added here to keep the live watchlist at a
-// reasonable breadth after LTC/DOGE came out.
-const LIVE_TRADEABLE_WATCHLIST = ['BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'TRXUSDT', 'DOTUSDT', 'DOGEUSDT', 'LTCUSDT']
-  .filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s)); // the actual enforcement point — anything added to EXCLUDED_FUTURES_SYMBOLS in engine.js drops out of live trading here automatically, no second list to maintain
-const LIVE_WATCHLIST = ['BTCUSDT', ...LIVE_TRADEABLE_WATCHLIST]; // BTCUSDT fetched for the shock filter only — never scanned or traded, per EXCLUDED_FUTURES_SYMBOLS
+
+// Live/Demo no longer scans a small hardcoded watchlist — it pulls each
+// exchange's REAL, FULL current list of USDT-M perpetual symbols (see
+// /api/futures/universe in server.js) and scans everything on it except
+// EXCLUDED_FUTURES_SYMBOLS (engine.js — currently BTC/ETH/SOL/LTC/DOGE/BNB).
+// The one thing that can't scale to "every symbol, every 8-second cycle"
+// is the DETAILED per-symbol scan that actually finds a signal: an
+// exchange can list 300+ USDT perpetuals, and each one needs 4-6 separate
+// API calls (klines, book, funding...) to build a real snapshot — doing
+// that for every listed symbol every cycle would be 1000+ calls/cycle,
+// which blows through every one of these exchanges' rate limits at once
+// (see the Binance ban/weight-budget comments in server.js for what that
+// actually looks like in practice). So the full real universe (minus your
+// exclusions) gets ranked by 24h volume every refresh, and the top
+// LIVE_SCAN_TOP_N most liquid/active names are what actually get the
+// detailed scan each cycle — which one that N covers shifts on its own as
+// real trading activity shifts, rather than being a fixed roster that
+// ignores what's actually moving. Raise LIVE_SCAN_TOP_N if you want more
+// breadth and are comfortable with the added API weight per cycle; the
+// exchange-side weight comments above (and the Binance ban postmortem)
+// are the ceiling to reason against before raising it much further.
+const LIVE_SCAN_TOP_N = 15;
+const LIVE_UNIVERSE_TTL_MS = 45_000; // matches server.js's own cache window — no reason to ask more often than the server would give a fresh answer anyway
+const liveUniverseCache = {}; // { [exchange]: { symbols: [{symbol, volume24hUsd}], atMs } }
+
+// Fetches (or reuses a cached) ranked, exclusion-filtered symbol list for
+// `exchange`. Returns { top: string[], totalAvailable: number } — `top`
+// is what actually gets scanned this cycle, `totalAvailable` is the full
+// post-exclusion count, purely for the status message ("15 of 247").
+// Returns null only if there's no usable list at all (first-ever fetch on
+// this exchange failed) — callers treat that as "can't scan yet".
+async function getLiveTradeableSymbols(exchange){
+  const cached = liveUniverseCache[exchange];
+  const isFresh = cached && (Date.now() - cached.atMs < LIVE_UNIVERSE_TTL_MS);
+  let list = isFresh ? cached.symbols : null;
+  if(!list){
+    try{
+      const data = await callProxy('/api/futures/universe', { exchange });
+      if(!data.ok) throw new Error(data.message || 'Universe fetch failed.');
+      list = data.symbols;
+      liveUniverseCache[exchange] = { symbols: list, atMs: Date.now() };
+    }catch(err){
+      if(cached) list = cached.symbols; // stale is still better than nothing
+      else return null;
+    }
+  }
+  const eligible = list.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s.symbol));
+  eligible.sort((a, b) => (b.volume24hUsd || 0) - (a.volume24hUsd || 0));
+  return { top: eligible.slice(0, LIVE_SCAN_TOP_N).map(s => s.symbol), totalAvailable: eligible.length };
+}
 const ARM_PHRASE = 'PLACE REAL ORDERS';
 
 function fu(){ return state.futures; }
@@ -411,11 +449,21 @@ async function runLiveCycle(){
   }
   if(els.fuLiveBalance) els.fuLiveBalance.textContent = '$' + equity.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
 
-  // Fetch real snapshots for the whole watchlist in parallel; a symbol
-  // whose fetch fails just gets skipped this cycle (runScanCycle already
-  // tolerates a null snapshot — see engine.js), not treated as fatal.
+  // Fetch the real, full symbol universe for this exchange (ranked,
+  // exclusion-filtered, cached — see getLiveTradeableSymbols above),
+  // then fetch real snapshots for BTCUSDT (always, for the shock filter
+  // below, even though it's excluded from being traded) plus the top-N
+  // tradeable symbols from that universe. A symbol whose fetch fails just
+  // gets skipped this cycle (runScanCycle already tolerates a null
+  // snapshot — see engine.js), not treated as fatal.
+  const universe = await getLiveTradeableSymbols(exchange);
+  if(!universe){
+    showLiveMessage(`Could not fetch the ${exchange} futures symbol list this cycle — skipping.`, 'error');
+    return;
+  }
+  const fetchSymbols = ['BTCUSDT', ...universe.top.filter(s => s !== 'BTCUSDT')];
   const snapshots = {};
-  await Promise.all(LIVE_WATCHLIST.map(async symbol => {
+  await Promise.all(fetchSymbols.map(async symbol => {
     try{ snapshots[symbol] = await fetchLiveSnapshot(exchange, symbol); }catch(err){ /* skip this symbol this cycle */ }
   }));
   if(!snapshots.BTCUSDT){
@@ -437,7 +485,7 @@ async function runLiveCycle(){
   };
   const dayStateShim = buildLiveDayStateShim(equity);
   const { rows } = runScanCycle(cfg, dayStateShim, {
-    symbols: LIVE_TRADEABLE_WATCHLIST,
+    symbols: universe.top,
     getSnapshot: symbol => snapshots[symbol] || null,
     now: () => Date.now(),
     getBtcShock: () => computeBtcShock(snapshots.BTCUSDT.m5),
@@ -447,7 +495,7 @@ async function runLiveCycle(){
   const approved = rows.find(r => r.status === 'APPROVED');
   if(!approved){
     const boostNote = f2.liveAdaptiveConfidenceBoost > 0 ? ` (min confidence raised +${f2.liveAdaptiveConfidenceBoost} after recent losses)` : '';
-    showLiveMessage(`Armed on ${exchange} (${mode}), watching ${LIVE_TRADEABLE_WATCHLIST.length} symbols (BTC/ETH/SOL/LTC/DOGE excluded) — no qualifying signal this cycle${boostNote}.`);
+    showLiveMessage(`Armed on ${exchange} (${mode}), watching top ${universe.top.length} of ${universe.totalAvailable} available pairs by volume (BTC/ETH/SOL/LTC/DOGE/BNB excluded) — no qualifying signal this cycle${boostNote}.`);
     return;
   }
 
