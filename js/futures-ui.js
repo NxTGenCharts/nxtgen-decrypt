@@ -369,6 +369,7 @@ async function runLiveCycle(){
   const f = fu();
   const exchange = f.liveExchange;
   if(!f.liveArmed) return;
+  decayAdaptiveConfidenceBoost(); // see its own comment — lets a stricter bar from a losing stretch ease back on its own, not only on a win
 
   // 1) Check whatever we're already tracking as open, for closure — using
   // EACH position's own tracked exchange/mode/credential, not necessarily
@@ -724,15 +725,35 @@ function renderLive(){
 //    adjusts a real number based on real results, it just isn't a
 //    trained model, and doesn't pretend to be one.
 // =============================================================
-const LIVE_CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES = 4;
+const LIVE_CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES = 6; // was 4 — see comment below on why
 const LIVE_ADAPTIVE_CONFIDENCE_STEP = 8;   // added to the confidence bar per consecutive loss
 const LIVE_ADAPTIVE_CONFIDENCE_MAX = 25;   // cap on how much stricter it can get
+// The boost above previously only ever came back down on a WIN — during
+// a stretch where the strategy just isn't winning yet (which, at the
+// win rates this kind of setup realistically runs at, is not unusual
+// even when nothing is wrong), that meant it could sit at its stricter
+// level indefinitely, filtering out more and more signals while waiting
+// for a win that might not come for a while. That's not a stop, and it
+// always was still scanning every cycle — but it could look and feel
+// exactly like getting stuck. It now also decays on its own over time,
+// regardless of whether a win has happened yet.
+const LIVE_ADAPTIVE_CONFIDENCE_DECAY_MS = 30 * 60_000; // one step back down per 30min with no NEW loss
+
+function decayAdaptiveConfidenceBoost(){
+  const f = fu();
+  if(f.liveAdaptiveConfidenceBoost <= 0) return;
+  const elapsed = Date.now() - (f.liveAdaptiveConfidenceBoostAtMs || 0);
+  if(elapsed < LIVE_ADAPTIVE_CONFIDENCE_DECAY_MS) return;
+  f.liveAdaptiveConfidenceBoost = Math.max(0, f.liveAdaptiveConfidenceBoost - LIVE_ADAPTIVE_CONFIDENCE_STEP);
+  f.liveAdaptiveConfidenceBoostAtMs = Date.now(); // restart the clock for the next step down, not just the first
+}
 
 function checkAdaptiveCircuitBreaker(netUsd){
   const f = fu();
   if(netUsd < 0){
     f.liveConsecutiveLosses++;
     f.liveAdaptiveConfidenceBoost = Math.min(LIVE_ADAPTIVE_CONFIDENCE_MAX, f.liveAdaptiveConfidenceBoost + LIVE_ADAPTIVE_CONFIDENCE_STEP);
+    f.liveAdaptiveConfidenceBoostAtMs = Date.now();
   } else {
     f.liveConsecutiveLosses = 0;
     f.liveAdaptiveConfidenceBoost = 0;

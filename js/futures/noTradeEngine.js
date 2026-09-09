@@ -34,6 +34,11 @@ export function evaluateNoTradeFilters({
 
   if(dayState){
     if(dayState.dailyPnlPct <= -RISK_DEFAULTS.maxDailyLossPct) reasons.push('Daily drawdown limit reached — trading stopped for the day');
+    // Symmetric to the loss cap above, per an explicit request: stop for
+    // the day once a genuine profit target is banked, not just once a
+    // loss limit is hit. Resets the same way the loss cap does — at the
+    // next Reset Session / new day, not by any manual re-arm ritual.
+    if(dayState.dailyPnlPct >= RISK_DEFAULTS.dailyProfitTargetPct) reasons.push(`Daily profit target (+${RISK_DEFAULTS.dailyProfitTargetPct}%) reached — trading stopped for the day`);
     if(dayState.consecutiveLosses >= RISK_DEFAULTS.maxConsecutiveLosses){
       const cooldownUntil = (dayState.lastLossAt || 0) + RISK_DEFAULTS.coolingOffMinutes * 60_000;
       if((nowMs ?? Date.now()) < cooldownUntil){

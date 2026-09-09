@@ -20,6 +20,13 @@ export const RISK_DEFAULTS = {
   maxLeverage: 10,
   maintenanceMarginRate: 0.5,  // % — rough cross-margin estimate for liquidation distance
   maxDailyLossPct: 2.0,
+  // Symmetric stop-for-the-day on the upside, per an explicit request —
+  // previously there was no such thing: a losing day had a hard floor,
+  // a winning day had no ceiling at all. This isn't a "cool off and
+  // maybe resume" mechanism like maxConsecutiveLosses below; it's a
+  // deliberate stop for the rest of the day once real profit is banked,
+  // same as maxDailyLossPct is a deliberate stop once real loss is hit.
+  dailyProfitTargetPct: 10.0,
   maxConsecutiveLosses: 3,
   coolingOffMinutes: 60,
   // Every trade is now constructed so its take-profit sits at exactly
@@ -119,6 +126,9 @@ export function checkDailyRiskControls(dayState, riskPctPerTrade){
   const portfolioCapPct = maxPortfolioRiskPct(riskPctPerTrade);
   if(dayState.dailyPnlPct <= -RISK_DEFAULTS.maxDailyLossPct){
     reasons.push(`Daily loss limit reached (${dayState.dailyPnlPct.toFixed(2)}% <= -${RISK_DEFAULTS.maxDailyLossPct}%) — trading stopped for the day`);
+  }
+  if(dayState.dailyPnlPct >= RISK_DEFAULTS.dailyProfitTargetPct){
+    reasons.push(`Daily profit target reached (${dayState.dailyPnlPct.toFixed(2)}% >= +${RISK_DEFAULTS.dailyProfitTargetPct}%) — trading stopped for the day`);
   }
   if(dayState.consecutiveLosses >= RISK_DEFAULTS.maxConsecutiveLosses){
     const cooldownUntil = dayState.lastLossAt ? dayState.lastLossAt + RISK_DEFAULTS.coolingOffMinutes * 60_000 : 0;

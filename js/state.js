@@ -325,7 +325,7 @@ export const state = {
     // exchange/network switch — an adaptive adjustment tuned against one
     // account's recent results has no business carrying over to a
     // different one.
-    liveConsecutiveLosses: 0, livePausedByCircuitBreaker: false, liveAdaptiveConfidenceBoost: 0,
+    liveConsecutiveLosses: 0, livePausedByCircuitBreaker: false, liveAdaptiveConfidenceBoost: 0, liveAdaptiveConfidenceBoostAtMs: 0,
   },
 
   // ---- AI Signal Provider (optional, experimental) — a second opinion
