@@ -525,8 +525,9 @@
         </div>
       </div>
 
-      <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);margin-top:16px;">
+      <div class="ov-grid" style="grid-template-columns:repeat(5, 1fr);margin-top:16px;">
         <div class="ov-card ov-highlight"><span class="ov-label">Real Balance — Futures (USDT)</span><span class="ov-value" id="fuLiveBalance">—</span></div>
+        <div class="ov-card"><span class="ov-label">Starting Balance (Session)</span><span class="ov-value" id="fuLiveStartingBalance" style="font-size:18px;">—</span></div>
         <div class="ov-card"><span class="ov-label">Open Position</span><span class="ov-value" id="fuLiveOpenPosition" style="font-size:14px;">None</span></div>
         <div class="ov-card"><span class="ov-label">Trades (session)</span><span class="ov-value" id="fuLiveTrades">0</span></div>
         <div class="ov-card ov-highlight"><span class="ov-label">Win Rate</span><span class="ov-value" id="fuLiveWinRate">—</span></div>
@@ -537,16 +538,45 @@
         <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value" id="fuLiveNetPnl">$0.00</span></div>
       </div>
       <div style="font-size:11px;color:var(--dim);margin-top:6px;">
-        Gross/Fees are now read from every exchange's own real trade/execution history, Bybit included (via its execution list endpoint, which works in both Live and Demo) — if a figure ever can't be confirmed from the exchange for a specific trade, it's left blank rather than guessed.
+        Gross/Fees are now read from every exchange's own real trade/execution history, Bybit included (via its execution list endpoint, which works in both Live and Demo) — if a figure ever can't be confirmed from the exchange for a specific trade, it's left blank rather than guessed. "Session" above means since the last Arm/Stop or page reload — the Starting Balance card is the real balance read the moment this session was armed, for comparison against the current one; the Trade Log below is unaffected by any of that and keeps every trade across every session.
       </div>
 
 
       <div class="ov-block" style="margin-top:14px;">
-        <div class="ov-block-title" style="font-size:13px;">Live/Demo Trade History</div>
+        <div class="ov-block-title" style="font-size:13px;">Live/Demo Trade History <span style="font-weight:400;color:var(--dim);">(this session)</span></div>
         <div class="fu-hrow fu-head" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr 1.4fr;">
           <div>Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Order ID</div>
         </div>
         <div id="fuLiveHistoryRows"><div class="fu-empty">No live/demo trades yet this session.</div></div>
+      </div>
+
+      <div class="ov-block" style="margin-top:14px;">
+        <div class="ov-block-title" style="font-size:13px;">Trade Log <span style="font-weight:400;color:var(--dim);">(every real trade, every session — kept in this browser)</span></div>
+        <div style="font-size:11px;color:var(--dim);margin:8px 0;">
+          Recorded the moment a trade closes, independently of the session stats above — arming/stopping, switching exchanges, or reloading this page never clears it. Kept in this browser only (not synced anywhere), capped at the most recent 5,000 trades.
+        </div>
+        <div class="mode-toggle" role="group" aria-label="Trade log time range" style="margin-bottom:10px;">
+          <button type="button" class="mode-btn active" id="fuLogRangeToday" data-range="today">Today</button>
+          <button type="button" class="mode-btn" id="fuLogRangeWeek" data-range="week">Last 7 Days</button>
+          <button type="button" class="mode-btn" id="fuLogRangeMonth" data-range="month">Last 30 Days</button>
+          <button type="button" class="mode-btn" id="fuLogRangeAll" data-range="all">All Time</button>
+          <button type="button" class="mode-btn" id="fuLogRangeCustom" data-range="custom">Custom</button>
+        </div>
+        <div id="fuLogCustomRow" class="btn-row" style="display:none;margin-bottom:10px;">
+          <div class="field" style="max-width:180px;"><label for="fuLogCustomFrom">From</label><input id="fuLogCustomFrom" type="date"></div>
+          <div class="field" style="max-width:180px;"><label for="fuLogCustomTo">To</label><input id="fuLogCustomTo" type="date"></div>
+          <button type="button" class="primary ghost" id="fuLogCustomApply" style="align-self:flex-end;">Apply</button>
+        </div>
+        <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);margin-bottom:12px;">
+          <div class="ov-card"><span class="ov-label">Trades</span><span class="ov-value" id="fuLogCount">0</span></div>
+          <div class="ov-card"><span class="ov-label">Gross P&amp;L</span><span class="ov-value" id="fuLogGross">$0.00</span></div>
+          <div class="ov-card"><span class="ov-label">Fees</span><span class="ov-value" id="fuLogFees">-$0.00</span></div>
+          <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value" id="fuLogNet">$0.00</span></div>
+        </div>
+        <div class="fu-hrow fu-head" style="grid-template-columns:1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr;">
+          <div>Date/Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div>
+        </div>
+        <div id="fuLogRows"><div class="fu-empty">No trades recorded in this browser yet.</div></div>
       </div>
     </div>
 
@@ -558,6 +588,7 @@
       <b>Live/Demo trading</b> (Bybit, Binance, Gate.io, MEXC, and Bitget — MEXC is Live only, no Demo) places real orders through <code>server/server.js</code> with a native/exchange-enforced stop-loss and take-profit on every position — see the Live/Demo Trading section above and <code>server/README.md</code> before arming it with a Live key. It scans each exchange's real, full current USDT-M perpetual list (fetched live via <code>/api/futures/universe</code> — not a hardcoded roster), minus your exclusions, ranked by 24h volume, with the top 15 most liquid/active names actually getting the full per-symbol scan each cycle. That top-15 figure (<code>LIVE_SCAN_TOP_N</code> in <code>js/futures-ui.js</code>) is a real rate-limit ceiling, not a preference: an exchange can list 300+ USDT perpetuals, each needing 4-6 separate calls to build a real signal-detection snapshot, and doing that for every listed symbol every 8 seconds would be 1,000+ calls/cycle — enough to trip every one of these exchanges' rate limits at once (see the Binance ban/weight-budget notes in <code>server.js</code> for what that looks like when it happens to just one of them). Which 15 symbols that covers shifts on its own, cycle to cycle, as real trading activity shifts.<br>
       <b>AI Signal (optional)</b> — if enabled in the API Keys tab, every APPROVED Live/Demo signal also gets a second opinion from whichever model provider you've connected there before an order is placed. It can only make the bot MORE cautious (reject a signal the engine above already approved) — it cannot approve a signal the engine rejected, size a position, or touch any risk control on this page. See the API Keys tab for the honest caveats on that feature; it is not tuned or proven to raise win rate. Its prompt was re-tuned after real use showed it rejecting trades over metrics the engine had already cleared (e.g. "modest confidence", "low liquidity") — it's now told those thresholds are the engine's job, not its own, and to approve by default unless there's a specific, concrete, disqualifying problem. It can still say no; it should just no longer manufacture reasons to.<br>
       <b>Binance's shared-IP rate limiting</b> — this app's own Binance call volume (~540 weight/min across the whole watchlist, measured) sits well under Binance's 2400/min-per-IP cap on its own, so a recurring "rate-limited/banned this server's IP" specifically on Binance (and only Binance, when the others work fine through the same host) most likely means OTHER traffic sharing this server's outbound IP is pushing the shared bucket over the edge — not this app's own usage. Two things now happen automatically: a reactive cooldown once Binance actually reports a ban (unchanged from before), and a new proactive one that reads Binance's own real-time usage figure on every response and pauses this app's own Binance calls for a few seconds if that figure is already running high, so this app isn't the request that tips a shared bucket over. Neither of those can fix the underlying cause, though — the only real fix for a shared-IP problem is getting this server off a shared IP for Binance specifically: a static/dedicated outbound IP (a paid add-on on most hosts, including Render) registered as that Binance API key's sole allowed IP. That's an account/infra change, not something this codebase can do on its own.<br>
+      <b>Trade Log</b> — every closed real trade (Live or Demo, any exchange) is now also written to a persistent log that survives arming/stopping, switching exchanges, and reloading the page — unlike the session-scoped stats and history table above it in the Live/Demo Trading section, which intentionally reset on any of those. Filterable there by Today/Last 7 Days/Last 30 Days/All Time/Custom range. Stored in this browser only (localStorage, capped at the most recent 5,000 trades) — there's no server-side account system in this app to sync it to or back it up elsewhere, so it won't follow you to a different browser or device, and clearing this browser's site data clears it too.<br>
       <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet. All five exchanges now have Live/Demo (or Live-only, for MEXC) execution built.<br>
       This is not financial advice.
     </footer>

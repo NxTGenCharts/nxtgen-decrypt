@@ -402,6 +402,15 @@ async function runLiveCycle(){
           exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
           leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
         });
+        // Same trade, also written to the cross-session Trade Log (see
+        // appendPersistentTrade above) — independent of the session-scoped
+        // array just above, which resetLiveSession clears on every re-arm.
+        appendPersistentTrade({
+          closedAtMs: Date.now(), exchange: tracked.exchange, mode: tracked.mode, symbol, side: tracked.side,
+          entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
+          exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
+          leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
+        });
         f.liveTrades++;
         if(netUsd > 0) f.liveWins++; else f.liveLosses++;
         f.liveNetPnlUsd += netUsd;
@@ -545,6 +554,119 @@ async function runLiveCycle(){
   renderLive();
 }
 
+// =============================================================
+// Trade Log — persists every closed real trade across sessions, arms,
+// exchange switches, and page reloads, independently of the Live/Demo
+// Trade History table above (which is deliberately session-scoped: see
+// resetLiveSession). Stored client-side only (this browser, this
+// device) — there's no server-side account system in this app to sync
+// it to. Capped at PERSISTENT_TRADE_LOG_MAX entries so it can't grow
+// unbounded over months of use; oldest entries drop off first.
+// =============================================================
+const PERSISTENT_TRADE_LOG_KEY = 'nxtgen_futures_trade_log_v1';
+const PERSISTENT_TRADE_LOG_MAX = 5000;
+
+function loadPersistentTradeLog(){
+  try{
+    const raw = localStorage.getItem(PERSISTENT_TRADE_LOG_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  }catch(e){ return []; } // corrupt/blocked storage — treat as empty rather than throw
+}
+
+function appendPersistentTrade(record){
+  try{
+    const log = loadPersistentTradeLog();
+    log.unshift(record);
+    if(log.length > PERSISTENT_TRADE_LOG_MAX) log.length = PERSISTENT_TRADE_LOG_MAX;
+    localStorage.setItem(PERSISTENT_TRADE_LOG_KEY, JSON.stringify(log));
+  }catch(e){ /* storage full/unavailable — the session-scoped history above still has it */ }
+}
+
+// { preset: 'today'|'week'|'month'|'all'|'custom', fromMs, toMs } — UI-only,
+// recomputed on demand, not persisted itself (only the underlying trades are).
+let tradeLogRange = { preset: 'today' };
+
+function computeTradeLogRange(preset, customFromStr, customToStr){
+  const now = Date.now();
+  if(preset === 'today'){
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+    return { preset, fromMs: start.getTime(), toMs: now };
+  }
+  if(preset === 'week') return { preset, fromMs: now - 7 * 86_400_000, toMs: now };
+  if(preset === 'month') return { preset, fromMs: now - 30 * 86_400_000, toMs: now };
+  if(preset === 'all') return { preset, fromMs: 0, toMs: now };
+  if(preset === 'custom'){
+    const fromMs = customFromStr ? new Date(customFromStr + 'T00:00:00').getTime() : 0;
+    const toMs = customToStr ? new Date(customToStr + 'T23:59:59.999').getTime() : now;
+    return { preset, fromMs, toMs };
+  }
+  return { preset: 'today', fromMs: 0, toMs: now };
+}
+
+function renderTradeLog(){
+  if(!els.fuLogRows) return;
+  const { fromMs, toMs, preset } = tradeLogRange;
+  const all = loadPersistentTradeLog();
+  const rows = all.filter(t => t.closedAtMs >= fromMs && t.closedAtMs <= toMs);
+
+  ['fuLogRangeToday', 'fuLogRangeWeek', 'fuLogRangeMonth', 'fuLogRangeAll', 'fuLogRangeCustom'].forEach(id => {
+    if(els[id]) els[id].classList.toggle('active', els[id].dataset.range === preset);
+  });
+  if(els.fuLogCustomRow) els.fuLogCustomRow.style.display = preset === 'custom' ? 'flex' : 'none';
+
+  const count = rows.length;
+  const grossKnown = rows.filter(t => t.grossUsd != null);
+  const feesKnown = rows.filter(t => t.feesUsd != null);
+  const grossSum = grossKnown.reduce((a, t) => a + t.grossUsd, 0);
+  const feesSum = feesKnown.reduce((a, t) => a + t.feesUsd, 0);
+  const netSum = rows.reduce((a, t) => a + (t.netUsd || 0), 0);
+  if(els.fuLogCount) els.fuLogCount.textContent = String(count);
+  if(els.fuLogGross) els.fuLogGross.textContent = (grossKnown.length < count ? '~' : '') + fmtUsd(grossSum);
+  if(els.fuLogFees) els.fuLogFees.textContent = (feesKnown.length < count ? '~' : '') + fmtUsd(feesSum);
+  if(els.fuLogNet) els.fuLogNet.textContent = fmtUsd(netSum);
+
+  if(!rows.length){
+    els.fuLogRows.innerHTML = '<div class="fu-empty">No trades recorded in this browser for this range.</div>';
+    return;
+  }
+  els.fuLogRows.innerHTML = rows.slice(0, 500).map(t => `
+    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr;">
+      <div>${new Date(t.closedAtMs).toLocaleString()}</div>
+      <div>${t.exchange || '—'}${t.mode ? ` (${t.mode})` : ''}</div>
+      <div>${t.symbol}</div>
+      <div>${t.side}</div>
+      <div>${t.entry != null ? Number(t.entry).toFixed(4) : '—'}</div>
+      <div>${t.exit != null ? Number(t.exit).toFixed(4) : '—'}</div>
+      <div>${t.leverage}x</div>
+      <div>${t.qty}</div>
+      <div>${t.grossUsd != null ? fmtUsd(t.grossUsd) : '—'}</div>
+      <div>${t.feesUsd != null ? fmtUsd(t.feesUsd) : '—'}</div>
+      <div>${fmtUsd(t.netUsd)}</div>
+    </div>
+  `).join('');
+}
+
+function initTradeLog(){
+  const rangeBtns = ['fuLogRangeToday', 'fuLogRangeWeek', 'fuLogRangeMonth', 'fuLogRangeAll', 'fuLogRangeCustom'];
+  rangeBtns.forEach(id => {
+    if(!els[id]) return;
+    els[id].addEventListener('click', () => {
+      const preset = els[id].dataset.range;
+      tradeLogRange = preset === 'custom'
+        ? computeTradeLogRange('custom', els.fuLogCustomFrom?.value, els.fuLogCustomTo?.value)
+        : computeTradeLogRange(preset);
+      renderTradeLog();
+    });
+  });
+  if(els.fuLogCustomApply) els.fuLogCustomApply.addEventListener('click', () => {
+    tradeLogRange = computeTradeLogRange('custom', els.fuLogCustomFrom?.value, els.fuLogCustomTo?.value);
+    renderTradeLog();
+  });
+  tradeLogRange = computeTradeLogRange('today');
+  renderTradeLog();
+}
+
 function renderLiveHistory(){
   if(!els.fuLiveHistoryRows) return;
   const history = fu().liveTradeHistory;
@@ -569,6 +691,9 @@ function renderLiveHistory(){
 
 function renderLive(){
   const f = fu();
+  if(els.fuLiveStartingBalance) els.fuLiveStartingBalance.textContent = f.liveStartingEquity != null
+    ? '$' + f.liveStartingEquity.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })
+    : '—';
   if(els.fuLiveTrades) els.fuLiveTrades.textContent = String(f.liveTrades);
   if(els.fuLiveWinRate) els.fuLiveWinRate.textContent = f.liveTrades ? ((f.liveWins / f.liveTrades) * 100).toFixed(1) + '%' : '—';
   if(els.fuLiveGrossPnl) els.fuLiveGrossPnl.textContent = fmtUsd(f.liveGrossPnlUsd);
@@ -576,6 +701,7 @@ function renderLive(){
   if(els.fuLiveNetPnl) els.fuLiveNetPnl.textContent = fmtUsd(f.liveNetPnlUsd);
   if(Object.keys(f.livePositions).length === 0 && els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = 'None';
   renderLiveHistory();
+  renderTradeLog();
 }
 
 // =============================================================
@@ -808,6 +934,7 @@ export function initFuturesEngine(){
   if(els.fuResetSessionBtn) els.fuResetSessionBtn.addEventListener('click', resetSession);
   initRiskPctInputs();
   initLiveTradingControls();
+  initTradeLog();
   renderLive();
   render();
 }
