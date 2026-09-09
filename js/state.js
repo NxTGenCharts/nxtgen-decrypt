@@ -295,7 +295,7 @@ export const state = {
     mode: 'PAPER',           // PAPER only for now — LIVE requires the backend/key-security work called out in the architecture assessment
     highSelectivity: false,
     exchange: 'binance',
-    minConfidence: 60,
+    minConfidence: 70, // 60 was the floor of AI Scalp's 60-87 confidence range — filtered nothing; see setups.js. 70 requires at least one real confirmation (RSI alignment, or strong momentum + volume together).
     minRiskReward: 2.0, // fixed system-wide — see js/futures/risk.js RISK_DEFAULTS.riskRewardRatio
     minNetProfitPct: 0.30,
     riskPctPerTrade: 1.0,

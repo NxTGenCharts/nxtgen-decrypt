@@ -41,6 +41,19 @@ export function evaluateNoTradeFilters({
       }
     }
     if(dayState.openPositions >= RISK_DEFAULTS.maxSimultaneousPositions) reasons.push('Max simultaneous positions already open');
+    // A count check alone ("fewer than N positions open") never stops a
+    // SECOND entry on a symbol that's already open — if maxSimultaneousPositions
+    // is 3 and only 1 is open, that count check passes regardless of
+    // which symbol the new signal is on, including the one already open.
+    // Real Live trading exposed exactly this: the same symbol scanned
+    // and approved again a few cycles later, while still open, silently
+    // doubling the real position size on the exchange (which nets same-
+    // side fills into one bigger position) — the client only tracked the
+    // second order's own qty, so its own display showed half of what was
+    // really at risk. This is the actual fix, not just a rare edge case.
+    if(dayState.positions && dayState.positions.some(p => p.symbol === snap.symbol)){
+      reasons.push(`Already have an open position on ${snap.symbol} — not stacking a second one`);
+    }
     if(dayState.openRiskPct >= portfolioCapPct) reasons.push(`Max portfolio risk (${portfolioCapPct}%) already committed`);
   }
 

@@ -669,3 +669,74 @@ live: no amount of stop/ratio engineering manufactures an edge that
 isn't there, it only changes how much edge is required to survive real
 costs. See the AI Futures Engine tab's own footer for the same account
 in the app itself.
+
+## Update: the doubled-position bug, and what real trading data did/didn't confirm
+
+Reported from a real Bybit session: an ARBUSDT loss where this app's own
+trade history showed qty 58884, but Bybit's own order history for what
+was unmistakably the same close (same P&L to four decimal places, same
+entry price) showed qty **117768 — exactly double**.
+
+**The mechanism**: this app is designed to hold at most one real
+position per symbol at a time (`runLiveCycle` bails out early if
+anything is already open — see `js/futures-ui.js`). That guard relies on
+the client's own in-memory record of what's open. `placeBybitFuturesOrder`
+polls Bybit for up to 6 seconds after submitting an order, waiting for
+`orderStatus === 'Filled'` before reporting success back to the client.
+If that confirmation ever came back ambiguous — the 6s window elapsing,
+or a dropped response after Bybit had already filled the order — the
+server threw an error, the client showed "Order failed", and critically
+**never recorded the position**. Its own memory now believed the account
+was flat. On the next 8-second cycle, nothing stopped it from placing a
+second real entry on the same symbol — and Bybit, like every exchange,
+nets same-side fills on the same symbol into one bigger position rather
+than tracking them as separate trades. The client only ever knew about
+the second order's own size, which is exactly what its display showed;
+the real, combined position — and the real risk taken — was double that.
+
+**Fixed at the source, for all five exchanges, not just Bybit**:
+`/api/futures/order` now asks the exchange itself — not this app's
+memory — whether a position already exists for that exact symbol before
+ever placing a new entry, using the same `FUTURES_POSITION_GETTERS` this
+app already had for detecting closure. If one exists, or if that check
+itself can't be confirmed (rate limit, transient error), the order is
+refused outright rather than risking a repeat. Bybit's own ambiguous-
+timeout message was also fixed to check for a real fill before giving up,
+so it no longer reads like "nothing happened" when something likely did.
+
+**What real data did NOT confirm, despite looking that way at first
+glance**: that the 1:2 reward:risk isn't actually being built. Checked
+directly against a matched win/loss pair on the same symbol from that
+session (HYPEUSDT): the loss moved -0.35% into its stop, the win moved
++0.69% into its target — a real, working ~1:2 price ratio. The
+appearance of "$100 losses vs. barely-$100 wins" comes from comparing
+raw dollar P&L *across different symbols*, which naturally have
+different position sizes for the same %-of-equity risk (a wider-stop
+symbol gets a smaller qty, a tighter-stop one gets a larger qty, so the
+dollar risk stays ~1% either way) — that's correct behavior, not a bug.
+The doubling bug above is the far more likely real explanation for any
+specific loss landing disproportionately large: a doubled loss is a
+genuinely bigger number sitting next to a normally-sized win.
+
+**What was a real, if quieter, bug**: the default "Min confidence" was
+60 — which turned out to be the exact floor of AI Scalp's own 60-87
+confidence range (see the formula in `setups.js`). Every signal that
+cleared the earlier structural checks passed the confidence gate
+regardless of whether RSI, volume, or momentum strength actually
+confirmed it, because 60 was achievable with zero of those. Raised to
+70, which requires at least one genuine confirmation now.
+
+**What was deliberately NOT changed, on request to "improve the win
+rate"**: AI Scalp's regime/direction logic. The obvious-looking fix —
+penalize or block counter-trend entries against a merely-weak (not
+strong) opposing trend — is exactly what an earlier revision of this
+file already tried, with RSI and volume as hard requirements instead of
+confidence bonuses on top of it. Tested against this synthetic feed
+(the only data available to test against) across three separate runs,
+it turned a ~1.5 profit factor into ~0.8 — a losing strategy. That
+result is preserved as a comment directly above the regime check in
+`setups.js` for exactly this reason: so a future change (including this
+one) doesn't re-attempt it on intuition alone and silently reintroduce
+a measured regression. Nothing here overrides that finding without new
+evidence it no longer applies.
+

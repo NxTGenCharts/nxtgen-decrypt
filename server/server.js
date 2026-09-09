@@ -696,7 +696,18 @@ async function placeBybitFuturesOrder(mode, apiKey, secretKey, { symbol, side, r
     }
     await new Promise(r => setTimeout(r, 400));
   }
-  throw new VerifyRejected(`Order ${orderId} was accepted but did not confirm as Filled within 6s — check Bybit's order history directly before assuming anything about the position.`);
+  // Don't leave this ambiguous — one direct position check before giving
+  // up, so the error is honest about whether a real position exists
+  // rather than reading like "nothing happened" when it might well have.
+  // (The /api/futures/order route's own pre-flight position check is
+  // what actually prevents a next-cycle retry from stacking a second
+  // entry on top of this either way — this is just making the message
+  // here accurate, not the safety net itself.)
+  const maybeOpen = await getBybitPosition(mode, apiKey, secretKey, symbol).catch(() => null);
+  if(maybeOpen){
+    throw new VerifyRejected(`Order ${orderId} did not confirm as Filled within 6s via the order-status endpoint, but ${symbol} now shows an open ${maybeOpen.side} position of size ${maybeOpen.size} on Bybit — it almost certainly DID fill. Treating this as failed rather than guessing at the fill price/qty from here; check Bybit directly and manage that position manually if this app doesn't pick it up on its own next cycle.`);
+  }
+  throw new VerifyRejected(`Order ${orderId} was accepted but did not confirm as Filled within 6s, and no open ${symbol} position was found either — check Bybit's order history directly before assuming anything about it.`);
 }
 
 // Reads the live position for one symbol — size:"0" (or no row at all)
@@ -2036,6 +2047,39 @@ app.post('/api/futures/order', async (req, res) => {
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   const casingFn = FUTURES_SIDE_CASING[exchange] || (s => s[0].toUpperCase() + s.slice(1).toLowerCase());
   const normalizedSide = casingFn(String(side));
+
+  // Authoritative pre-flight check, against the exchange itself rather
+  // than trusting the client's own in-memory bookkeeping: this app is
+  // meant to hold at most one real position per symbol at a time (see
+  // js/futures-ui.js's runLiveCycle), but real Live trading exposed a
+  // race that could break that — if a just-placed order's fill
+  // confirmation is ambiguous (times out, or a network hiccup drops the
+  // response after the exchange already filled it), the client shows
+  // "Order failed" and never records the position, while the order may
+  // have genuinely gone through. The NEXT cycle then had nothing in its
+  // own memory telling it a position was already open, and could place a
+  // second real entry on the same symbol — which the exchange nets into
+  // one bigger position (same-side fills accumulate), silently doubling
+  // the real risk taken while the client only ever tracked the second
+  // order's own size. Checking the exchange's own live position for this
+  // exact symbol before ever placing a new entry closes that gap
+  // regardless of why the client's memory might be wrong — a stale page,
+  // a lost response, a reload mid-session, or anything else.
+  const positionGetterPreflight = FUTURES_POSITION_GETTERS[exchange];
+  if(positionGetterPreflight){
+    try{
+      const existing = await positionGetterPreflight(netMode, apiKey, secretKey, symbol, passphrase);
+      if(existing){
+        return res.json({ ok:false, rejected:true, message: `${exchange} already has an open ${symbol} position (size ${existing.size}) — refusing to place a second entry on top of it. If this app's own display shows no open position, its memory of this session is out of sync with the real account; check ${symbol} directly on ${exchange} before doing anything else.` });
+      }
+    }catch(err){
+      // Couldn't confirm either way (rate limit, transient error) — do
+      // NOT silently proceed to place a real order on unconfirmed
+      // information; fail closed instead of risking exactly the
+      // double-entry this check exists to prevent.
+      return res.json({ ok:false, rejected:false, message: `Could not confirm ${exchange} has no existing ${symbol} position before placing this order (${err.message}) — refusing to place it rather than risk stacking on an unconfirmed one.` });
+    }
+  }
 
   try{
     const result = await placer(netMode, apiKey, secretKey, {
