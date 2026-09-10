@@ -135,6 +135,7 @@ export const els = {
   fuStrategyRows: document.getElementById('fuStrategyRows'),
   fuStrategiesDetails: document.getElementById('fuStrategiesDetails'),
   fuStrategiesBadge: document.getElementById('fuStrategiesBadge'),
+  fuStrategiesBest: document.getElementById('fuStrategiesBest'),
   fuLiveExchRows: document.getElementById('fuLiveExchRows'),
   fuLiveStatusLabel: document.getElementById('fuLiveStatusLabel'),
   fuLiveArmWrap: document.getElementById('fuLiveArmWrap'),

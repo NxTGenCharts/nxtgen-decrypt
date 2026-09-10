@@ -169,7 +169,19 @@ function runCycle(){
 
   mockMarket.tick(3); // advance synthetic market clock ~3 minutes per cycle
 
+  const beforeCount = f.tradeHistory.length;
   managePositions(dayState, f.tradeHistory, { timeStopMinutes: 240 });
+  // managePositions unshifts newly-closed trades onto the front of
+  // f.tradeHistory (which itself resets on every Reset Session/reload —
+  // see resetSession above) — mirror anything new onto the cross-session
+  // Paper Trade Log too (see appendPaperTrades below), same relationship
+  // appendPersistentTrade already has with Live's own session history.
+  // This is what lets the per-strategy stats in the Strategies panel
+  // build up a real sample fast (Paper can run thousands of cycles in
+  // minutes) instead of waiting on however few real Live/Demo trades
+  // happen to exist.
+  const newlyClosed = f.tradeHistory.length - beforeCount;
+  if(newlyClosed > 0) appendPaperTrades(f.tradeHistory.slice(0, newlyClosed));
 
   const cfg = {
     exchange: f.exchange, weights: DEFAULT_WEIGHTS, highSelectivity: f.highSelectivity,
@@ -227,6 +239,11 @@ function render(){
 
   renderScanner(f.lastRows);
   renderHistory(f.tradeHistory);
+  // Paper trades feed the Strategies panel's per-strategy stats (see
+  // computeStrategyStats/appendPaperTrades) — refresh it every cycle so
+  // the sample-size counter and "best so far" line update live while
+  // Paper mode runs, not just when a checkbox/dropdown is touched.
+  renderStrategyRows();
 }
 
 function computeProfitFactor(history){
@@ -793,6 +810,42 @@ function appendPersistentTrade(record){
   }catch(e){ /* storage full/unavailable — the session-scoped history above still has it */ }
 }
 
+// =============================================================
+// Paper Trade Log — the Live/Demo Trade Log's counterpart for Paper
+// mode: persists every closed PAPER trade (see engine.js's closeTrade,
+// which is what actually shapes each record) across page reloads and
+// Reset Session, independently of f.tradeHistory above (session-scoped,
+// wiped by resetSession). This is deliberately a SEPARATE key/shape
+// from PERSISTENT_TRADE_LOG_KEY (Live's real trades) — they must never
+// be mixed into the same stats, since one is real money and the other
+// is a synthetic random-walk simulation (see mockMarket.js's own header
+// comment) — the per-strategy Strategies panel below reads ONLY this
+// log, specifically because Paper can rack up hundreds of trades per
+// strategy in minutes, which is what makes a real win-rate comparison
+// between strategies possible at all — a handful of real Live/Demo
+// trades never will be enough data for that on their own.
+// =============================================================
+const PAPER_TRADE_LOG_KEY = 'nxtgen_futures_paper_trade_log_v1';
+const PAPER_TRADE_LOG_MAX = 20000; // no real-broker rate limit capping how fast Paper can generate trades, so a much higher ceiling than Live's PERSISTENT_TRADE_LOG_MAX
+
+function loadPaperTradeLog(){
+  try{
+    const raw = localStorage.getItem(PAPER_TRADE_LOG_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  }catch(e){ return []; }
+}
+
+function appendPaperTrades(records){
+  if(!records.length) return;
+  try{
+    const log = loadPaperTradeLog();
+    log.unshift(...records);
+    if(log.length > PAPER_TRADE_LOG_MAX) log.length = PAPER_TRADE_LOG_MAX;
+    localStorage.setItem(PAPER_TRADE_LOG_KEY, JSON.stringify(log));
+  }catch(e){ /* storage full/unavailable — f.tradeHistory (this session only) still has it */ }
+}
+
 // { preset: 'today'|'week'|'month'|'all'|'custom', fromMs, toMs } — UI-only,
 // recomputed on demand, not persisted itself (only the underlying trades are).
 let tradeLogRange = { preset: 'today' };
@@ -895,23 +948,80 @@ function restoreStrategyConfig(){
   }catch(e){ /* ignore corrupt/blocked storage — registry defaults already seeded above */ }
 }
 
+// Heuristic minimum sample size before a strategy's win rate is treated
+// as meaningful rather than noise — NOT a formal statistical
+// significance test (that would need the actual win/loss variance, not
+// just a trade count), just a practical guard against reading a verdict
+// into 2-3 trades the way a raw win rate % invites. 30 is a common
+// rule-of-thumb minimum sample size; below it, stats are still shown
+// (never hidden) but visibly flagged as provisional — see
+// renderStrategyRows.
+const MIN_SIGNIFICANT_TRADES = 30;
+
 function computeStrategyStats(setupType){
-  const log = loadPersistentTradeLog();
-  const rows = log.filter(t => t.setupType === setupType);
-  const wins = rows.filter(t => t.netUsd > 0).length;
-  const netSum = rows.reduce((a, t) => a + (t.netUsd || 0), 0);
-  return { trades: rows.length, wins, winRatePct: rows.length ? (wins / rows.length) * 100 : null, netUsd: netSum };
+  // Reads the PAPER Trade Log (see appendPaperTrades above), not Live's
+  // — Paper can generate a real sample size fast; a handful of actual
+  // Live/Demo trades never will. This is a simulation result against
+  // mockMarket.js's synthetic random walk, not a historical backtest
+  // against real past prices — it tells you how a strategy's OWN
+  // detection logic performs against unbiased synthetic price action,
+  // which is still meaningful (the random walk has no idea which setup
+  // is "supposed" to win), but it is not the same claim as "this is what
+  // would have happened on the real market."
+  const log = loadPaperTradeLog();
+  const rows = log.filter(t => t.strategy === setupType);
+  const wins = rows.filter(t => t.netPnlUsd > 0).length;
+  const netSum = rows.reduce((a, t) => a + (t.netPnlUsd || 0), 0);
+  const grossProfit = rows.filter(t => t.netPnlUsd > 0).reduce((a, t) => a + t.netPnlUsd, 0);
+  const grossLoss = Math.abs(rows.filter(t => t.netPnlUsd < 0).reduce((a, t) => a + t.netPnlUsd, 0));
+  const profitFactor = rows.length && grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? Infinity : null);
+  return {
+    trades: rows.length, wins,
+    winRatePct: rows.length ? (wins / rows.length) * 100 : null,
+    netUsd: netSum, profitFactor,
+    isSignificant: rows.length >= MIN_SIGNIFICANT_TRADES,
+  };
+}
+
+// Among strategies that have cleared MIN_SIGNIFICANT_TRADES paper
+// trades, picks the one with the highest win rate (profit factor as the
+// tie-break) — returns null if none have enough of a sample yet, rather
+// than crowning a "best" strategy off 2 trades. This is what actually
+// answers "which strategy is best" honestly instead of leaving it to
+// eyeballing the panel.
+function bestSignificantStrategy(){
+  let best = null;
+  for(const s of STRATEGY_REGISTRY){
+    const stats = computeStrategyStats(s.type);
+    if(!stats.isSignificant) continue;
+    if(!best || stats.winRatePct > best.stats.winRatePct
+      || (stats.winRatePct === best.stats.winRatePct && (stats.profitFactor||0) > (best.stats.profitFactor||0))){
+      best = { strategy: s, stats };
+    }
+  }
+  return best;
 }
 
 function renderStrategyRows(){
   if(!els.fuStrategyRows) return;
   const f = fu();
   let enabledCount = 0;
+  const best = bestSignificantStrategy();
+  if(els.fuStrategiesBest){
+    els.fuStrategiesBest.innerHTML = best
+      ? `🏆 Best so far (Paper, ${best.stats.trades} trades): <b>${best.strategy.label}</b> — ${best.stats.winRatePct.toFixed(0)}% win rate, ${fmtUsd(best.stats.netUsd)} net${best.stats.profitFactor != null && isFinite(best.stats.profitFactor) ? `, ${best.stats.profitFactor.toFixed(2)} profit factor` : ''}`
+      : `No strategy has reached ${MIN_SIGNIFICANT_TRADES} paper trades yet — run Paper mode to build a real sample before trusting any win-rate comparison.`;
+  }
   els.fuStrategyRows.innerHTML = STRATEGY_REGISTRY.map(s => {
     const stats = computeStrategyStats(s.type);
-    const statsLine = stats.trades === 0
-      ? 'No trades yet (this browser)'
-      : `${stats.trades} trade${stats.trades===1?'':'s'} · ${stats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(stats.netUsd)} net — real Live/Demo results, this browser`;
+    let statsLine;
+    if(stats.trades === 0){
+      statsLine = `<span style="color:var(--dim);">No paper trades yet — enable this strategy in Paper mode to start building a sample</span>`;
+    } else if(!stats.isSignificant){
+      statsLine = `<span style="color:var(--amber);">⏳ ${stats.trades}/${MIN_SIGNIFICANT_TRADES} paper trades — not yet enough for a reliable win rate</span> · so far: ${stats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(stats.netUsd)} net (Paper simulation)`;
+    } else {
+      statsLine = `<span style="color:var(--green);">✓ ${stats.trades} paper trades</span> · ${stats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(stats.netUsd)} net${stats.profitFactor != null && isFinite(stats.profitFactor) ? ` · ${stats.profitFactor.toFixed(2)} profit factor` : ''} — Paper simulation, this browser`;
+    }
     const enabled = f.strategies[s.id] ?? s.defaultEnabled;
     if(enabled) enabledCount++;
     const rr = f.strategyRR[s.id] ?? s.defaultRR;
@@ -932,7 +1042,7 @@ function renderStrategyRows(){
             </select>
           </div>
         </div>
-        <div style="font-size:11px;color:var(--dim);margin-top:8px;">${statsLine}</div>
+        <div style="font-size:11px;margin-top:8px;">${statsLine}</div>
       </div>
     `;
   }).join('');
