@@ -30,6 +30,14 @@ import { getAiConfirmation } from './ai-signal.js';
 
 const CYCLE_MS = 4000; // one synthetic "cycle" every 4s; each cycle advances the mock clock by a few minutes
 const LIVE_CYCLE_MS = 8000; // real API calls — a slower, deliberately conservative cadence than Paper's
+// 30-minute no-re-entry cooldown per symbol after ANY close (TP, SL, or
+// a manual close done directly on the exchange) — see runLiveCycle's
+// close-detection above and evaluateNoTradeFilters (noTradeEngine.js),
+// which is what actually enforces it. Matches costs.js/noTradeEngine.js's
+// SYMBOL_COOLDOWN_MINUTES used by Paper mode, kept as its own literal
+// here rather than importing it, since this file already treats Live's
+// numbers as independently-set (see LIVE_CYCLE_MS itself, just above).
+const LIVE_SYMBOL_COOLDOWN_MS = 30 * 60_000;
 
 // Live/Demo no longer scans a small hardcoded watchlist — it pulls each
 // exchange's REAL, FULL current list of USDT-M perpetual symbols (see
@@ -364,6 +372,10 @@ function buildLiveDayStateShim(equity){
     dailyPnlPct, maxDrawdownPct: 0,
     realizedGrossUsd: 0, realizedNetUsd: f.liveNetPnlUsd, feesUsd: 0, fundingUsd: 0, slippageUsd: 0,
     openPositions: openSymbols.length, openRiskPct, positions,
+    // Per-symbol re-entry cooldown (set in runLiveCycle's close-detection
+    // above) — read by evaluateNoTradeFilters (noTradeEngine.js) exactly
+    // like Paper mode's own dayState.cooldownUntilBySymbol.
+    cooldownUntilBySymbol: f.liveCooldownUntilBySymbol || {},
   };
 }
 
@@ -399,22 +411,29 @@ async function runLiveCycle(){
         // fallback, not a standing per-exchange gap.
         const grossUsd = closed && closed.grossPnl != null ? closed.grossPnl : null;
         const feesUsd = closed && closed.feesUsd != null ? closed.feesUsd : null;
+        const closedAtMs = Date.now();
+        // Only for Binance/Bybit for now, per an explicit "these two
+        // first" request — other exchanges' history rows keep durationMin
+        // as null until that's extended.
+        const durationMin = DURATION_TRACKED_EXCHANGES.includes(tracked.exchange)
+          ? Math.max(0, Math.round((closedAtMs - tracked.openedAtMs) / 60_000))
+          : null;
         f.liveTradeHistory.unshift({
-          closedAtMs: Date.now(), time: new Date().toLocaleTimeString(), exchange: tracked.exchange, symbol, side: tracked.side,
+          closedAtMs, time: new Date().toLocaleTimeString(), exchange: tracked.exchange, symbol, side: tracked.side,
           entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
           exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
           leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-          setupType: tracked.setupType,
+          setupType: tracked.setupType, durationMin,
         });
         // Same trade, also written to the cross-session Trade Log (see
         // appendPersistentTrade above) — independent of the session-scoped
         // array just above, which resetLiveSession clears on every re-arm.
         appendPersistentTrade({
-          closedAtMs: Date.now(), exchange: tracked.exchange, mode: tracked.mode, symbol, side: tracked.side,
+          closedAtMs, exchange: tracked.exchange, mode: tracked.mode, symbol, side: tracked.side,
           entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
           exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
           leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-          setupType: tracked.setupType,
+          setupType: tracked.setupType, durationMin,
         });
         f.liveTrades++;
         if(netUsd > 0) f.liveWins++; else f.liveLosses++;
@@ -422,9 +441,50 @@ async function runLiveCycle(){
         if(grossUsd != null) f.liveGrossPnlUsd += grossUsd;
         if(feesUsd != null) f.liveFeesUsd += feesUsd;
         checkAdaptiveCircuitBreaker(netUsd);
+        // 30-minute no-re-entry cooldown on THIS symbol only (requirement:
+        // closing a pair — TP, SL, or manually on the exchange itself,
+        // all of which show up here identically as "no longer open" —
+        // shouldn't let the bot immediately re-open the same pair; every
+        // other pair stays tradeable right away). Read by
+        // evaluateNoTradeFilters (noTradeEngine.js) via
+        // buildLiveDayStateShim's cooldownUntilBySymbol below.
+        f.liveCooldownUntilBySymbol = f.liveCooldownUntilBySymbol || {};
+        f.liveCooldownUntilBySymbol[symbol] = closedAtMs + LIVE_SYMBOL_COOLDOWN_MS;
         delete f.livePositions[symbol];
-      } else if(els.fuLiveOpenPosition){
-        els.fuLiveOpenPosition.textContent = `[${tracked.exchange}] ${symbol} ${data.position.side} ${data.position.size} @ ${data.position.avgPrice} (uPnL ${fmtUsd(data.position.unrealisedPnl)})`;
+      } else {
+        if(els.fuLiveOpenPosition){
+          els.fuLiveOpenPosition.textContent = `[${tracked.exchange}] ${symbol} ${data.position.side} ${data.position.size} @ ${data.position.avgPrice} (uPnL ${fmtUsd(data.position.unrealisedPnl)})`;
+        }
+        // Requirement #6/#7: once TP2 has fully filled, move the stop on
+        // what's left (the 40% final leg) to its fee-adjusted breakeven
+        // — detected here by the position's remaining size crossing
+        // below the tp1+tp2 threshold, since Binance/Bybit report
+        // position size directly rather than individual TP-leg fill
+        // events. Never fires for TP1 alone (still ~70% remaining), and
+        // only ever fires once per position (tracked.breakevenMoved).
+        if(tracked.usePartialTp && !tracked.breakevenMoved && tracked.qty > 0 && tracked.breakevenStopPrice != null){
+          const remainingFraction = data.position.size / tracked.qty;
+          const tp2CrossedThreshold = 1 - (tracked.tp1Fraction || 0.3) - (tracked.tp2Fraction || 0.3) + 0.05; // ~0.45 — comfortably between "TP1 only" (~0.70) and "TP1+TP2" (~0.40) so a single poll can tell them apart
+          if(remainingFraction <= tp2CrossedThreshold){
+            tracked.breakevenMoved = true; // set before awaiting, so a slow response can't let a second poll double-fire this
+            try{
+              const moveResult = await callProxy('/api/futures/move-stop', {
+                exchange: tracked.exchange, mode: tracked.mode, apiKey: posCred.apiKey, secretKey: posCred.secretKey, passphrase: posCred.passphrase,
+                symbol, side: tracked.side, newStopPrice: tracked.breakevenStopPrice, slOrderId: tracked.slAlgoId,
+              });
+              if(moveResult.ok){
+                tracked.slAlgoId = moveResult.slOrderId || tracked.slAlgoId;
+                showLiveMessage(`${symbol}: TP2 filled — stop on the remaining position moved to fee-adjusted breakeven (${moveResult.newStopPrice}).`);
+              } else {
+                tracked.breakevenMoved = false; // didn't actually take effect — allow a retry on a later poll
+                showLiveMessage(`${symbol}: TP2 filled but the breakeven stop move failed: ${moveResult.message}`, 'error');
+              }
+            }catch(err){
+              tracked.breakevenMoved = false;
+              showLiveMessage(`${symbol}: TP2 filled but the breakeven stop move failed: ${err.message}`, 'error');
+            }
+          }
+        }
       }
     }catch(err){
       // network hiccup — leave it tracked, try again next cycle
@@ -550,6 +610,17 @@ async function runLiveCycle(){
   await placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, equity);
 }
 
+// Exchanges the partial 30/30/40 TP structure + fee-adjusted breakeven
+// move (requirements #1-#8) is actually wired up for end-to-end — see
+// FUTURES_MOVE_STOP in server.js. Every other connected exchange still
+// places a single TP at tp1 (its original behavior, unchanged) until
+// they're migrated too.
+const PARTIAL_TP_EXCHANGES = ['binance', 'bybit'];
+// Same scope for trade-duration reporting, per an explicit "only these
+// two for now" request — durationMin stays null for other exchanges'
+// history rows until asked to extend it.
+const DURATION_TRACKED_EXCHANGES = ['binance', 'bybit'];
+
 // Shared by both the Auto-mode path above and the Manual-mode Execute
 // button (executeLivePendingSignal below) — the actual order placement
 // and position tracking, identical either way once a signal is being
@@ -558,13 +629,28 @@ async function runLiveCycle(){
 async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, equity){
   const f = fu();
   const openedAtMs = Date.now();
+  const usePartialTp = PARTIAL_TP_EXCHANGES.includes(exchange) && approved.tpFractions;
   try{
     showLiveMessage(`Placing a real ${mode} order on ${exchange}: ${approved.symbol} ${side} @ ~${approved.entry}…`);
-    const result = await callProxy('/api/futures/order', {
+    const orderBody = {
       exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase,
       symbol: approved.symbol, side, qty: approved.sizing.qty, leverage: cfg.leverage, entryPrice: approved.entry,
-      stopLossPrice: approved.stop, takeProfitPrice: approved.tp1,
-    });
+      stopLossPrice: approved.stop,
+    };
+    if(usePartialTp){
+      // TP1 @ 1.0R closes 30%, TP2 @ 1.5R closes 30%, TP3 @ 2.25R closes
+      // the remaining 40% — prices/fractions come straight from the
+      // engine's own fee-aware construction (attachTpLevels, engine.js),
+      // not recomputed here.
+      orderBody.tpLevels = [
+        { price: approved.tp1, fraction: approved.tpFractions.tp1 },
+        { price: approved.tp2, fraction: approved.tpFractions.tp2 },
+        { price: approved.tp3, fraction: approved.tpFractions.tp3 },
+      ];
+    } else {
+      orderBody.takeProfitPrice = approved.tp1; // legacy single-TP path for exchanges not yet migrated
+    }
+    const result = await callProxy('/api/futures/order', orderBody);
     if(!result.ok){
       showLiveMessage(`Order rejected: ${result.message}`, 'error');
       return;
@@ -574,8 +660,18 @@ async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, eq
       leverage: result.leverage, stopLossPrice: result.stopLossPrice, takeProfitPrice: result.takeProfitPrice,
       riskAmountUsd: approved.sizing.riskAmountUsd, openedAtMs, balanceBeforeUsd: equity,
       setupType: approved.setup,
+      // Fields only meaningful when usePartialTp is true — used by
+      // runLiveCycle's position-size polling to detect when TP2 has
+      // fully filled and trigger the breakeven move exactly once.
+      usePartialTp, tp2Fraction: approved.tpFractions ? approved.tpFractions.tp2 : null,
+      tp1Fraction: approved.tpFractions ? approved.tpFractions.tp1 : null,
+      breakevenStopPrice: approved.breakevenStopPrice, slAlgoId: result.slAlgoId || null,
+      breakevenMoved: false,
     };
-    showLiveMessage(`Real ${mode} position opened: ${approved.symbol} ${side} ${result.filledQty} @ ${result.avgPrice}, SL ${result.stopLossPrice} / TP ${result.takeProfitPrice} (order ${result.orderId}).`);
+    const tpNote = usePartialTp
+      ? `TP1 ${approved.tp1} (30%) / TP2 ${approved.tp2} (30%) / TP3 ${approved.tp3} (40%)`
+      : `TP ${result.takeProfitPrice}`;
+    showLiveMessage(`Real ${mode} position opened: ${approved.symbol} ${side} ${result.filledQty} @ ${result.avgPrice}, SL ${result.stopLossPrice} / ${tpNote} (order ${result.orderId}).`);
   }catch(err){
     showLiveMessage(`Order failed: ${err.message}`, 'error');
   }
@@ -745,7 +841,7 @@ function renderTradeLog(){
     return;
   }
   els.fuLogRows.innerHTML = rows.slice(0, 500).map(t => `
-    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr;">
+    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr;">
       <div>${new Date(t.closedAtMs).toLocaleString()}</div>
       <div>${t.exchange || '—'}${t.mode ? ` (${t.mode})` : ''}</div>
       <div>${t.symbol}</div>
@@ -757,6 +853,7 @@ function renderTradeLog(){
       <div>${t.grossUsd != null ? fmtUsd(t.grossUsd) : '—'}</div>
       <div>${t.feesUsd != null ? fmtUsd(t.feesUsd) : '—'}</div>
       <div>${fmtUsd(t.netUsd)}</div>
+      <div>${t.durationMin != null ? t.durationMin + 'm' : '—'}</div>
     </div>
   `).join('');
 }
@@ -883,7 +980,7 @@ function renderLiveHistory(){
   const history = fu().liveTradeHistory;
   if(!history.length){ els.fuLiveHistoryRows.innerHTML = '<div class="fu-empty">No live/demo trades yet this session.</div>'; return; }
   els.fuLiveHistoryRows.innerHTML = history.slice(0, 50).map(t => `
-    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr 1.4fr;">
+    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr 1.4fr;">
       <div>${t.time}</div>
       <div>${t.exchange || '—'}</div>
       <div>${t.symbol}</div>
@@ -895,6 +992,7 @@ function renderLiveHistory(){
       <div>${t.grossUsd != null ? fmtUsd(t.grossUsd) : '—'}</div>
       <div>${t.feesUsd != null ? fmtUsd(t.feesUsd) : '—'}</div>
       <div>${fmtUsd(t.netUsd)}</div>
+      <div>${t.durationMin != null ? t.durationMin + 'm' : '—'}</div>
       <div style="font-size:11px;color:var(--dim);">${t.orderId}</div>
     </div>
   `).join('');
@@ -1077,6 +1175,7 @@ function resetLiveSession(){
   f.liveFeesUsd = 0;
   f.liveTradeHistory = [];
   f.livePositions = {};
+  f.liveCooldownUntilBySymbol = {};
   f.liveConsecutiveLosses = 0;
   f.livePausedByCircuitBreaker = false;
   f.liveAdaptiveConfidenceBoost = 0;

@@ -640,15 +640,30 @@ async function bybitSetLeverage(mode, apiKey, secretKey, symbol, leverage){
   }
 }
 
-// Places a market order with native TP/SL attached, sets leverage first,
-// then polls for the fill exactly like placeBybitOrder does for spot
-// (Bybit's create-order response is an ACK only, not a fill report).
-// side: 'Buy' | 'Sell'. rawQty/rawStopLossPrice/rawTakeProfitPrice are the
-// caller's intended values BEFORE rounding — this function rounds qty to
-// the symbol's qtyStep and both prices to its tickSize itself (Bybit
-// rejects values that don't land on-step), same division of
-// responsibility as placeBybitOrder for spot.
-async function placeBybitFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice }){
+// Places a market entry, sets leverage first, then polls for the fill
+// exactly like placeBybitOrder does for spot (Bybit's create-order
+// response is an ACK only, not a fill report). side: 'Buy' | 'Sell'.
+// rawQty/rawStopLossPrice are the caller's intended values BEFORE
+// rounding — this function rounds qty to the symbol's qtyStep and
+// prices to its tickSize itself (Bybit rejects values that don't land
+// on-step), same division of responsibility as placeBybitOrder for spot.
+//
+// TP/SL shape (partial take-profit structure — TP1 30% / TP2 30% /
+// TP3 40%, see tpLevels below): the SL is attached to the POSITION
+// itself via /v5/position/trading-stop (tpslMode:'Full', TP fields
+// omitted) rather than embedded on the entry order — that's what makes
+// it amendable later (see moveBybitStopToBreakeven) by simply calling
+// trading-stop again with a new price, no cancel/replace needed. The
+// three TP legs are separate reduce-only conditional MARKET orders
+// (Bybit's single tpslMode:'Full' takeProfit field only supports ONE
+// exit for the whole position, which can't express a 3-level scale-out)
+// — the last leg sets closeOnTrigger so it sweeps whatever's actually
+// left (funding/rounding drift) instead of a qty that could drift a
+// dust amount short of the true remaining size. If tpLevels isn't
+// supplied, falls back to the original single-TP behavior
+// (rawTakeProfitPrice, tpslMode:'Full') for callers that haven't
+// migrated yet.
+async function placeBybitFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice, tpLevels }){
   const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
   const filters = await bybitFuturesSymbolFilters(base, symbol);
 
@@ -658,17 +673,24 @@ async function placeBybitFuturesOrder(mode, apiKey, secretKey, { symbol, side, r
   }
   const roundToTick = p => Math.round(p / filters.tickSize) * filters.tickSize;
   const stopLossPrice = roundToTick(rawStopLossPrice);
-  const takeProfitPrice = roundToTick(rawTakeProfitPrice);
   const clampedLeverage = Math.min(leverage, filters.maxLeverage);
+  const hasLegs = Array.isArray(tpLevels) && tpLevels.length > 0;
 
   await bybitSetLeverage(mode, apiKey, secretKey, symbol, clampedLeverage);
 
-  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+  const entryBody = {
     category: 'linear', symbol, side, orderType: 'Market', qty: qty.toString(),
     timeInForce: 'IOC', positionIdx: 0, // one-way mode — see note below if this ever rejects
-    takeProfit: takeProfitPrice.toString(), stopLoss: stopLossPrice.toString(),
-    tpOrderType: 'Market', slOrderType: 'Market', tpslMode: 'Full',
-  }).catch(err => {
+  };
+  if(!hasLegs){
+    // Legacy single-TP path — TP/SL embedded directly on the entry order.
+    const takeProfitPrice = roundToTick(rawTakeProfitPrice);
+    Object.assign(entryBody, {
+      takeProfit: takeProfitPrice.toString(), stopLoss: stopLossPrice.toString(),
+      tpOrderType: 'Market', slOrderType: 'Market', tpslMode: 'Full',
+    });
+  }
+  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', entryBody).catch(err => {
     // positionIdx:0 is one-way mode, which is what a new/default Bybit
     // derivatives account uses. If this account was switched to hedge
     // mode (separate Buy/Sell position slots), Bybit rejects positionIdx
@@ -682,32 +704,108 @@ async function placeBybitFuturesOrder(mode, apiKey, secretKey, { symbol, side, r
   const orderId = created.result?.orderId;
   if(!orderId) throw new VerifyRejected('Bybit accepted the order but returned no orderId to confirm the fill with.');
 
+  let filledQty = null, avgPrice = null, feeUsd = 0;
   const deadline = Date.now() + 6000;
   while(Date.now() < deadline){
     const check = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/order/realtime', `category=linear&orderId=${orderId}`);
     const order = check.result?.list?.[0];
     if(order && order.orderStatus === 'Filled'){
-      const filledQty = parseFloat(order.cumExecQty);
-      const avgPrice = parseFloat(order.avgPrice || '0');
-      return { orderId, filledQty, avgPrice, feeUsd: parseFloat(order.cumExecFee || '0'), leverage: clampedLeverage, stopLossPrice, takeProfitPrice };
+      filledQty = parseFloat(order.cumExecQty);
+      avgPrice = parseFloat(order.avgPrice || '0');
+      feeUsd = parseFloat(order.cumExecFee || '0');
+      break;
     }
     if(order && ['Cancelled', 'Rejected', 'Deactivated'].includes(order.orderStatus)){
       throw new VerifyRejected(`Order ${order.orderStatus.toLowerCase()} before filling. No position was opened.`);
     }
     await new Promise(r => setTimeout(r, 400));
   }
-  // Don't leave this ambiguous — one direct position check before giving
-  // up, so the error is honest about whether a real position exists
-  // rather than reading like "nothing happened" when it might well have.
-  // (The /api/futures/order route's own pre-flight position check is
-  // what actually prevents a next-cycle retry from stacking a second
-  // entry on top of this either way — this is just making the message
-  // here accurate, not the safety net itself.)
-  const maybeOpen = await getBybitPosition(mode, apiKey, secretKey, symbol).catch(() => null);
-  if(maybeOpen){
-    throw new VerifyRejected(`Order ${orderId} did not confirm as Filled within 6s via the order-status endpoint, but ${symbol} now shows an open ${maybeOpen.side} position of size ${maybeOpen.size} on Bybit — it almost certainly DID fill. Treating this as failed rather than guessing at the fill price/qty from here; check Bybit directly and manage that position manually if this app doesn't pick it up on its own next cycle.`);
+  if(filledQty == null){
+    // Don't leave this ambiguous — one direct position check before giving
+    // up, so the error is honest about whether a real position exists
+    // rather than reading like "nothing happened" when it might well have.
+    // (The /api/futures/order route's own pre-flight position check is
+    // what actually prevents a next-cycle retry from stacking a second
+    // entry on top of this either way — this is just making the message
+    // here accurate, not the safety net itself.)
+    const maybeOpen = await getBybitPosition(mode, apiKey, secretKey, symbol).catch(() => null);
+    if(maybeOpen){
+      throw new VerifyRejected(`Order ${orderId} did not confirm as Filled within 6s via the order-status endpoint, but ${symbol} now shows an open ${maybeOpen.side} position of size ${maybeOpen.size} on Bybit — it almost certainly DID fill. Treating this as failed rather than guessing at the fill price/qty from here; check Bybit directly and manage that position manually if this app doesn't pick it up on its own next cycle.`);
+    }
+    throw new VerifyRejected(`Order ${orderId} was accepted but did not confirm as Filled within 6s, and no open ${symbol} position was found either — check Bybit's order history directly before assuming anything about it.`);
   }
-  throw new VerifyRejected(`Order ${orderId} was accepted but did not confirm as Filled within 6s, and no open ${symbol} position was found either — check Bybit's order history directly before assuming anything about it.`);
+
+  if(!hasLegs){
+    const takeProfitPrice = roundToTick(rawTakeProfitPrice);
+    return { orderId, filledQty, avgPrice, feeUsd, leverage: clampedLeverage, stopLossPrice, takeProfitPrice };
+  }
+
+  // --- Protective stop, attached to the position itself (see comment
+  // above) — if this fails the position is open with NO protection at
+  // all, which is worse than the order never having gone through, so it
+  // surfaces as a clearly-labeled partial-failure. ---
+  await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/trading-stop', {
+    category: 'linear', symbol, tpslMode: 'Full', slOrderType: 'Market',
+    stopLoss: stopLossPrice.toString(), positionIdx: 0,
+  }).catch(err => {
+    throw new VerifyRejected(`Position OPENED (${symbol} ${side} ${filledQty} @ ${avgPrice}, order ${orderId}) but attaching the stop-loss FAILED: ${err.message}. This position has NO protective stop on it — check Bybit directly and close or protect it manually.`);
+  });
+
+  // --- Take-profit legs: 30% / 30% / remainder, each its own
+  // reduce-only conditional market order. ---
+  const exitSide = side === 'Buy' ? 'Sell' : 'Buy';
+  const isLong = side === 'Buy';
+  const tpOrderIds = [];
+  const placedLevels = [];
+  let allocatedQty = 0;
+  for(let i = 0; i < tpLevels.length; i++){
+    const isLast = i === tpLevels.length - 1;
+    const tpPrice = roundToTick(tpLevels[i].price);
+    const body = {
+      category: 'linear', symbol, side: exitSide, orderType: 'Market',
+      triggerPrice: tpPrice.toString(), triggerBy: 'LastPrice',
+      // 1 = triggers when price rises to triggerPrice, 2 = falls to it —
+      // a LONG's take-profit needs price to rise; a SHORT's needs it to fall.
+      triggerDirection: isLong ? 1 : 2,
+      reduceOnly: true, positionIdx: 0,
+    };
+    if(isLast){
+      const remainderQty = Math.max(0, qty - allocatedQty);
+      body.qty = (remainderQty > 0 ? remainderQty : qty * tpLevels[i].fraction).toString();
+      body.closeOnTrigger = true; // sweeps whatever's actually left, not just this nominal qty
+    } else {
+      const legQty = floorToStep(qty * tpLevels[i].fraction, filters.qtyStep);
+      allocatedQty += legQty;
+      body.qty = legQty.toString();
+    }
+    try{
+      const tpCreated = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', body);
+      tpOrderIds.push(tpCreated.result?.orderId || null);
+      placedLevels.push({ ...tpLevels[i], price: tpPrice });
+    }catch(err){
+      throw new VerifyRejected(`Position OPENED and stop-loss attached (${symbol} ${side} ${filledQty} @ ${avgPrice}) but take-profit leg ${i + 1}/${tpLevels.length} FAILED: ${err.message}. Remaining TP legs were not attempted — check Bybit directly; the position is protected by its stop-loss but may be missing some/all take-profit exits.`);
+    }
+  }
+
+  return { orderId, filledQty, avgPrice, feeUsd, leverage: clampedLeverage, stopLossPrice, tpOrderIds, tpLevels: placedLevels };
+}
+
+// Amends the SL already attached to an open Bybit position to a new
+// price (used for the fee-adjusted breakeven move once TP2 fully
+// closes) — no cancel/replace needed since the stop lives on the
+// position itself (see placeBybitFuturesOrder's comment above), just a
+// second trading-stop call with the new value. Bybit accepts this while
+// the position is open and TP legs are still resting.
+async function moveBybitStopToBreakeven(mode, apiKey, secretKey, { symbol, newStopPrice }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const roundToTick = p => Math.round(p / filters.tickSize) * filters.tickSize;
+  const stopLossPrice = roundToTick(newStopPrice);
+  await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/trading-stop', {
+    category: 'linear', symbol, tpslMode: 'Full', slOrderType: 'Market',
+    stopLoss: stopLossPrice.toString(), positionIdx: 0,
+  });
+  return { newStopPrice: stopLossPrice };
 }
 
 // Reads the live position for one symbol — size:"0" (or no row at all)
@@ -1708,7 +1806,28 @@ async function binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, levera
   await binanceFuturesSignedRequest('POST', '/fapi/v1/leverage', { symbol, leverage: String(Math.round(leverage)) }, apiKey, secretKey, mode);
 }
 
-async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice }){
+// TP/SL shape (partial take-profit structure — TP1 30% / TP2 30% /
+// TP3 40%, see tpLevels below): the SL is one STOP_MARKET conditional
+// order with closePosition:true (unchanged from before — closePosition
+// means "close whatever's currently open", so it stays correct on its
+// own as TP1/TP2 shrink the position, no resubmission needed until the
+// breakeven move after TP2 — see moveBinanceStopToBreakeven). Each TP
+// leg is now its OWN TAKE_PROFIT_MARKET conditional order: the first
+// two carry a fixed reduceOnly quantity (30% each), and the last uses
+// closePosition:true instead of a qty so it sweeps whatever's actually
+// left (funding/rounding drift) rather than a qty that could drift a
+// dust amount short of the true remaining size. If tpLevels isn't
+// supplied, falls back to the original single-TP behavior
+// (rawTakeProfitPrice, one closePosition TP) for callers that haven't
+// migrated yet. NOTE: conditional trigger orders (STOP_MARKET /
+// TAKE_PROFIT_MARKET) go through /fapi/v1/algoOrder here, not the plain
+// /fapi/v1/order endpoint — see the file-level comment above this
+// section for why (a Binance API change on 2025-12-09 broke the old
+// path). The fixed-qty + reduceOnly combination on that same endpoint
+// for TP1/TP2 hasn't been exercised in this codebase before (only
+// closePosition-style single-TP orders had been) — verify on Binance
+// Futures Testnet before trusting it with real size.
+async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice, tpLevels }){
   const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
   const filters = await binanceFuturesSymbolFilters(base, symbol);
 
@@ -1717,8 +1836,8 @@ async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side,
     throw new VerifyRejected(`Size ${rawQty} ${symbol} rounds down to ${qty}, below the exchange minimum (${filters.minQty}) — nothing was sent.`);
   }
   const roundPrice = p => Number(p.toFixed(filters.pricePrecision));
+  const roundQty = q => floorToStep(q, filters.qtyStep);
   const stopLossPrice = roundPrice(rawStopLossPrice);
-  const takeProfitPrice = roundPrice(rawTakeProfitPrice);
   const exitSide = side === 'BUY' ? 'SELL' : 'BUY'; // TP/SL close the position, so they trade the opposite direction from entry
 
   await binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage);
@@ -1741,24 +1860,73 @@ async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side,
   const filledQty = parseFloat(order.executedQty);
   const avgPrice = parseFloat(order.avgPrice);
 
-  // Entry is live — now attach the exit orders. If either of these
-  // fails, the position is open with NO protection, which is worse than
-  // the order never having been placed at all, so this surfaces as a
-  // clearly-labeled partial-failure rather than a generic order error.
+  // Entry is live — now attach the exit orders. If any of these fail,
+  // the position may be open with NO (or only partial) protection,
+  // which is worse than the order never having been placed at all, so
+  // this surfaces as a clearly-labeled partial-failure rather than a
+  // generic order error.
+  let slAlgoId = null;
+  const tpOrderIds = [];
+  const placedLevels = [];
   try{
-    await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+    const slResp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
       algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'STOP_MARKET',
       triggerPrice: stopLossPrice.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
     }, apiKey, secretKey, mode);
-    await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
-      algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'TAKE_PROFIT_MARKET',
-      triggerPrice: takeProfitPrice.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
-    }, apiKey, secretKey, mode);
+    slAlgoId = slResp.algoId ?? slResp.orderId ?? null;
+
+    const legs = Array.isArray(tpLevels) && tpLevels.length > 0 ? tpLevels : [{ price: rawTakeProfitPrice, fraction: 1 }];
+    let allocatedQty = 0;
+    for(let i = 0; i < legs.length; i++){
+      const isLast = i === legs.length - 1;
+      const legPrice = roundPrice(legs[i].price);
+      const body = {
+        algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'TAKE_PROFIT_MARKET',
+        triggerPrice: legPrice.toString(), workingType: 'MARK_PRICE',
+      };
+      if(isLast){
+        body.closePosition = 'true';
+      } else {
+        const legQty = roundQty(qty * legs[i].fraction);
+        allocatedQty += legQty;
+        body.quantity = legQty.toString();
+        body.reduceOnly = 'true';
+      }
+      const tpResp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', body, apiKey, secretKey, mode);
+      tpOrderIds.push(tpResp.algoId ?? tpResp.orderId ?? null);
+      placedLevels.push({ ...legs[i], price: legPrice });
+    }
   }catch(err){
-    throw new VerifyRejected(`Position OPENED (${symbol} ${side} ${filledQty} @ ${avgPrice}, order ${order.orderId}) but attaching stop-loss/take-profit FAILED: ${err.message}. This position has no protective orders on it — check Binance directly and close or protect it manually.`);
+    throw new VerifyRejected(`Position OPENED (${symbol} ${side} ${filledQty} @ ${avgPrice}, order ${order.orderId}) but attaching stop-loss/take-profit FAILED partway through: ${err.message}. This position may have NO (or only partial) protective orders on it — check Binance directly and close or protect it manually.`);
   }
 
-  return { orderId: order.orderId, filledQty, avgPrice, leverage, stopLossPrice, takeProfitPrice };
+  return { orderId: order.orderId, filledQty, avgPrice, leverage, stopLossPrice, slAlgoId, tpOrderIds, tpLevels: placedLevels };
+}
+
+// Cancels the current SL algo order (if we have its id — best-effort;
+// if the cancel fails because it's already gone, or for any other
+// reason, we proceed to place the new one anyway rather than leaving
+// the position without a fresh stop, since a brief window with two
+// live stops is safe — whichever triggers first just closes the
+// position — while leaving it with NONE is not) and places a new
+// STOP_MARKET at the fee-adjusted breakeven price, still closePosition:
+// true so it covers exactly whatever's left after TP2. Used only for
+// the requirement #6/#7 move — never called for the TP1 leg.
+async function moveBinanceStopToBreakeven(mode, apiKey, secretKey, { symbol, side, newStopPrice, slOrderId }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const roundPrice = p => Number(p.toFixed(filters.pricePrecision));
+  const exitSide = side === 'BUY' ? 'SELL' : 'BUY';
+
+  if(slOrderId){
+    await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: slOrderId }, apiKey, secretKey, mode).catch(() => {});
+  }
+  const stopLossPrice = roundPrice(newStopPrice);
+  const newStop = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+    algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'STOP_MARKET',
+    triggerPrice: stopLossPrice.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+  }, apiKey, secretKey, mode);
+  return { newStopPrice: stopLossPrice, slOrderId: newStop.algoId ?? newStop.orderId ?? null };
 }
 
 async function getBinanceFuturesPosition(mode, apiKey, secretKey, symbol){
@@ -1838,6 +2006,12 @@ app.post('/api/order', async (req, res) => {
 const FUTURES_ORDER_PLACERS = { bybit: placeBybitFuturesOrder, binance: placeBinanceFuturesOrder, gateio: placeGateioFuturesOrder, mexc: placeMexcFuturesOrder, bitget: placeBitgetFuturesOrder };
 const FUTURES_POSITION_GETTERS = { bybit: getBybitPosition, binance: getBinanceFuturesPosition, gateio: getGateioFuturesPosition, mexc: getMexcFuturesPosition, bitget: getBitgetFuturesPosition };
 const FUTURES_CLOSED_PNL_GETTERS = { bybit: getBybitClosedPnl, binance: getBinanceFuturesRealizedResult, gateio: getGateioFuturesRealizedResult, mexc: getMexcFuturesRealizedResult, bitget: getBitgetFuturesRealizedResult };
+// Moving the SL to a fee-adjusted breakeven once TP2 fully closes
+// (requirements #6/#7) is only wired up for Binance and Bybit so far,
+// matching the partial-TP order-placement work above — Gate.io, MEXC,
+// and Bitget still use their original single-TP/SL behavior via
+// FUTURES_ORDER_PLACERS until they're migrated too.
+const FUTURES_MOVE_STOP = { binance: moveBinanceStopToBreakeven, bybit: moveBybitStopToBreakeven };
 // Bybit's account is unified (spot + derivatives share one USDT
 // balance), so its futures balance is just its regular asset-balance
 // getter. Binance, Gate.io, MEXC, and Bitget all keep futures in a
@@ -2033,9 +2207,13 @@ app.post('/api/futures/balance', async (req, res) => {
 });
 
 app.post('/api/futures/order', async (req, res) => {
-  const { exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, entryPrice, stopLossPrice, takeProfitPrice, passphrase } = req.body || {};
-  if(!exchange || !apiKey || !secretKey || !symbol || !side || !qty || !leverage || !stopLossPrice || !takeProfitPrice){
-    return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, stopLossPrice, and takeProfitPrice are all required — every futures order this app places carries a stop-loss and take-profit from the moment it opens, no exceptions.' });
+  const { exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, entryPrice, stopLossPrice, takeProfitPrice, tpLevels, passphrase } = req.body || {};
+  const hasTakeProfit = takeProfitPrice != null || (Array.isArray(tpLevels) && tpLevels.length > 0);
+  if(!exchange || !apiKey || !secretKey || !symbol || !side || !qty || !leverage || !stopLossPrice || !hasTakeProfit){
+    return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, stopLossPrice, and a take-profit (takeProfitPrice, or tpLevels for the partial 30/30/40 structure) are all required — every futures order this app places carries a stop-loss and take-profit from the moment it opens, no exceptions.' });
+  }
+  if(Array.isArray(tpLevels) && tpLevels.some(l => !(l && l.price > 0 && l.fraction > 0))){
+    return res.status(400).json({ ok:false, message:'Every tpLevels entry needs a positive price and fraction.' });
   }
   if(exchange === 'bitget' && !passphrase){
     return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
@@ -2085,7 +2263,13 @@ app.post('/api/futures/order', async (req, res) => {
     const result = await placer(netMode, apiKey, secretKey, {
       symbol, side: normalizedSide, rawQty: parseFloat(qty), leverage: parseFloat(leverage),
       rawEntryPrice: entryPrice != null ? parseFloat(entryPrice) : undefined, // only MEXC's placer actually needs this — others ignore it
-      rawStopLossPrice: parseFloat(stopLossPrice), rawTakeProfitPrice: parseFloat(takeProfitPrice),
+      rawStopLossPrice: parseFloat(stopLossPrice),
+      rawTakeProfitPrice: takeProfitPrice != null ? parseFloat(takeProfitPrice) : undefined,
+      // Partial 30/30/40 TP structure — only binance/bybit's placers
+      // currently read this (see FUTURES_MOVE_STOP above); the other
+      // three placers ignore it and fall back to their existing
+      // single-TP behavior via rawTakeProfitPrice.
+      tpLevels: Array.isArray(tpLevels) ? tpLevels.map(l => ({ price: parseFloat(l.price), fraction: parseFloat(l.fraction) })) : undefined,
     }, passphrase);
     return res.json({ ok:true, ...result });
   }catch(err){
@@ -2093,6 +2277,49 @@ app.post('/api/futures/order', async (req, res) => {
       return res.json({ ok:false, rejected:true, message: err.message });
     }
     return res.json({ ok:false, rejected:false, message: `Could not open futures position on ${exchange}: ${err.message}` });
+  }
+});
+
+// Moves the SL on the remaining position to a (fee-adjusted) new price
+// without touching whatever TP orders are still resting — used
+// specifically for requirement #6/#7: once TP2 fully closes, the stop
+// on the remaining 40% moves to breakeven, adjusted for round-trip fees
+// so it's a genuine non-loss rather than the raw entry price. Only
+// wired up for Binance and Bybit so far (FUTURES_MOVE_STOP above);
+// calling this for any other exchange returns a clear "not supported
+// yet" response rather than silently doing nothing.
+app.post('/api/futures/move-stop', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, symbol, side, newStopPrice, slOrderId, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !symbol || !side || !newStopPrice){
+    return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, symbol, side, and newStopPrice are all required.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const mover = FUTURES_MOVE_STOP[exchange];
+  if(!mover){
+    return res.status(400).json({ ok:false, message: `Moving the stop to breakeven after TP2 is only wired up for Binance and Bybit so far — "${exchange}" still runs its original single take-profit/stop-loss behavior end-to-end and doesn't need this call.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  const casingFn = FUTURES_SIDE_CASING[exchange] || (s => s[0].toUpperCase() + s.slice(1).toLowerCase());
+  const normalizedSide = casingFn(String(side));
+  try{
+    const result = await mover(netMode, apiKey, secretKey, {
+      symbol, side: normalizedSide, newStopPrice: parseFloat(newStopPrice), slOrderId,
+    }, passphrase);
+    return res.json({ ok:true, ...result });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    // Deliberately NOT swallowed as a soft failure the client could
+    // mistake for "nothing needed to change" — a failed breakeven move
+    // means the remaining position is still sitting behind its ORIGINAL
+    // stop, not an unprotected one, so this isn't unsafe the way a
+    // failed initial SL attach would be; but the client still needs to
+    // know it didn't take effect so it can retry rather than assuming
+    // the remaining 40% is breakeven-protected when it isn't.
+    return res.json({ ok:false, rejected:false, message: `Could not move ${symbol}'s stop to breakeven on ${exchange}: ${err.message}. The remaining position is still protected by its ORIGINAL stop-loss (unchanged) — this just means the breakeven move didn't take effect yet.` });
   }
 });
 

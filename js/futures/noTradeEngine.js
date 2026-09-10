@@ -7,6 +7,16 @@
 import { REGIMES } from './regime.js';
 import { RISK_DEFAULTS, maxPortfolioRiskPct } from './risk.js';
 
+// How long a symbol stays off-limits after ANY close on it (TP, SL,
+// time-stop, or a manual close done directly on the exchange) — per an
+// explicit request: closing out of a pair shouldn't let the bot
+// immediately re-enter that SAME pair on the next qualifying signal,
+// while every other pair stays tradeable right away. dayState's own
+// cooldownUntilBySymbol map (set by closeTrade in engine.js for Paper,
+// and by runLiveCycle's close-detection in futures-ui.js for Live/Demo)
+// is what this checks against.
+export const SYMBOL_COOLDOWN_MINUTES = 30;
+
 export function evaluateNoTradeFilters({
   snap, regime, confidence, minConfidence, netTargetPct, minNetProfitPct,
   riskRewardRatio, minRiskReward, liquidationSafety, dayState, btcShock, isAltcoin,
@@ -14,6 +24,13 @@ export function evaluateNoTradeFilters({
 }){
   const reasons = [];
   const portfolioCapPct = maxPortfolioRiskPct(riskPctPerTrade);
+  const now = nowMs ?? Date.now();
+
+  const cooldownUntil = dayState && dayState.cooldownUntilBySymbol && dayState.cooldownUntilBySymbol[snap.symbol];
+  if(cooldownUntil && now < cooldownUntil){
+    const remainingMin = Math.ceil((cooldownUntil - now) / 60_000);
+    reasons.push(`${snap.symbol} closed recently — ${remainingMin}min left of its ${SYMBOL_COOLDOWN_MINUTES}min cooldown before re-entry`);
+  }
 
   if(snap.meta.spreadPct > 0.08) reasons.push(`Spread too wide (${snap.meta.spreadPct.toFixed(3)}%)`);
   if(snap.meta.liquidityScore < 35) reasons.push(`Liquidity too low (score ${snap.meta.liquidityScore})`);
@@ -41,7 +58,7 @@ export function evaluateNoTradeFilters({
     if(dayState.dailyPnlPct >= RISK_DEFAULTS.dailyProfitTargetPct) reasons.push(`Daily profit target (+${RISK_DEFAULTS.dailyProfitTargetPct}%) reached — trading stopped for the day`);
     if(dayState.consecutiveLosses >= RISK_DEFAULTS.maxConsecutiveLosses){
       const cooldownUntil = (dayState.lastLossAt || 0) + RISK_DEFAULTS.coolingOffMinutes * 60_000;
-      if((nowMs ?? Date.now()) < cooldownUntil){
+      if(now < cooldownUntil){
         reasons.push(`${dayState.consecutiveLosses} consecutive losses — cooling off for ${RISK_DEFAULTS.coolingOffMinutes}min`);
       }
     }

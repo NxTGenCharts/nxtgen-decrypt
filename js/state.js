@@ -338,6 +338,10 @@ export const state = {
     liveRunning: false,
     liveTimer: null,
     livePositions: {},      // symbol -> { orderId, side, qty, entry, stopLossPrice, takeProfitPrice, leverage, openedAt }
+    // symbol -> timestamp (ms) until which re-entry on that symbol is
+    // blocked, set on every close (TP/SL/manual) in runLiveCycle — see
+    // buildLiveDayStateShim and noTradeEngine.js's SYMBOL_COOLDOWN_MINUTES.
+    liveCooldownUntilBySymbol: {},
     liveTradeHistory: [],
     liveTrades: 0, liveWins: 0, liveLosses: 0, liveNetPnlUsd: 0, liveGrossPnlUsd: 0, liveFeesUsd: 0, liveStartingEquity: null,
     // Rolling real-performance tracking, used for the adaptive confidence/
