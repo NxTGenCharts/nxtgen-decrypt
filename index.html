@@ -354,8 +354,27 @@
           Resets to OFF every time this page loads or the exchange/mode/Autotrade selection changes — it is never left armed silently across a refresh.
         </div>
       </div>
+      <div class="field" style="grid-column:1 / -1;">
+        <label title="Auto: a qualifying cycle executes the moment it's found, every scan — no click needed. Manual: the same scan runs, but a qualifying cycle is shown below and waits for you to click Execute — nothing trades on its own. Applies to both simulated and Real order execution.">Trade Mode</label>
+        <div class="mode-toggle" role="group" aria-label="Autotrade trade mode">
+          <button type="button" class="mode-btn active" id="atModeAutoBtn" data-mode="auto">Auto</button>
+          <button type="button" class="mode-btn" id="atModeManualBtn" data-mode="manual">Manual</button>
+        </div>
+      </div>
       <div class="btn-row">
         <button class="primary live-toggle" id="atToggleBtn"><span class="dot"></span><span class="btn-label">Start Autotrade</span></button>
+      </div>
+    </div>
+
+    <div id="atPendingCard" class="ov-block" style="display:none;border-color:var(--amber-dim);margin-bottom:14px;">
+      <div class="ov-block-title">Pending Opportunity <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">MANUAL MODE — AWAITING YOUR CLICK</span></div>
+      <div id="atPendingDetail" style="font-size:13px;line-height:1.6;margin:10px 0;"></div>
+      <div class="btn-row">
+        <button type="button" class="primary" id="atPendingExecuteBtn">Execute Cycle</button>
+        <button type="button" class="primary ghost" id="atPendingDismissBtn">Dismiss</button>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-top:8px;">
+        Re-scanned fresh the moment you click Execute — order-book prices move between scans, so what actually executes is verified again right before it fires, not just replayed from when this was first shown. Refreshes to the latest qualifying cycle each scan interval if you haven't acted on this one yet.
       </div>
     </div>
 
@@ -413,8 +432,8 @@
         <input id="fuMinConfidence" type="number" min="0" max="100" step="1" value="70">
       </div>
       <div class="field">
-        <label for="fuMinRR" title="Fixed system-wide at 1:2 — no longer user-adjustable. A thin ratio on a tight stop let round-trip fees erase most of a winning trade's edge in real Live/Demo trading; see the API Keys/Futures footer notes.">Reward:Risk (fixed)</label>
-        <input id="fuMinRR" type="number" value="2.0" readonly aria-readonly="true" title="Fixed at 1:2 — see js/futures/risk.js RISK_DEFAULTS.riskRewardRatio.">
+        <label for="fuMinRR" title="Legacy fallback only — each strategy below now has its own reward:risk ratio (Strategies block below). This field only applies if a strategy's type somehow can't be matched to the registry, which shouldn't happen in normal use.">Reward:Risk (legacy fallback)</label>
+        <input id="fuMinRR" type="number" value="2.0" readonly aria-readonly="true" title="Per-strategy now — see the Strategies block below.">
       </div>
       <div class="field">
         <label for="fuMinNetProfit">Min expected net profit (%)</label>
@@ -442,6 +461,14 @@
     </div>
 
     <div id="fuMessages"></div>
+
+    <div class="ov-block" style="margin-bottom:18px;">
+      <div class="ov-block-title">Strategies</div>
+      <div style="font-size:12px;color:var(--dim);margin:10px 0;line-height:1.5;">
+        Which setup detectors are allowed to fire, and what reward:risk ratio each one builds its trades at (1:1 to 1:3). Shared by Paper and Live/Demo alike — multiple strategies can be on at once; if more than one fires on the same symbol in the same cycle, they either agree (confidence blends) or disagree (hard no-trade), same as before. <b>The win rate/trades shown per strategy are real numbers pulled from your own Trade Log below, filtered to that strategy — not a backtest, not a claim, not marketing.</b> They'll read "no trades yet" until you've actually traded with that strategy turned on; that's expected, not an error.
+      </div>
+      <div id="fuStrategyRows"></div>
+    </div>
 
     <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);">
       <div class="ov-card ov-highlight"><span class="ov-label">Current Balance</span><span class="ov-value" id="fuBalance">$10,000.00</span></div>
@@ -502,6 +529,26 @@
       <div class="field" style="max-width:320px;margin:14px 0 10px;">
         <label for="fuLiveRiskPct" title="Max % of the SELECTED exchange's real futures-account equity (the Real Balance figure below) lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount. Adjustable 1-50%. Same setting as the Paper Engine's 'Risk per trade' field above — changing either one updates both.">Risk per trade (%)</label>
         <input id="fuLiveRiskPct" type="number" min="1" max="50" step="0.5" value="1">
+      </div>
+
+      <div class="field" style="max-width:420px;margin-bottom:10px;">
+        <label title="Auto: the moment a signal clears every check, it's placed automatically — no click needed. Manual: the same scan and checks run every cycle, but a qualifying signal is shown here and waits for you to click Execute — nothing is placed on its own. Applies to real Live/Demo trading only, not Paper.">Trade Mode</label>
+        <div class="mode-toggle" role="group" aria-label="Futures trade mode">
+          <button type="button" class="mode-btn active" id="fuLiveModeAutoBtn" data-mode="auto">Auto</button>
+          <button type="button" class="mode-btn" id="fuLiveModeManualBtn" data-mode="manual">Manual</button>
+        </div>
+      </div>
+
+      <div id="fuLivePendingCard" class="ov-block" style="display:none;border-color:var(--amber-dim);margin-bottom:14px;">
+        <div class="ov-block-title">Pending Signal <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">MANUAL MODE — AWAITING YOUR CLICK</span></div>
+        <div id="fuLivePendingDetail" style="font-size:13px;line-height:1.6;margin:10px 0;"></div>
+        <div class="btn-row">
+          <button type="button" class="primary" id="fuLivePendingExecuteBtn">Execute Trade</button>
+          <button type="button" class="primary ghost" id="fuLivePendingDismissBtn">Dismiss</button>
+        </div>
+        <div style="font-size:11px;color:var(--dim);margin-top:8px;">
+          Re-checked against fresh market data the moment you click Execute — if it no longer qualifies by then, nothing is placed and you'll be told why. Refreshes automatically to the latest qualifying signal each scan cycle (~8s) if you haven't acted on this one yet.
+        </div>
       </div>
 
       <div class="field" style="max-width:320px;margin-bottom:10px;">
@@ -590,7 +637,9 @@
       <b>Two more strategies enabled</b> — per an explicit request to try a genuinely different approach rather than tune AI Scalp further: <b>Trend Continuation</b> (enters on a pullback INTO an established trend — price retracing toward EMA20/VWAP on contracting volume, then momentum resuming — rather than fresh momentum) and <b>Liquidity Sweep Reversal</b> (a real reversal pattern: price sweeps past a recent swing high/low, a classic stop-hunt shape, then immediately reclaims it, with volume confirmation required to fire at all, not just a bonus). Both were already fully built in <code>js/futures/setups.js</code> but sitting inactive; enabling them surfaced a real, separate landmine — every setup OTHER than AI Scalp shared a stop-distance floor of 0.12%, tighter even than the value that caused AI Scalp's own fee-drag bug, just never exercised in Live/Demo trading because nothing but AI Scalp was ever active. Fixed to the same 0.35% floor before enabling anything. Deliberately NOT enabled: Range Reversal (still philosophically a fade/mean-reversion approach, and this build has a documented, measured case — Range Scalp's ~25-29% win rate — of fading systematically losing to this feed's short-run momentum) and Breakout + Retest (conceptually closer to AI Scalp's own momentum-chasing than a real change of style). Honesty note matching the rest of this footer: neither newly-enabled setup has been measured against this engine's current fixed-1:2-RR/fee model — this is a reasoned, differently-shaped addition, not a proven improvement. Multiple setups agreeing on a symbol blend confidence; disagreeing is a hard no-trade, same ensemble logic as before.<br>
       <b>On win rate —</b> we won't invent a number here. A specific win-rate range isn't something any of this can honestly promise in live markets, and this build has been burned by an overclaim before (see the deterministic-seed postmortem in <code>README-SCALP.md</code>) — it won't repeat that. What changed above is the breakeven bar itself: at the old 1.2 ratio and 0.15% stop floor, the math required roughly a 79-82% win rate just to break even against real round-trip fees — a bar this kind of momentum scalp was never going to clear, which is exactly what real trading exposed. At the new fixed 1:2 ratio and 0.35% stop floor, breakeven drops to roughly 37-45% depending on exchange fees and where the stop lands in its range — a bar a genuine, even modest, edge can plausibly clear. That's a real, computed shift in what's required to be profitable, not a claim about what win rate you'll actually get. The optional AI Signal check (API Keys tab) adds an independent second filter on top, which may or may not move the real number further — judge it against your own Live/Demo trade history, not a claim made here.<br>
       <b>Win rate vs. expectancy —</b> the dashboard reports whatever win rate and profit factor the session's trades actually produced. A high win rate with poor expectancy is not something this build is tuned toward, and it will show a losing session honestly if that's what happens against the current (synthetic, Paper-mode) price data.<br>
-      <b>Setup type now shown per trade</b> — the scanner table and trade history don't currently label which of the three active setups produced a given row beyond what's already in its reasons list; if you want to track the three separately (e.g. to see whether one is carrying the others), that's a reasonable follow-up, not something assumed done here.<br>
+      <b>Five strategies, per-strategy stats</b> — every trade is now tagged with which strategy produced it, and the Strategies block (top of this tab) shows each one's OWN real Trades/Win Rate/Net, computed live from your actual Trade Log, filtered to that strategy — never a backtest number, never marketing copy. "No trades yet" is the expected, honest state for a strategy you haven't traded with yet, not an error. Each strategy's reward:risk (1:1-1:3) is independently adjustable there too — see STRATEGY_REGISTRY in <code>js/futures/setups.js</code>.<br>
+      <b>Manual / Auto trade mode</b> — both this tab's Live/Demo Trading section and the Autotrade & Balances tab's Triangular Arbitrage now have a Trade Mode toggle. Auto is unchanged from before: a qualifying signal/cycle executes the moment it's found. Manual shows the same qualifying signal/cycle and waits for an explicit Execute click — and re-verifies against fresh market data at the moment of that click, never acting on what was true when it was first detected. Switching back to Auto while something's pending drops it, on purpose, rather than risk it firing on its own right after the switch.<br>
+      <b>On matching another product's advertised win rate</b> — asked directly, so answered directly: no, this build doesn't know how a specific third-party signals product achieves a number shown in its own marketing UI, and won't pretend to reverse-engineer one from a screenshot. Advertised win-rate/lifetime-stats displays in the retail crypto signals space are frequently unverifiable — cherry-picked windows, survivorship bias, or simply asserted — and there's no way to audit one from the outside. Every real-performance claim in THIS build comes from your own Trade Log, not a number chosen to look good; that standard doesn't bend for a competitor's number either.<br>
       <b>Live/Demo trading</b> (Bybit, Binance, Gate.io, MEXC, and Bitget — MEXC is Live only, no Demo) places real orders through <code>server/server.js</code> with a native/exchange-enforced stop-loss and take-profit on every position — see the Live/Demo Trading section above and <code>server/README.md</code> before arming it with a Live key. It scans each exchange's real, full current USDT-M perpetual list (fetched live via <code>/api/futures/universe</code> — not a hardcoded roster), minus your exclusions, ranked by 24h volume, with the top 15 most liquid/active names actually getting the full per-symbol scan each cycle. That top-15 figure (<code>LIVE_SCAN_TOP_N</code> in <code>js/futures-ui.js</code>) is a real rate-limit ceiling, not a preference: an exchange can list 300+ USDT perpetuals, each needing 4-6 separate calls to build a real signal-detection snapshot, and doing that for every listed symbol every 8 seconds would be 1,000+ calls/cycle — enough to trip every one of these exchanges' rate limits at once (see the Binance ban/weight-budget notes in <code>server.js</code> for what that looks like when it happens to just one of them). Which 15 symbols that covers shifts on its own, cycle to cycle, as real trading activity shifts.<br>
       <b>AI Signal (optional)</b> — if enabled in the API Keys tab, every APPROVED Live/Demo signal also gets a second opinion from whichever model provider you've connected there before an order is placed. It can only make the bot MORE cautious (reject a signal the engine above already approved) — it cannot approve a signal the engine rejected, size a position, or touch any risk control on this page. See the API Keys tab for the honest caveats on that feature; it is not tuned or proven to raise win rate. Its prompt was re-tuned after real use showed it rejecting trades over metrics the engine had already cleared (e.g. "modest confidence", "low liquidity") — it's now told those thresholds are the engine's job, not its own, and to approve by default unless there's a specific, concrete, disqualifying problem. It can still say no; it should just no longer manufacture reasons to.<br>
       <b>Binance's shared-IP rate limiting</b> — this app's own Binance call volume (~540 weight/min across the whole watchlist, measured) sits well under Binance's 2400/min-per-IP cap on its own, so a recurring "rate-limited/banned this server's IP" specifically on Binance (and only Binance, when the others work fine through the same host) most likely means OTHER traffic sharing this server's outbound IP is pushing the shared bucket over the edge — not this app's own usage. Two things now happen automatically: a reactive cooldown once Binance actually reports a ban (unchanged from before), and a new proactive one that reads Binance's own real-time usage figure on every response and pauses this app's own Binance calls for a few seconds if that figure is already running high, so this app isn't the request that tips a shared bucket over. Neither of those can fix the underlying cause, though — the only real fix for a shared-IP problem is getting this server off a shared IP for Binance specifically: a static/dedicated outbound IP (a paid add-on on most hosts, including Render) registered as that Binance API key's sole allowed IP. That's an account/infra change, not something this codebase can do on its own.<br>

@@ -302,7 +302,7 @@ function restore(){
         state.balances[key] = coerceBalanceSlot(saved.balances[key], EXCHANGES[key].demoSupported);
       }
     }
-    if(saved.autotrade) Object.assign(state.autotrade, saved.autotrade, { timer:null, running:false, liveExecution:false });
+    if(saved.autotrade) Object.assign(state.autotrade, saved.autotrade, { timer:null, running:false, liveExecution:false, pendingCycle:null });
     // liveExecution is NEVER restored as true from storage — see the field
     // comment in state.js. It must be re-armed explicitly every session.
     if(!EXCHANGES[state.autotrade.exchange]) state.autotrade.exchange = 'bitget';
@@ -872,6 +872,15 @@ async function tick(){
       // losing order in Live.
       showAtMessage('Autotrade stopped: Test mode and Real order execution were both on outside Demo mode, which should never happen. No order was placed.', 'error');
       stopAutotrade();
+    } else if(at.tradeMode === 'manual' && best && (forcedRealDemoTest || testMode || best.profitPct >= minProfitPct)){
+      // Manual mode: the same scan and the same qualification check as
+      // Auto below — this just stops one step short of actually
+      // executing. Shown for a deliberate click instead, re-verified
+      // against fresh prices the moment that click happens (see
+      // executeAtPendingCycle) rather than replayed from this scan.
+      at.pendingCycle = { cycle: best, dailyTarget, testMode, forcedRealDemoTest, liveExecution, detectedAtMs: Date.now() };
+      renderAtPendingCycle();
+      showAtMessage(`Manual mode: ${best.path.join(' → ')} → ${best.path[0]} qualifies at ${fmtPct(best.profitPct)} — waiting for you to click Execute Cycle.`, 'info');
     } else if(liveExecution && best && (forcedRealDemoTest || best.profitPct >= minProfitPct)){
       // forcedRealDemoTest is the one place Real execution is allowed to
       // ignore the profit floor — Demo-only, and only because you
@@ -1142,6 +1151,96 @@ function executeCycle(cycle, dailyTarget, testMode){
   }
 }
 
+function renderAtPendingCycle(){
+  const at = state.autotrade;
+  const p = at.pendingCycle;
+  if(!els.atPendingCard) return;
+  if(!p || at.tradeMode !== 'manual'){
+    els.atPendingCard.style.display = 'none';
+    return;
+  }
+  els.atPendingCard.style.display = 'block';
+  const ageSec = Math.max(0, Math.round((Date.now() - p.detectedAtMs) / 1000));
+  if(els.atPendingDetail){
+    els.atPendingDetail.innerHTML = `
+      <div><b>${p.cycle.path.join(' → ')} → ${p.cycle.path[0]}</b> — ${fmtPct(p.cycle.profitPct)} profit${p.liveExecution ? ' <span style="color:var(--red);">(REAL order execution)</span>' : ' (simulated)'}</div>
+      <div style="margin-top:4px;color:var(--dim);">Detected ${ageSec}s ago — re-scanned fresh the moment you click Execute.</div>
+    `;
+  }
+}
+
+// Re-scans from scratch (never trusts the prices from when this cycle
+// was first shown — order books move between scans) and only executes
+// if the SAME cycle, or whatever's best right now, still clears the
+// profit floor. Mirrors tick()'s own qualification logic exactly so
+// Manual mode can never execute something Auto mode wouldn't have.
+async function executeAtPendingCycle(){
+  const at = state.autotrade;
+  const pending = at.pendingCycle;
+  if(!pending) return;
+  const key = at.exchange;
+  const netLabel = at.mode === 'demo' ? ' (demo)' : '';
+  showAtMessage(`Re-scanning ${EXCHANGES[key].label}${netLabel} for the freshest prices before executing…`, 'info');
+  try{
+    const rawPairs = await EXCHANGES[key].load();
+    state.pairsCache[key] = rawPairs;
+    const minVolume = parseFloat(els.atMinVolume.value) || 0;
+    const pairs = filterTriPairs(rawPairs, minVolume);
+    const adj = buildGraph(pairs, false);
+    const feePct = parseFloat(els.atFee.value) || 0;
+    const anchor = els.atAnchor.value;
+    const { results } = findCycles(adj, anchor, feePct, key);
+    const ranked = results.filter(r => isFinite(r.profitPct)).sort((a, b) => b.profitPct - a.profitPct);
+    // Prefer the exact same cycle re-priced fresh if it's still there;
+    // fall back to whatever's best right now if it isn't.
+    const fresh = ranked.find(r => r.canonicalKey === pending.cycle.canonicalKey) || ranked[0];
+    const configuredFloor = parseFloat(els.atMinProfit.value);
+    const minProfitPct = Math.max(MIN_PROFIT_FLOOR, isFinite(configuredFloor) ? configuredFloor : MIN_PROFIT_FLOOR);
+    const stillQualifies = fresh && (pending.testMode || pending.forcedRealDemoTest || fresh.profitPct >= minProfitPct);
+    if(!stillQualifies){
+      showAtMessage(`This cycle no longer qualifies as of this moment (best right now is ${fresh ? fmtPct(fresh.profitPct) : 'none found'}, below your ${minProfitPct.toFixed(2)}% floor) — not executing. Clearing this pending opportunity; it'll reappear if it (or another) qualifies again.`, 'error');
+      at.pendingCycle = null;
+      renderAtPendingCycle();
+      renderAutotradeStatus();
+      persist();
+      return;
+    }
+    at.pendingCycle = null;
+    renderAtPendingCycle();
+    if(pending.liveExecution){
+      await executeCycleReal(fresh, pending.dailyTarget, pending.forcedRealDemoTest);
+    } else {
+      executeCycle(fresh, pending.dailyTarget, pending.testMode);
+    }
+  }catch(err){
+    showAtMessage(`Could not re-scan ${EXCHANGES[key].label}${netLabel} before executing (${err.message}) — not executing. Try again next scan.`, 'error');
+  }
+  renderAutotradeStatus();
+  persist();
+}
+
+function dismissAtPendingCycle(){
+  const at = state.autotrade;
+  at.pendingCycle = null;
+  renderAtPendingCycle();
+  showAtMessage('Pending opportunity dismissed — it\'ll reappear if it (or another) qualifies again.', 'info');
+}
+
+function setAtTradeMode(newMode){
+  const at = state.autotrade;
+  at.tradeMode = newMode;
+  if(newMode === 'auto'){
+    // Same reasoning as the Futures engine's own Auto/Manual toggle:
+    // switching back to Auto with a pending Manual opportunity sitting
+    // there would mean the very next tick silently executes something
+    // you never actually clicked Execute on. Drop it instead.
+    at.pendingCycle = null;
+  }
+  if(els.atModeAutoBtn) els.atModeAutoBtn.classList.toggle('active', newMode === 'auto');
+  if(els.atModeManualBtn) els.atModeManualBtn.classList.toggle('active', newMode === 'manual');
+  renderAtPendingCycle();
+}
+
 function startAutotrade(){
   const at = state.autotrade;
   const key = els.atExchange.value;
@@ -1190,6 +1289,8 @@ function stopAutotrade(){
   at.enabled = false;
   at.running = false;
   if(at.timer){ clearInterval(at.timer); at.timer = null; }
+  at.pendingCycle = null;
+  renderAtPendingCycle();
   disarmLiveExecution(); // require an explicit re-arm before Real order execution can run again
   els.atExchange.disabled = false;
   els.atStartBalance.disabled = false;
@@ -1224,6 +1325,11 @@ export function initAutotrade(){
     els.atLiveExecution.checked = false; // always starts unarmed — see restore()
     els.atArmRow.style.display = 'none';
     syncStartBalanceField();
+    if(els.atModeAutoBtn) els.atModeAutoBtn.addEventListener('click', () => setAtTradeMode('auto'));
+    if(els.atModeManualBtn) els.atModeManualBtn.addEventListener('click', () => setAtTradeMode('manual'));
+    if(els.atPendingExecuteBtn) els.atPendingExecuteBtn.addEventListener('click', executeAtPendingCycle);
+    if(els.atPendingDismissBtn) els.atPendingDismissBtn.addEventListener('click', dismissAtPendingCycle);
+    setAtTradeMode(state.autotrade.tradeMode || 'auto');
     renderAutotradeStatus();
     // If Autotrade was left ON from a previous session (page refresh), resume it.
     if(state.autotrade.enabled && !state.autotrade.targetReached){

@@ -17,7 +17,7 @@
 // =============================================================
 import { mockMarket, FUTURES_SYMBOLS } from './mockMarket.js';
 import { classifyRegime, REGIMES } from './regime.js';
-import { detectAllSetups } from './setups.js';
+import { detectAllSetups, STRATEGY_REGISTRY } from './setups.js';
 import { computeFactorScores, weightedScore, DEFAULT_WEIGHTS } from './scoring.js';
 import { decideExecution, estimateCosts, DEFAULT_FEE_CONFIG, DEFAULT_MIN_NET_PROFIT_PCT } from './costs.js';
 import { positionSize, checkLiquidationSafety, RISK_DEFAULTS } from './risk.js';
@@ -77,9 +77,11 @@ function buildLevels(snap, direction, setupType){
     // raised to 0.35% so fees are a materially smaller, survivable slice
     // of the risk on every trade — the noTradeEngine.js fee-to-stop-ratio
     // gate is the general-purpose backstop for this; this floor is the
-    // fix at the source. Target is set from the stop distance via the
-    // fixed 1:2 reward:risk ratio (applyRewardRiskFloor + RISK_DEFAULTS.
-    // riskRewardRatio — no longer user-configurable, see risk.js).
+    // fix at the source. Target is set from the stop distance via
+    // applyRewardRiskFloor using this strategy's own reward:risk ratio
+    // (per-strategy now, via cfg.strategyRR / STRATEGY_REGISTRY — see
+    // setups.js and this file's own scan loop below — not a single
+    // fixed global ratio).
     const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
     const atrPct5 = (atrM5 / entry) * 100;
     const distPct = clamp(atrPct5 * 1.1, 0.35, 0.9);
@@ -143,16 +145,18 @@ function buildLevels(snap, direction, setupType){
   return { entry, stopPrice, stopDistancePct, tp1, tp2, tp3, tp1Pct, tp2Pct, tp3Pct, atrPct };
 }
 
-// Guarantees every trade's actual reward:risk meets the fixed 1:2 ratio
-// (RISK_DEFAULTS.riskRewardRatio — see risk.js), regardless of which setup
-// produced it — this is what makes 1:2 a real, enforced target rather
-// than just a filter that quietly lets underpowered setups through with
-// their own much smaller built-in targets. If the setup's own structure/
-// ATR-based target already clears the ratio, it's left alone (a bigger
-// natural target is never scaled down); if not, tp1/tp2/tp3 are scaled up
-// together (preserving their relative spacing) so tp1 lands at exactly
-// stopDistancePct * riskRewardRatio — e.g. a 1% stop targets 2%, so a $10
-// loss is matched by a $20 win.
+// Guarantees every trade's actual reward:risk meets whichever ratio its
+// own strategy is configured for (per-strategy now — see STRATEGY_REGISTRY
+// in setups.js and cfg.strategyRR in this file's scan loop), regardless
+// of which setup produced it — this is what makes that ratio a real,
+// enforced target rather than just a filter that quietly lets
+// underpowered setups through with their own much smaller built-in
+// targets. If the setup's own structure/ATR-based target already clears
+// the ratio, it's left alone (a bigger natural target is never scaled
+// down); if not, tp1/tp2/tp3 are scaled up together (preserving their
+// relative spacing) so tp1 lands at exactly stopDistancePct *
+// riskRewardRatio — e.g. a 1% stop at a 1:2.5 ratio targets 2.5%, so a
+// $10 loss is matched by a $25 win.
 function applyRewardRiskFloor(levels, direction, riskRewardRatio){
   if(!(levels.stopDistancePct > 0) || !(levels.tp1Pct > 0)) return levels;
   const targetPct = levels.stopDistancePct * riskRewardRatio;
@@ -190,7 +194,7 @@ export function runScanCycle(cfg, dayState, opts){
     const snap = snapshotFor(symbol);
     if(!snap) continue; // real-data fetch for this symbol failed/unavailable this cycle — skip it, don't crash the whole scan
     const regime = classifyRegime(snap.h1, snap.m15);
-    const setups = detectAllSetups(snap, regime);
+    const setups = detectAllSetups(snap, regime, cfg.strategies);
     const ensemble = combineEnsemble(setups);
 
     if(!ensemble){
@@ -209,16 +213,20 @@ export function runScanCycle(cfg, dayState, opts){
     let confidence = weightedScore(factorScores, weights);
     confidence = Math.round((confidence + ensemble.ensembleConfidence) / 2);
 
-    // Reward:risk is now FIXED at 1:2 system-wide (RISK_DEFAULTS.
-    // riskRewardRatio — see risk.js) — no longer a user-configurable "Min
-    // risk/reward" field. This is both the floor AND the actual target
-    // construction, so a trade can never be approved with a smaller
-    // built-in target than 2x its stop. Combined with the wider AI Scalp
-    // stop floor above, this is what actually fixes the fee-drag problem:
-    // at a 0.35% stop and 0.70% target, a ~0.11% round-trip fee costs a
-    // loser 0.46% and a winner nets 0.59% — profitable even at a 50% win
-    // rate, unlike the old 1.2 ratio on a 0.15% stop.
-    const targetRiskReward = RISK_DEFAULTS.riskRewardRatio;
+    // Reward:risk is now PER-STRATEGY (cfg.strategyRR, keyed by
+    // STRATEGY_REGISTRY id — see setups.js) instead of one fixed global
+    // ratio. Still both the floor AND the actual target construction
+    // for whichever strategy produced this signal, so a trade can never
+    // be approved with a smaller built-in target than its own strategy's
+    // ratio calls for. Falls back to that strategy's own defaultRR (from
+    // the registry) if the UI hasn't set one, and to the registry's own
+    // aiScalp entry if the primary type can't be matched to a registry
+    // id at all (shouldn't happen — every detector output type has a
+    // matching registry entry — but never silently fall back to nothing).
+    const strategyEntry = STRATEGY_REGISTRY.find(s => s.type === primary.type);
+    const targetRiskReward = (cfg.strategyRR && strategyEntry && cfg.strategyRR[strategyEntry.id] != null)
+      ? cfg.strategyRR[strategyEntry.id]
+      : (strategyEntry ? strategyEntry.defaultRR : RISK_DEFAULTS.riskRewardRatio);
     const levels = applyRewardRiskFloor(buildLevels(snap, direction, primary.type), direction, targetRiskReward);
     const volExp = volumeExpansion(snap.m5, 10);
     const execution = decideExecution({ setupType: primary.type, volExpansionRatio: volExp });

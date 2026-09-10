@@ -25,6 +25,7 @@ import { mockMarket } from './futures/mockMarket.js';
 import { RISK_DEFAULTS } from './futures/risk.js';
 import { DEFAULT_WEIGHTS } from './futures/scoring.js';
 import { computeBtcShock } from './futures/indicators.js';
+import { STRATEGY_REGISTRY } from './futures/setups.js';
 import { getAiConfirmation } from './ai-signal.js';
 
 const CYCLE_MS = 4000; // one synthetic "cycle" every 4s; each cycle advances the mock clock by a few minutes
@@ -166,6 +167,7 @@ function runCycle(){
     exchange: f.exchange, weights: DEFAULT_WEIGHTS, highSelectivity: f.highSelectivity,
     minConfidence: f.minConfidence, minRiskReward: f.minRiskReward, minNetProfitPct: f.minNetProfitPct,
     riskPctPerTrade: f.riskPctPerTrade, leverage: f.leverage,
+    strategies: f.strategies, strategyRR: f.strategyRR,
   };
   const { rows } = runScanCycle(cfg, dayState);
   f.lastRows = rows;
@@ -402,6 +404,7 @@ async function runLiveCycle(){
           entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
           exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
           leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
+          setupType: tracked.setupType,
         });
         // Same trade, also written to the cross-session Trade Log (see
         // appendPersistentTrade above) — independent of the session-scoped
@@ -411,6 +414,7 @@ async function runLiveCycle(){
           entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
           exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
           leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
+          setupType: tracked.setupType,
         });
         f.liveTrades++;
         if(netUsd > 0) f.liveWins++; else f.liveLosses++;
@@ -492,6 +496,7 @@ async function runLiveCycle(){
     minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost),
     minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
     riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage,
+    strategies: f2.strategies, strategyRR: f2.strategyRR,
   };
   const dayStateShim = buildLiveDayStateShim(equity);
   const { rows } = runScanCycle(cfg, dayStateShim, {
@@ -531,6 +536,27 @@ async function runLiveCycle(){
   }
 
   const side = approved.direction === 'LONG' ? 'Buy' : 'Sell'; // server normalizes casing per exchange — see FUTURES_SIDE_CASING in server.js
+
+  if(f2.liveTradeMode === 'manual'){
+    // Manual mode: scanning and every check above still run exactly as
+    // in Auto — this just stops one step short of actually placing the
+    // order. Show it and wait for a deliberate click instead.
+    f2.livePendingSignal = { ...approved, side, exchange, mode, equityAtDetection: equity, detectedAtMs: Date.now() };
+    renderLivePendingSignal();
+    showLiveMessage(`Manual mode: ${approved.symbol} ${side} qualifies (confidence ${approved.confidence}, ${approved.setup}) — waiting for you to click Execute Trade.`);
+    return;
+  }
+
+  await placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, equity);
+}
+
+// Shared by both the Auto-mode path above and the Manual-mode Execute
+// button (executeLivePendingSignal below) — the actual order placement
+// and position tracking, identical either way once a signal is being
+// acted on. Manual mode's only difference is WHEN this gets called and
+// that it re-validates immediately beforehand — see executeLivePendingSignal.
+async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, equity){
+  const f = fu();
   const openedAtMs = Date.now();
   try{
     showLiveMessage(`Placing a real ${mode} order on ${exchange}: ${approved.symbol} ${side} @ ~${approved.entry}…`);
@@ -547,12 +573,99 @@ async function runLiveCycle(){
       exchange, mode, orderId: result.orderId, side, qty: result.filledQty, entry: result.avgPrice,
       leverage: result.leverage, stopLossPrice: result.stopLossPrice, takeProfitPrice: result.takeProfitPrice,
       riskAmountUsd: approved.sizing.riskAmountUsd, openedAtMs, balanceBeforeUsd: equity,
+      setupType: approved.setup,
     };
     showLiveMessage(`Real ${mode} position opened: ${approved.symbol} ${side} ${result.filledQty} @ ${result.avgPrice}, SL ${result.stopLossPrice} / TP ${result.takeProfitPrice} (order ${result.orderId}).`);
   }catch(err){
     showLiveMessage(`Order failed: ${err.message}`, 'error');
   }
   renderLive();
+}
+
+function renderLivePendingSignal(){
+  const f = fu();
+  const p = f.livePendingSignal;
+  if(!els.fuLivePendingCard) return;
+  if(!p || f.liveTradeMode !== 'manual'){
+    els.fuLivePendingCard.style.display = 'none';
+    return;
+  }
+  els.fuLivePendingCard.style.display = 'block';
+  const ageSec = Math.max(0, Math.round((Date.now() - p.detectedAtMs) / 1000));
+  if(els.fuLivePendingDetail){
+    els.fuLivePendingDetail.innerHTML = `
+      <div><b>${p.symbol}</b> ${p.side} on ${p.exchange} (${p.mode}) — <span style="color:var(--dim);">${p.setup}, confidence ${p.confidence}</span></div>
+      <div style="margin-top:4px;">Entry ~${p.entry} · Stop ${p.stop} · Target ${p.tp1} · Expected net ${p.expectedNetPct != null ? p.expectedNetPct.toFixed(2)+'%' : '—'}</div>
+      <div style="margin-top:4px;color:var(--dim);">Detected ${ageSec}s ago at balance $${p.equityAtDetection.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})} — re-checked fresh the moment you click Execute.</div>
+    `;
+  }
+}
+
+async function executeLivePendingSignal(){
+  const f = fu();
+  const p = f.livePendingSignal;
+  if(!p) return;
+  const cred = liveCred(p.exchange, p.mode);
+  if(!cred){
+    showLiveMessage(`No verified ${p.exchange} ${p.mode} key found anymore — can't execute.`, 'error');
+    f.livePendingSignal = null;
+    renderLivePendingSignal();
+    return;
+  }
+  showLiveMessage(`Re-checking ${p.symbol} against fresh market data before executing…`);
+  let equity;
+  try{
+    const balData = await callProxy('/api/futures/balance', { exchange: p.exchange, mode: p.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase });
+    if(!balData.ok) throw new Error(balData.message || 'Balance check failed.');
+    equity = balData.balance;
+  }catch(err){
+    showLiveMessage(`Could not re-check balance before executing: ${err.message} — not executing.`, 'error');
+    return;
+  }
+  readSettingsFromInputs();
+  const f2 = fu();
+  const cfg = {
+    exchange: p.exchange, weights: DEFAULT_WEIGHTS, highSelectivity: f2.highSelectivity,
+    minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost),
+    minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
+    riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage,
+    strategies: f2.strategies, strategyRR: f2.strategyRR,
+  };
+  let snap, btcSnap;
+  try{
+    snap = await fetchLiveSnapshot(p.exchange, p.symbol);
+    btcSnap = p.symbol === 'BTCUSDT' ? snap : await fetchLiveSnapshot(p.exchange, 'BTCUSDT');
+  }catch(err){ snap = null; }
+  if(!snap || !btcSnap){
+    showLiveMessage(`Could not fetch fresh market data for ${p.symbol} — not executing. It'll refresh again next scan cycle.`, 'error');
+    return;
+  }
+  const dayStateShim = buildLiveDayStateShim(equity);
+  const { rows } = runScanCycle(cfg, dayStateShim, {
+    symbols: [p.symbol],
+    getSnapshot: s => s === p.symbol ? snap : (s === 'BTCUSDT' ? btcSnap : null),
+    now: () => Date.now(),
+    getBtcShock: () => computeBtcShock(btcSnap.m5),
+  });
+  const reApproved = rows.find(r => r.symbol === p.symbol && r.status === 'APPROVED');
+  if(!reApproved){
+    const rejected = rows.find(r => r.symbol === p.symbol);
+    showLiveMessage(`${p.symbol} no longer qualifies as of this moment (market moved since it was detected${rejected ? ': ' + (rejected.reasons||[]).join('; ') : ''}) — not executing. Clearing this pending signal; it'll reappear if it qualifies again on a future scan.`, 'error');
+    f.livePendingSignal = null;
+    renderLivePendingSignal();
+    return;
+  }
+  const side = reApproved.direction === 'LONG' ? 'Buy' : 'Sell';
+  f.livePendingSignal = null;
+  renderLivePendingSignal();
+  await placeLiveEntryOrder(reApproved, side, p.exchange, p.mode, cred, cfg, equity);
+}
+
+function dismissLivePendingSignal(){
+  const f = fu();
+  f.livePendingSignal = null;
+  renderLivePendingSignal();
+  showLiveMessage('Pending signal dismissed — it\'ll reappear if it (or another) qualifies again on a future scan.');
 }
 
 // =============================================================
@@ -648,6 +761,103 @@ function renderTradeLog(){
   `).join('');
 }
 
+// =============================================================
+// Strategy selector — per-strategy enable/disable + reward:risk, backed
+// by STRATEGY_REGISTRY (setups.js) for what's fixed about each one and
+// by its own localStorage key for what the user's changed. Per-strategy
+// stats shown alongside each row are computed live from the persistent
+// Trade Log above (loadPersistentTradeLog, filtered by setupType) — real
+// numbers from real trades in this browser, never a backtest figure.
+// =============================================================
+const STRATEGY_CONFIG_KEY = 'nxtgen_futures_strategy_config_v1';
+
+function persistStrategyConfig(){
+  const f = fu();
+  try{ localStorage.setItem(STRATEGY_CONFIG_KEY, JSON.stringify({ strategies: f.strategies, strategyRR: f.strategyRR })); }
+  catch(e){ /* non-fatal — just won't survive a reload */ }
+}
+
+function restoreStrategyConfig(){
+  const f = fu();
+  // Seed every strategy from its own registry default first, so a
+  // strategy added to STRATEGY_REGISTRY after a user already has a saved
+  // config still gets a sane default instead of silently defaulting to
+  // "off"/undefined.
+  STRATEGY_REGISTRY.forEach(s => {
+    f.strategies[s.id] = s.defaultEnabled;
+    f.strategyRR[s.id] = s.defaultRR;
+  });
+  try{
+    const raw = localStorage.getItem(STRATEGY_CONFIG_KEY);
+    if(!raw) return;
+    const saved = JSON.parse(raw);
+    if(saved && typeof saved === 'object'){
+      if(saved.strategies) Object.assign(f.strategies, saved.strategies);
+      if(saved.strategyRR) Object.assign(f.strategyRR, saved.strategyRR);
+    }
+  }catch(e){ /* ignore corrupt/blocked storage — registry defaults already seeded above */ }
+}
+
+function computeStrategyStats(setupType){
+  const log = loadPersistentTradeLog();
+  const rows = log.filter(t => t.setupType === setupType);
+  const wins = rows.filter(t => t.netUsd > 0).length;
+  const netSum = rows.reduce((a, t) => a + (t.netUsd || 0), 0);
+  return { trades: rows.length, wins, winRatePct: rows.length ? (wins / rows.length) * 100 : null, netUsd: netSum };
+}
+
+function renderStrategyRows(){
+  if(!els.fuStrategyRows) return;
+  const f = fu();
+  els.fuStrategyRows.innerHTML = STRATEGY_REGISTRY.map(s => {
+    const stats = computeStrategyStats(s.type);
+    const statsLine = stats.trades === 0
+      ? 'No trades yet (this browser)'
+      : `${stats.trades} trade${stats.trades===1?'':'s'} · ${stats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(stats.netUsd)} net — real Live/Demo results, this browser`;
+    const enabled = f.strategies[s.id] ?? s.defaultEnabled;
+    const rr = f.strategyRR[s.id] ?? s.defaultRR;
+    return `
+      <div class="ov-block" style="margin-bottom:10px;padding:12px;border-color:${enabled ? 'var(--line)' : 'var(--line-dim, var(--line))'};opacity:${enabled ? '1' : '.6'};">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+          <div style="flex:1;min-width:220px;">
+            <label class="toggle-check" style="font-weight:600;">
+              <input type="checkbox" class="fu-strategy-enable" data-id="${s.id}" ${enabled ? 'checked' : ''}>
+              <span>${s.label}</span>
+            </label>
+            <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;">${s.description}</div>
+          </div>
+          <div style="min-width:150px;">
+            <label style="font-size:11px;color:var(--dim);display:block;margin-bottom:4px;">Reward:Risk</label>
+            <select class="fu-strategy-rr" data-id="${s.id}">
+              ${[1, 1.5, 2, 2.5, 3].map(v => `<option value="${v}" ${Math.abs(v-rr)<0.01 ? 'selected' : ''}>1:${v}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--dim);margin-top:8px;">${statsLine}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function initStrategySelector(){
+  restoreStrategyConfig();
+  renderStrategyRows();
+  if(els.fuStrategyRows){
+    els.fuStrategyRows.addEventListener('change', (e) => {
+      const f = fu();
+      if(e.target.classList.contains('fu-strategy-enable')){
+        f.strategies[e.target.dataset.id] = e.target.checked;
+        persistStrategyConfig();
+        renderStrategyRows();
+      } else if(e.target.classList.contains('fu-strategy-rr')){
+        f.strategyRR[e.target.dataset.id] = parseFloat(e.target.value);
+        persistStrategyConfig();
+        renderStrategyRows();
+      }
+    });
+  }
+}
+
 function initTradeLog(){
   const rangeBtns = ['fuLogRangeToday', 'fuLogRangeWeek', 'fuLogRangeMonth', 'fuLogRangeAll', 'fuLogRangeCustom'];
   rangeBtns.forEach(id => {
@@ -703,6 +913,7 @@ function renderLive(){
   if(Object.keys(f.livePositions).length === 0 && els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = 'None';
   renderLiveHistory();
   renderTradeLog();
+  renderStrategyRows();
 }
 
 // =============================================================
@@ -869,10 +1080,12 @@ function resetLiveSession(){
   f.liveConsecutiveLosses = 0;
   f.livePausedByCircuitBreaker = false;
   f.liveAdaptiveConfidenceBoost = 0;
+  f.livePendingSignal = null;
   if(els.fuLiveConfirmCheck) els.fuLiveConfirmCheck.checked = false;
   if(els.fuLiveArmRow) els.fuLiveArmRow.style.display = 'none';
   if(els.fuLiveArmPhrase) els.fuLiveArmPhrase.value = '';
   renderLiveExchangeRows();
+  renderLivePendingSignal();
   updateLiveModeUI();
   renderLive();
 }
@@ -906,8 +1119,29 @@ function initLiveTradingControls(){
     });
   }
   if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.addEventListener('click', toggleLiveRunning);
+  if(els.fuLiveModeAutoBtn) els.fuLiveModeAutoBtn.addEventListener('click', () => setLiveTradeMode('auto'));
+  if(els.fuLiveModeManualBtn) els.fuLiveModeManualBtn.addEventListener('click', () => setLiveTradeMode('manual'));
+  if(els.fuLivePendingExecuteBtn) els.fuLivePendingExecuteBtn.addEventListener('click', executeLivePendingSignal);
+  if(els.fuLivePendingDismissBtn) els.fuLivePendingDismissBtn.addEventListener('click', dismissLivePendingSignal);
   renderLiveExchangeRows();
+  renderLivePendingSignal();
   updateLiveModeUI();
+}
+
+function setLiveTradeMode(newMode){
+  const f = fu();
+  f.liveTradeMode = newMode;
+  if(newMode === 'auto'){
+    // Switching back to Auto with a pending Manual signal sitting there
+    // would mean the very next cycle silently fires an order the user
+    // hasn't actually clicked Execute on — drop it instead, consistent
+    // with everything else in this app never acting on your behalf
+    // without a fresh, explicit decision.
+    f.livePendingSignal = null;
+  }
+  if(els.fuLiveModeAutoBtn) els.fuLiveModeAutoBtn.classList.toggle('active', newMode === 'auto');
+  if(els.fuLiveModeManualBtn) els.fuLiveModeManualBtn.classList.toggle('active', newMode === 'manual');
+  renderLivePendingSignal();
 }
 
 function toggleRunning(){
@@ -954,6 +1188,7 @@ export function initFuturesEngine(){
   if(els.fuModeBtn) els.fuModeBtn.addEventListener('click', toggleRunning);
   if(els.fuResetSessionBtn) els.fuResetSessionBtn.addEventListener('click', resetSession);
   initRiskPctInputs();
+  initStrategySelector();
   initLiveTradingControls();
   initTradeLog();
   renderLive();

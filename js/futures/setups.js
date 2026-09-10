@@ -209,56 +209,86 @@ export function detectRangeScalp(snap, regime){
   return { type: 'Range Scalp', direction: dir, rawConfidence: Math.round(conf), reasons, meta: { devInAtr, atrPct } };
 }
 
-export function detectAllSetups(snap, regime){
-  // Was a single-strategy build (AI Scalp only) for most of this file's
-  // history — see the other three inactive detectors above for why
-  // (Range Reversal and Breakout + Retest remain inactive; see below).
-  // Two more enabled here, specifically chosen to be genuinely DIFFERENT
-  // in kind from AI Scalp rather than more of the same momentum-chasing
-  // logic with different numbers:
-  //   - Trend Continuation: enters on a pullback INTO an established
-  //     trend (price pulling back toward EMA20/VWAP, volume contracting,
-  //     then momentum resuming), not on fresh momentum the way AI Scalp
-  //     does. "Buy the dip in an uptrend" style entries are a
-  //     conventionally different risk/reward shape from breakout-style
-  //     continuation — worth having as a genuinely separate detector
-  //     rather than a variation on AI Scalp.
-  //   - Liquidity Sweep Reversal: a REVERSAL pattern, not a continuation
-  //     one at all — price sweeps past a recent swing high/low (a classic
-  //     stop-hunt shape) and immediately reclaims it, with volume
-  //     confirmation required to fire at all (a hard gate, not just a
-  //     confidence bonus, unlike AI Scalp's RSI/volume checks).
+// =============================================================
+// STRATEGY REGISTRY — one entry per detector above, the single source
+// of truth for the UI's strategy selector (js/futures-ui.js) and for
+// which reward:risk ratio each strategy actually gets built at
+// (engine.js reads defaultRR from here per-strategy, replacing the old
+// single global fixed 2.0). Enable/disable state and any user-adjusted
+// RR live in state.js/localStorage per strategy id, keyed to match
+// `id` below — this registry only holds what's fixed about each one.
+//
+// defaultRR reasoning, each within the requested 1:1-1:3 band: fade/
+// reversion-style setups (Range Reversal) get a tighter ratio since the
+// move back to a mean is naturally limited; trend-following setups
+// (Trend Continuation, Breakout + Retest) get a wider one since a real
+// trend can run further than a single ATR-scaled stop; the two faster,
+// more scalp-like setups (AI Scalp, Liquidity Sweep Reversal) sit at
+// the middle. These are starting points, not measured optima — see the
+// honesty note on detectAllSetups below.
+export const STRATEGY_REGISTRY = [
+  {
+    id: 'aiScalp', type: 'AI Scalp', detector: 'detectAiScalp', defaultRR: 2.0, defaultEnabled: true,
+    label: 'AI Scalp',
+    description: 'Trades WITH short-term momentum — EMA9 sloping in the trade direction, price confirming on the momentum side, a push candle behind it. Fast, frequent, the original strategy in this build.',
+  },
+  {
+    id: 'trendContinuation', type: 'Trend Continuation', detector: 'detectTrendContinuation', defaultRR: 2.5, defaultEnabled: true,
+    label: 'Trend Continuation',
+    description: 'Enters on a pullback INTO an established trend (price retracing toward EMA20/VWAP on contracting volume, then momentum resuming) rather than fresh momentum — a genuinely different entry mechanism from AI Scalp.',
+  },
+  {
+    id: 'liquiditySweep', type: 'Liquidity Sweep Reversal', detector: 'detectLiquiditySweep', defaultRR: 2.0, defaultEnabled: true,
+    label: 'Liquidity Sweep Reversal',
+    description: 'A real reversal pattern, not continuation: price sweeps past a recent swing high/low (a stop-hunt shape) and immediately reclaims it. Requires volume confirmation to fire at all — a hard gate, not a bonus.',
+  },
+  {
+    id: 'rangeReversal', type: 'Range Reversal', detector: 'detectRangeReversal', defaultRR: 1.5, defaultEnabled: false,
+    label: 'Range Reversal',
+    description: 'Fades validated swing-level support/resistance with a rejection candle, only in a confirmed Range regime. Off by default: this codebase has a measured case (Range Scalp, see README-SCALP.md) of a fade-style approach losing to this feed\'s real short-run momentum — this is more strictly gated than that one was, but unproven under the current engine either way.',
+  },
+  {
+    id: 'breakoutRetest', type: 'Breakout + Retest', detector: 'detectBreakoutRetest', defaultRR: 2.5, defaultEnabled: false,
+    label: 'Breakout + Retest',
+    description: 'Consolidation, then a breakout, then a retest of that level with volume confirmation. Off by default: conceptually close to AI Scalp\'s own momentum-chasing character, so it adds less diversification than the two enabled by default.',
+  },
+];
+
+export function detectAllSetups(snap, regime, strategyConfig){
+  // strategyConfig: { [id]: boolean } — which strategies from
+  // STRATEGY_REGISTRY above are enabled. Defaults to each strategy's own
+  // defaultEnabled when no config is passed (e.g. Paper mode calling this
+  // without having read any UI state) or when a specific id is missing
+  // from the config object.
+  const enabled = id => {
+    const entry = STRATEGY_REGISTRY.find(s => s.id === id);
+    if(!strategyConfig || !(id in strategyConfig)) return entry ? entry.defaultEnabled : false;
+    return !!strategyConfig[id];
+  };
+  const DETECTORS = {
+    aiScalp: detectAiScalp,
+    trendContinuation: detectTrendContinuation,
+    liquiditySweep: detectLiquiditySweep,
+    rangeReversal: detectRangeReversal,
+    breakoutRetest: detectBreakoutRetest,
+  };
   // combineEnsemble (engine.js) already handles multiple setups firing on
   // the same symbol/cycle — agreement blends confidence, disagreement is
   // a hard no-trade, so enabling more detectors can only add another way
   // to get rejected on conflict, never silently stack risk.
   //
-  // Deliberately NOT enabled: Range Reversal — despite being gated more
-  // strictly than the disproven old Range Scalp (validated swing-level
-  // support/resistance + a rejection candle, not just ATR-distance from
-  // an EMA), it's still philosophically a mean-reversion/fade approach,
-  // and this synthetic feed has documented, measured short-run
-  // persistence that fading systematically fought (see detectAiScalp's
-  // own comment on Range Scalp's ~25-29% measured win rate). Re-enabling
-  // a fade-style setup without evidence it doesn't repeat that isn't a
-  // risk worth taking here. Breakout + Retest is also held back for now:
-  // conceptually closer to AI Scalp's own momentum-chasing character
-  // than a real diversification of style, so it adds less than the two
-  // enabled above for the same "is this actually different" bar.
-  //
-  // Honesty note matching this file's own standard: neither newly-enabled
-  // detector has been measured against this engine's current fixed-1:2-
-  // RR, current fee model, or current stop-distance floors — the win-rate
-  // figures quoted elsewhere in this file are specifically about AI
-  // Scalp vs. the old Range Scalp, under the old (pre-fee-drag-fix) engine,
-  // and do NOT transfer to these two. This is a reasoned, differently-
-  // shaped addition, not a proven improvement — judge it against real
-  // Live/Demo trade history same as everything else in this build.
-  return [
-    detectAiScalp(snap, regime),
-    detectTrendContinuation(snap, regime),
-    detectLiquiditySweep(snap, regime),
-  ].filter(Boolean);
+  // Honesty note, same standard as the rest of this file: none of these
+  // five have been measured against this engine's current fixed-per-
+  // strategy RR, current fee model, or current stop-distance floors as a
+  // GROUP — enabling several at once is a reasoned, differently-shaped
+  // setup of strategies, not a proven improvement. Each strategy's own
+  // real Live/Demo results (Trade Log, tagged by setup type) are the
+  // only honest measure of how it's actually doing — not a backtest
+  // number quoted here or anywhere in this UI.
+  return STRATEGY_REGISTRY
+    .filter(s => enabled(s.id))
+    .map(s => DETECTORS[s.id](snap, regime))
+    .filter(Boolean);
 }
 
 // ---- SETUP F: AI Scalp (fast, genuine 1:1 momentum continuation) ----

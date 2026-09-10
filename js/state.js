@@ -108,6 +108,12 @@ export const els = {
   atInterval: document.getElementById('atInterval'),
   atStartBalance: document.getElementById('atStartBalance'),
   atToggleBtn: document.getElementById('atToggleBtn'),
+  atModeAutoBtn: document.getElementById('atModeAutoBtn'),
+  atModeManualBtn: document.getElementById('atModeManualBtn'),
+  atPendingCard: document.getElementById('atPendingCard'),
+  atPendingDetail: document.getElementById('atPendingDetail'),
+  atPendingExecuteBtn: document.getElementById('atPendingExecuteBtn'),
+  atPendingDismissBtn: document.getElementById('atPendingDismissBtn'),
   atMessages: document.getElementById('atMessages'),
   atStatDay: document.getElementById('atStatDay'),
   atStatBalance: document.getElementById('atStatBalance'),
@@ -126,6 +132,7 @@ export const els = {
   fuExchange: document.getElementById('fuExchange'),
   fuStartingBalance: document.getElementById('fuStartingBalance'),
   fuResetSessionBtn: document.getElementById('fuResetSessionBtn'),
+  fuStrategyRows: document.getElementById('fuStrategyRows'),
   fuLiveExchRows: document.getElementById('fuLiveExchRows'),
   fuLiveStatusLabel: document.getElementById('fuLiveStatusLabel'),
   fuLiveArmWrap: document.getElementById('fuLiveArmWrap'),
@@ -164,6 +171,12 @@ export const els = {
   fuMinNetProfit: document.getElementById('fuMinNetProfit'),
   fuRiskPct: document.getElementById('fuRiskPct'),
   fuLiveRiskPct: document.getElementById('fuLiveRiskPct'),
+  fuLiveModeAutoBtn: document.getElementById('fuLiveModeAutoBtn'),
+  fuLiveModeManualBtn: document.getElementById('fuLiveModeManualBtn'),
+  fuLivePendingCard: document.getElementById('fuLivePendingCard'),
+  fuLivePendingDetail: document.getElementById('fuLivePendingDetail'),
+  fuLivePendingExecuteBtn: document.getElementById('fuLivePendingExecuteBtn'),
+  fuLivePendingDismissBtn: document.getElementById('fuLivePendingDismissBtn'),
   fuLeverage: document.getElementById('fuLeverage'),
   fuRegime: document.getElementById('fuRegime'),
   fuBalance: document.getElementById('fuBalance'),
@@ -282,6 +295,8 @@ export const state = {
                              // persisted as "on" across a refresh, on purpose.
     lastCanonicalKey: null,  // canonicalKey of the cycle executed on the previous tick — used to
     lastCanonicalStreak: 0,  // detect "stuck on the same pair" and break the streak (see tick()).
+    tradeMode: 'auto',       // 'auto' | 'manual' — see tick() in autotrade.js
+    pendingCycle: null,      // the latest qualifying cycle awaiting a manual Execute click, Manual mode only
   },
 
   // ---- AI Futures Engine (PAPER MODE only — see js/futures/*.js) ----
@@ -296,7 +311,13 @@ export const state = {
     highSelectivity: false,
     exchange: 'binance',
     minConfidence: 70, // 60 was the floor of AI Scalp's 60-87 confidence range — filtered nothing; see setups.js. 70 requires at least one real confirmation (RSI alignment, or strong momentum + volume together).
-    minRiskReward: 2.0, // fixed system-wide — see js/futures/risk.js RISK_DEFAULTS.riskRewardRatio
+    minRiskReward: 2.0, // legacy fallback only now — see js/futures/setups.js STRATEGY_REGISTRY for the real, per-strategy ratios
+    // Per-strategy enable/disable and reward:risk override — populated
+    // from STRATEGY_REGISTRY's defaults by initStrategySelector() in
+    // futures-ui.js on first load, then persisted to localStorage from
+    // there. Empty objects here just mean "use each strategy's own
+    // registry default" until that init runs.
+    strategies: {}, strategyRR: {},
     minNetProfitPct: 0.30,
     riskPctPerTrade: 1.0,
     leverage: 5,
@@ -326,6 +347,8 @@ export const state = {
     // account's recent results has no business carrying over to a
     // different one.
     liveConsecutiveLosses: 0, livePausedByCircuitBreaker: false, liveAdaptiveConfidenceBoost: 0, liveAdaptiveConfidenceBoostAtMs: 0,
+    liveTradeMode: 'auto', // 'auto' | 'manual' — see js/futures-ui.js runLiveCycle
+    livePendingSignal: null, // the latest APPROVED row awaiting a manual Execute click, Manual mode only
   },
 
   // ---- AI Signal Provider (optional, experimental) — a second opinion
