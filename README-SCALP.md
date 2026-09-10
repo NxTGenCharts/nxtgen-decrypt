@@ -740,3 +740,67 @@ one) doesn't re-attempt it on intuition alone and silently reintroduce
 a measured regression. Nothing here overrides that finding without new
 evidence it no longer applies.
 
+## Update: two more strategies enabled, on request for "a different one" specifically
+
+Explicit ask: improve the win rate without touching the AI Signal
+feature, "maybe a different strategy perhaps that offers that." Fair —
+the AI Signal check is an external, optional filter; a genuinely
+different DETECTOR is a different kind of change.
+
+`setups.js` already had four other fully-built detectors sitting
+inactive since the single-strategy build (see the "Single-strategy
+build" comment this replaces): Trend Continuation, Breakout + Retest,
+Range Reversal, and Liquidity Sweep Reversal. Two enabled, two left
+alone, on purpose:
+
+**Enabled — Trend Continuation.** Enters on a pullback INTO an
+established trend (price retracing toward EMA20/VWAP on contracting
+volume, then momentum resuming), not on fresh momentum the way AI Scalp
+does. Different entry mechanism, different risk shape.
+
+**Enabled — Liquidity Sweep Reversal.** A real reversal pattern, not a
+continuation one: price sweeps past a recent swing high/low (a classic
+stop-hunt shape) and immediately reclaims it, with volume confirmation
+required to fire at all — a hard gate, not a confidence bonus like AI
+Scalp's RSI/volume checks. `decideExecution` (costs.js) already had a
+specific TAKER-execution case for this exact setup type, sitting
+unused — a sign this one was built with reactivation already in mind.
+
+**Left inactive — Range Reversal.** More strictly gated than the old,
+disproven Range Scalp (validated swing-level support/resistance plus a
+rejection candle, not just ATR-distance from an EMA) — but still
+philosophically a fade/mean-reversion approach, and this synthetic feed
+has a documented, MEASURED case of that style losing to its own
+short-run momentum (Range Scalp's ~25-29% win rate — see the
+"deterministic seed bug" section and detectAiScalp's own comment).
+Re-enabling a fade-flavored setup without evidence it doesn't repeat
+that isn't a risk worth taking on the strength of "it's gated better
+this time" alone.
+
+**Left inactive — Breakout + Retest.** Conceptually closer to AI
+Scalp's own momentum-chasing character than a genuine change of style —
+adds less diversification than the two enabled above for the same "is
+this actually different" bar.
+
+**A real bug this surfaced before either went live**: every setup
+OTHER than AI Scalp shared one `buildLevels` fallback branch in
+`engine.js` with a stop-distance floor of **0.12%** — tighter even than
+the 0.15% value that caused AI Scalp's own fee-drag disaster (see
+above). It was never exercised in real trading because nothing but AI
+Scalp was ever active, so it never had the chance to blow up the way AI
+Scalp's did — but it was the identical landmine, waiting. Raised to
+0.35%, matching AI Scalp's own fixed floor, before enabling anything
+that would actually reach that code path.
+
+**Honesty note, same standard as everywhere else in this file**:
+neither newly-enabled detector has been measured against this engine's
+CURRENT fixed-1:2-RR, current fee model, or current stop-distance
+floors. The win-rate figures quoted elsewhere in this file (Range
+Scalp's ~25-29%, AI Scalp's murkier post-seed-bug numbers) are specific
+to the old engine and do not transfer to these two. This is a reasoned,
+differently-shaped addition — genuinely different entry logic, hard
+volume gates, a real fixed landmine caught before it mattered — not a
+proven improvement. It goes in the same bucket as everything else in
+this build: judge it against real Live/Demo trade history, not a claim
+made here.
+

@@ -120,7 +120,15 @@ function buildLevels(snap, direction, setupType){
   // Stop uses the tighter of (structure invalidation, a volatility-scaled
   // cap) so a single distant swing point can't blow the stop out — but
   // never tighter than 1x ATR, so it isn't sitting inside normal noise.
-  const stopDistancePct = clamp(Math.max(atrPct * 1.0, Math.min(structuralStopPct, atrPct * 2.0)), 0.12, 1.2);
+  // Floor raised from 0.12% to 0.35% for the same reason as AI Scalp's
+  // own floor above (see its comment): a 0.12% stop against real
+  // round-trip futures fees of ~0.10-0.12% (costs.js) means fees alone
+  // could eat 80-100%+ of the risk on every trade, independent of signal
+  // quality — this was never actually exercised while every non-AI-Scalp
+  // setup sat inactive (see detectAllSetups in setups.js), so it never
+  // got caught in Live/Demo trading the way AI Scalp's did, but it was
+  // the same landmine waiting for whichever setup got enabled next.
+  const stopDistancePct = clamp(Math.max(atrPct * 1.0, Math.min(structuralStopPct, atrPct * 2.0)), 0.35, 1.2);
   const stopPrice = direction === 'LONG' ? entry * (1 - stopDistancePct / 100) : entry * (1 + stopDistancePct / 100);
 
   const tp1Pct = clamp(Math.max(0.4, atrPct * 1.5), 0.25, 1.5);

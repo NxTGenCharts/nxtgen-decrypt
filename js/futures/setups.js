@@ -210,13 +210,54 @@ export function detectRangeScalp(snap, regime){
 }
 
 export function detectAllSetups(snap, regime){
-  // Single-strategy build: only AI Scalp trades. The other five
-  // detectors above (including the original Range Scalp) are kept and
-  // still exported for a future build, but the engine only ensembles
-  // within one active strategy at a time — see README-SCALP.md for why
-  // switching strategies mid-session breaks readability.
+  // Was a single-strategy build (AI Scalp only) for most of this file's
+  // history — see the other three inactive detectors above for why
+  // (Range Reversal and Breakout + Retest remain inactive; see below).
+  // Two more enabled here, specifically chosen to be genuinely DIFFERENT
+  // in kind from AI Scalp rather than more of the same momentum-chasing
+  // logic with different numbers:
+  //   - Trend Continuation: enters on a pullback INTO an established
+  //     trend (price pulling back toward EMA20/VWAP, volume contracting,
+  //     then momentum resuming), not on fresh momentum the way AI Scalp
+  //     does. "Buy the dip in an uptrend" style entries are a
+  //     conventionally different risk/reward shape from breakout-style
+  //     continuation — worth having as a genuinely separate detector
+  //     rather than a variation on AI Scalp.
+  //   - Liquidity Sweep Reversal: a REVERSAL pattern, not a continuation
+  //     one at all — price sweeps past a recent swing high/low (a classic
+  //     stop-hunt shape) and immediately reclaims it, with volume
+  //     confirmation required to fire at all (a hard gate, not just a
+  //     confidence bonus, unlike AI Scalp's RSI/volume checks).
+  // combineEnsemble (engine.js) already handles multiple setups firing on
+  // the same symbol/cycle — agreement blends confidence, disagreement is
+  // a hard no-trade, so enabling more detectors can only add another way
+  // to get rejected on conflict, never silently stack risk.
+  //
+  // Deliberately NOT enabled: Range Reversal — despite being gated more
+  // strictly than the disproven old Range Scalp (validated swing-level
+  // support/resistance + a rejection candle, not just ATR-distance from
+  // an EMA), it's still philosophically a mean-reversion/fade approach,
+  // and this synthetic feed has documented, measured short-run
+  // persistence that fading systematically fought (see detectAiScalp's
+  // own comment on Range Scalp's ~25-29% measured win rate). Re-enabling
+  // a fade-style setup without evidence it doesn't repeat that isn't a
+  // risk worth taking here. Breakout + Retest is also held back for now:
+  // conceptually closer to AI Scalp's own momentum-chasing character
+  // than a real diversification of style, so it adds less than the two
+  // enabled above for the same "is this actually different" bar.
+  //
+  // Honesty note matching this file's own standard: neither newly-enabled
+  // detector has been measured against this engine's current fixed-1:2-
+  // RR, current fee model, or current stop-distance floors — the win-rate
+  // figures quoted elsewhere in this file are specifically about AI
+  // Scalp vs. the old Range Scalp, under the old (pre-fee-drag-fix) engine,
+  // and do NOT transfer to these two. This is a reasoned, differently-
+  // shaped addition, not a proven improvement — judge it against real
+  // Live/Demo trade history same as everything else in this build.
   return [
     detectAiScalp(snap, regime),
+    detectTrendContinuation(snap, regime),
+    detectLiquiditySweep(snap, regime),
   ].filter(Boolean);
 }
 
