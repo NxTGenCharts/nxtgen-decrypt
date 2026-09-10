@@ -621,7 +621,15 @@
           <div class="ov-card"><span class="ov-label">Fees</span><span class="ov-value" id="fuLogFees">-$0.00</span></div>
           <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value" id="fuLogNet">$0.00</span></div>
         </div>
-        <div class="fu-hrow fu-head" style="grid-template-columns:1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr;">
+        <div class="btn-row" style="margin-bottom:10px;gap:8px;flex-wrap:wrap;align-items:center;">
+          <button type="button" class="primary ghost" id="fuLogDeleteBtn" title="Delete the checked rows from the Trade Log (permanent, this browser only)">Delete Selected</button>
+          <button type="button" class="primary ghost" id="fuLogExportCsvBtn" title="Export the checked rows, or every row in the current date range if none are checked">Export CSV</button>
+          <button type="button" class="primary ghost" id="fuLogExportXlsBtn" title="Export the checked rows, or every row in the current date range if none are checked">Export XLS</button>
+          <button type="button" class="primary ghost" id="fuLogExportPdfBtn" title="Export the checked rows, or every row in the current date range if none are checked">Export PDF</button>
+          <span id="fuLogSelectedCount" style="font-size:11px;color:var(--dim);"></span>
+        </div>
+        <div class="fu-hrow fu-head" style="grid-template-columns:28px 1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr;">
+          <div><input type="checkbox" id="fuLogSelectAll" title="Select all rows in the current range"></div>
           <div>Date/Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div>
         </div>
         <div id="fuLogRows"><div class="fu-empty">No trades recorded in this browser yet.</div></div>

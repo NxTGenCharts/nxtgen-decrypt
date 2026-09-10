@@ -396,7 +396,26 @@ function buildLiveDayStateShim(equity){
   };
 }
 
+// Guards against overlapping runs: each cycle makes several awaited network
+// calls (position checks, balance, universe, per-symbol snapshots) and can
+// legitimately take longer than LIVE_CYCLE_MS under load or a slow
+// connection. Without this, setInterval would fire a second call on top of
+// a still-running one — two concurrent balance fetches racing to set the
+// same UI field, or worse, two concurrent scans both seeing "no open
+// position" and both trying to place an entry. A skipped tick here just
+// means the very next one (8s later) picks up wherever things actually are.
+let liveCycleInFlight = false;
 async function runLiveCycle(){
+  if(liveCycleInFlight) return;
+  liveCycleInFlight = true;
+  try{
+    await runLiveCycleInner();
+  } finally {
+    liveCycleInFlight = false;
+  }
+}
+
+async function runLiveCycleInner(){
   const f = fu();
   const exchange = f.liveExchange;
   if(!f.liveArmed) return;
@@ -509,8 +528,39 @@ async function runLiveCycle(){
   }
   renderLive();
 
+  const mode = f.liveModeByExchange[exchange] || 'live';
+  const exchangeUsable = LIVE_TRADEABLE_EXCHANGES.includes(exchange) && !(mode === 'demo' && LIVE_ONLY_EXCHANGES.includes(exchange));
+
+  // Real Balance (USDT) is now re-read from the exchange EVERY cycle,
+  // regardless of whether a position is currently open — previously this
+  // fetch only ran further down, inside the "no open position, scan for a
+  // new one" branch, so the card froze at whatever it last showed for the
+  // entire lifetime of an open position: taking TP1/TP2 partials (which
+  // realize PnL into walletBalance immediately on the exchange) or moving
+  // the stop to breakeven never touched it, only closing the position
+  // fully (and re-entering that branch) did. A stale connected-key or
+  // unsupported-mode situation is reported once here rather than
+  // repeated below.
+  let equity = null;
+  if(exchangeUsable){
+    const cred = liveCred(exchange, mode);
+    if(cred){
+      try{
+        const balData = await callProxy('/api/futures/balance', { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase });
+        if(balData.ok) equity = balData.balance;
+        else showLiveMessage(`Could not read the real ${exchange} futures balance: ${balData.message || 'unknown error'}`, 'error');
+      }catch(err){
+        showLiveMessage(`Could not read the real ${exchange} futures balance: ${err.message}`, 'error');
+      }
+    }
+  }
+  if(equity != null && els.fuLiveBalance){
+    els.fuLiveBalance.textContent = '$' + equity.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
+  }
+
   // 2) One real position at a time, deliberately — see README-SCALP.md.
-  // If something's already open, don't scan for a new one this cycle.
+  // If something's already open, don't scan for a new one this cycle
+  // (the balance refresh above already happened either way).
   if(Object.keys(f.livePositions).length > 0) return;
   if(els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = 'None';
 
@@ -518,7 +568,6 @@ async function runLiveCycle(){
     showLiveMessage(`"${exchange}" isn't a supported Live/Demo exchange.`, 'error');
     return;
   }
-  const mode = f.liveModeByExchange[exchange] || 'live';
   if(mode === 'demo' && LIVE_ONLY_EXCHANGES.includes(exchange)){
     showLiveMessage(`${exchange} has no Demo Trading available through its API — only Live.`, 'error');
     return;
@@ -528,17 +577,12 @@ async function runLiveCycle(){
     showLiveMessage(`No verified ${exchange} ${mode} key found — connect and verify one in Autotrade & Balances first.`, 'error');
     return;
   }
-
-  let equity;
-  try{
-    const balData = await callProxy('/api/futures/balance', { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase });
-    if(!balData.ok) throw new Error(balData.message || 'Balance check failed.');
-    equity = balData.balance;
-  }catch(err){
-    showLiveMessage(`Could not read the real ${exchange} futures balance: ${err.message}`, 'error');
+  if(equity == null){
+    // Balance fetch above already failed and already showed why — don't
+    // scan for (let alone place) a new entry this cycle without a
+    // confirmed real balance to size it against.
     return;
   }
-  if(els.fuLiveBalance) els.fuLiveBalance.textContent = '$' + equity.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
 
   // Fetch the real, full symbol universe for this exchange (ranked,
   // exclusion-filtered, cached — see getLiveTradeableSymbols above),
@@ -793,18 +837,33 @@ function dismissLivePendingSignal(){
 const PERSISTENT_TRADE_LOG_KEY = 'nxtgen_futures_trade_log_v1';
 const PERSISTENT_TRADE_LOG_MAX = 5000;
 
+function newTradeLogId(record){
+  return `${record.closedAtMs || Date.now()}_${record.symbol || ''}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
 function loadPersistentTradeLog(){
   try{
     const raw = localStorage.getItem(PERSISTENT_TRADE_LOG_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
+    if(!Array.isArray(parsed)) return [];
+    // Migration: rows written before per-row select/delete/export existed
+    // (or any that slipped through without one) won't have a stable `id`
+    // — the checkboxes below need one that survives across re-renders and
+    // range-filter changes, unlike an array index. Assigned once here and
+    // written straight back so it doesn't reshuffle on every read.
+    let migrated = false;
+    parsed.forEach(t => { if(!t.id){ t.id = newTradeLogId(t); migrated = true; } });
+    if(migrated){
+      try{ localStorage.setItem(PERSISTENT_TRADE_LOG_KEY, JSON.stringify(parsed)); }catch(e){ /* non-fatal, just re-migrates next read */ }
+    }
+    return parsed;
   }catch(e){ return []; } // corrupt/blocked storage — treat as empty rather than throw
 }
 
 function appendPersistentTrade(record){
   try{
     const log = loadPersistentTradeLog();
-    log.unshift(record);
+    log.unshift({ id: newTradeLogId(record), ...record });
     if(log.length > PERSISTENT_TRADE_LOG_MAX) log.length = PERSISTENT_TRADE_LOG_MAX;
     localStorage.setItem(PERSISTENT_TRADE_LOG_KEY, JSON.stringify(log));
   }catch(e){ /* storage full/unavailable — the session-scoped history above still has it */ }
@@ -850,6 +909,12 @@ function appendPaperTrades(records){
 // recomputed on demand, not persisted itself (only the underlying trades are).
 let tradeLogRange = { preset: 'today' };
 
+// Trade Log row selection (for Delete/Export) — a Set of trade `id`s,
+// UI-only and intentionally not persisted. Cleared on every range change
+// so a checked row from "Today" can't silently still be checked after
+// switching to "All Time".
+let selectedTradeLogIds = new Set();
+
 function computeTradeLogRange(preset, customFromStr, customToStr){
   const now = Date.now();
   if(preset === 'today'){
@@ -867,11 +932,42 @@ function computeTradeLogRange(preset, customFromStr, customToStr){
   return { preset: 'today', fromMs: 0, toMs: now };
 }
 
+// Kept as one definition so the CSV/XLS/PDF exporters and any future
+// column changes all stay in sync with each other automatically.
+function tradeLogColumns(){
+  return [
+    { label: 'Date/Time', get: t => new Date(t.closedAtMs).toLocaleString() },
+    { label: 'Exchange', get: t => `${t.exchange || ''}${t.mode ? ` (${t.mode})` : ''}` },
+    { label: 'Symbol', get: t => t.symbol || '' },
+    { label: 'Dir', get: t => t.side || '' },
+    { label: 'Entry', get: t => t.entry != null ? Number(t.entry) : '' },
+    { label: 'Exit', get: t => t.exit != null ? Number(t.exit) : '' },
+    { label: 'Leverage', get: t => t.leverage != null ? `${t.leverage}x` : '' },
+    { label: 'Qty', get: t => t.qty != null ? t.qty : '' },
+    { label: 'Gross', get: t => t.grossUsd != null ? Number(t.grossUsd) : '' },
+    { label: 'Fees', get: t => t.feesUsd != null ? Number(t.feesUsd) : '' },
+    { label: 'Net', get: t => t.netUsd != null ? Number(t.netUsd) : '' },
+    { label: 'Duration (min)', get: t => t.durationMin != null ? t.durationMin : '' },
+    { label: 'Strategy', get: t => t.setupType || '' },
+    { label: 'Order ID', get: t => t.orderId || '' },
+  ];
+}
+
+function currentTradeLogRows(){
+  const { fromMs, toMs } = tradeLogRange;
+  const all = loadPersistentTradeLog();
+  return all.filter(t => t.closedAtMs >= fromMs && t.closedAtMs <= toMs);
+}
+
 function renderTradeLog(){
   if(!els.fuLogRows) return;
-  const { fromMs, toMs, preset } = tradeLogRange;
-  const all = loadPersistentTradeLog();
-  const rows = all.filter(t => t.closedAtMs >= fromMs && t.closedAtMs <= toMs);
+  const { preset } = tradeLogRange;
+  const rows = currentTradeLogRows();
+  const rowIds = new Set(rows.map(t => t.id));
+  // Drop any selected id that's fallen out of the current range/filter so
+  // "Delete Selected"/"Export" never silently act on a row the user can no
+  // longer see.
+  for(const id of Array.from(selectedTradeLogIds)) if(!rowIds.has(id)) selectedTradeLogIds.delete(id);
 
   ['fuLogRangeToday', 'fuLogRangeWeek', 'fuLogRangeMonth', 'fuLogRangeAll', 'fuLogRangeCustom'].forEach(id => {
     if(els[id]) els[id].classList.toggle('active', els[id].dataset.range === preset);
@@ -889,12 +985,24 @@ function renderTradeLog(){
   if(els.fuLogFees) els.fuLogFees.textContent = (feesKnown.length < count ? '~' : '') + fmtUsd(feesSum);
   if(els.fuLogNet) els.fuLogNet.textContent = fmtUsd(netSum);
 
+  if(els.fuLogSelectedCount){
+    els.fuLogSelectedCount.textContent = selectedTradeLogIds.size > 0
+      ? `${selectedTradeLogIds.size} selected`
+      : (count ? `Nothing checked — Delete/Export will act on all ${count} row(s) in this range.` : '');
+  }
+  if(els.fuLogSelectAll){
+    els.fuLogSelectAll.checked = count > 0 && selectedTradeLogIds.size === count;
+    els.fuLogSelectAll.indeterminate = selectedTradeLogIds.size > 0 && selectedTradeLogIds.size < count;
+    els.fuLogSelectAll.disabled = count === 0;
+  }
+
   if(!rows.length){
     els.fuLogRows.innerHTML = '<div class="fu-empty">No trades recorded in this browser for this range.</div>';
     return;
   }
   els.fuLogRows.innerHTML = rows.slice(0, 500).map(t => `
-    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr;">
+    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:28px 1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr;">
+      <div><input type="checkbox" class="fu-log-select" data-id="${t.id}" ${selectedTradeLogIds.has(t.id) ? 'checked' : ''}></div>
       <div>${new Date(t.closedAtMs).toLocaleString()}</div>
       <div>${t.exchange || '—'}${t.mode ? ` (${t.mode})` : ''}</div>
       <div>${t.symbol}</div>
@@ -909,6 +1017,121 @@ function renderTradeLog(){
       <div>${t.durationMin != null ? t.durationMin + 'm' : '—'}</div>
     </div>
   `).join('');
+}
+
+// Exports/deletes act on whatever's checked; if nothing is checked, they
+// act on every row currently visible under the active range filter — never
+// on the full unfiltered log behind the user's back.
+function tradeLogTargetRows(){
+  const rows = currentTradeLogRows();
+  if(selectedTradeLogIds.size > 0) return rows.filter(t => selectedTradeLogIds.has(t.id));
+  return rows;
+}
+
+function csvEscape(val){
+  const s = String(val ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function downloadBlob(filename, content, mime){
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportTradeLogCsv(){
+  const rows = tradeLogTargetRows();
+  if(!rows.length){ showLiveMessage('No trades to export — nothing checked and nothing in the current range.', 'error'); return; }
+  const cols = tradeLogColumns();
+  const lines = [cols.map(c => csvEscape(c.label)).join(',')];
+  rows.forEach(t => lines.push(cols.map(c => csvEscape(c.get(t))).join(',')));
+  downloadBlob(`nxtgen-trade-log-${Date.now()}.csv`, lines.join('\r\n'), 'text/csv;charset=utf-8;');
+  showLiveMessage(`Exported ${rows.length} trade(s) to CSV.`);
+}
+
+function exportTradeLogXls(){
+  // Real .xlsx generation needs a spreadsheet library this static app
+  // doesn't otherwise carry — this instead uses the well-established
+  // HTML-table-as-.xls trick: Excel (and Google Sheets/LibreOffice) opens
+  // an HTML table saved with an .xls extension as a genuine spreadsheet,
+  // no dependency or network fetch required.
+  const rows = tradeLogTargetRows();
+  if(!rows.length){ showLiveMessage('No trades to export — nothing checked and nothing in the current range.', 'error'); return; }
+  const cols = tradeLogColumns();
+  const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const head = `<tr>${cols.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr>`;
+  const body = rows.map(t => `<tr>${cols.map(c => `<td>${esc(c.get(t))}</td>`).join('')}</tr>`).join('');
+  const html = `<html><head><meta charset="UTF-8"></head><body><table border="1">${head}${body}</table></body></html>`;
+  downloadBlob(`nxtgen-trade-log-${Date.now()}.xls`, html, 'application/vnd.ms-excel');
+  showLiveMessage(`Exported ${rows.length} trade(s) to XLS.`);
+}
+
+// jsPDF + autoTable are lazy-loaded from cdnjs only when a PDF export is
+// actually requested — keeps the base app dependency-free and working
+// fully offline for everything else, at the cost of needing a real
+// internet connection the first time this specific button is used.
+async function ensureJsPdf(){
+  if(window.jspdf && window.jspdf.jsPDF) return window.jspdf;
+  const loadScript = src => new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`could not load ${src}`));
+    document.head.appendChild(s);
+  });
+  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js');
+  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.4/jspdf.plugin.autotable.min.js');
+  if(!window.jspdf || !window.jspdf.jsPDF) throw new Error('PDF library failed to initialize');
+  return window.jspdf;
+}
+
+async function exportTradeLogPdf(){
+  const rows = tradeLogTargetRows();
+  if(!rows.length){ showLiveMessage('No trades to export — nothing checked and nothing in the current range.', 'error'); return; }
+  showLiveMessage('Building PDF…');
+  try{
+    const { jsPDF } = await ensureJsPdf();
+    const cols = tradeLogColumns();
+    const doc = new jsPDF({ orientation: 'landscape' });
+    doc.setFontSize(12);
+    doc.text('NxTGen Trade Log', 14, 14);
+    doc.setFontSize(8);
+    doc.text(new Date().toLocaleString(), 14, 20);
+    doc.autoTable({
+      startY: 24,
+      head: [cols.map(c => c.label)],
+      body: rows.map(t => cols.map(c => String(c.get(t)))),
+      styles: { fontSize: 7 },
+      headStyles: { fillColor: [20, 20, 30] },
+    });
+    doc.save(`nxtgen-trade-log-${Date.now()}.pdf`);
+    showLiveMessage(`Exported ${rows.length} trade(s) to PDF.`);
+  }catch(err){
+    showLiveMessage(`PDF export failed: ${err.message} — this needs an internet connection the first time it's used, to load the PDF library.`, 'error');
+  }
+}
+
+function deleteSelectedTradeLogRows(){
+  const targets = tradeLogTargetRows();
+  if(!targets.length){ showLiveMessage('No trades to delete — nothing checked and nothing in the current range.', 'error'); return; }
+  const label = selectedTradeLogIds.size > 0 ? `${targets.length} checked trade(s)` : `all ${targets.length} trade(s) in this range`;
+  if(!confirm(`Delete ${label} from the Trade Log? This can't be undone.`)) return;
+  const targetIds = new Set(targets.map(t => t.id));
+  const remaining = loadPersistentTradeLog().filter(t => !targetIds.has(t.id));
+  try{
+    localStorage.setItem(PERSISTENT_TRADE_LOG_KEY, JSON.stringify(remaining));
+  }catch(e){
+    showLiveMessage(`Delete failed: ${e.message}`, 'error');
+    return;
+  }
+  selectedTradeLogIds.clear();
+  renderTradeLog();
+  showLiveMessage(`Deleted ${label} from the Trade Log.`);
 }
 
 // =============================================================
@@ -1094,13 +1317,36 @@ function initTradeLog(){
       tradeLogRange = preset === 'custom'
         ? computeTradeLogRange('custom', els.fuLogCustomFrom?.value, els.fuLogCustomTo?.value)
         : computeTradeLogRange(preset);
+      selectedTradeLogIds.clear(); // a checked row from one range shouldn't silently carry into another
       renderTradeLog();
     });
   });
   if(els.fuLogCustomApply) els.fuLogCustomApply.addEventListener('click', () => {
     tradeLogRange = computeTradeLogRange('custom', els.fuLogCustomFrom?.value, els.fuLogCustomTo?.value);
+    selectedTradeLogIds.clear();
     renderTradeLog();
   });
+
+  // Row checkboxes are re-created on every render, so this is delegated
+  // on the (static) container rather than bound per-checkbox.
+  if(els.fuLogRows) els.fuLogRows.addEventListener('change', (e) => {
+    const cb = e.target.closest('.fu-log-select');
+    if(!cb) return;
+    const id = cb.dataset.id;
+    if(cb.checked) selectedTradeLogIds.add(id); else selectedTradeLogIds.delete(id);
+    renderTradeLog();
+  });
+  if(els.fuLogSelectAll) els.fuLogSelectAll.addEventListener('change', () => {
+    const rows = currentTradeLogRows();
+    if(els.fuLogSelectAll.checked) rows.forEach(t => selectedTradeLogIds.add(t.id));
+    else selectedTradeLogIds.clear();
+    renderTradeLog();
+  });
+  if(els.fuLogDeleteBtn) els.fuLogDeleteBtn.addEventListener('click', deleteSelectedTradeLogRows);
+  if(els.fuLogExportCsvBtn) els.fuLogExportCsvBtn.addEventListener('click', exportTradeLogCsv);
+  if(els.fuLogExportXlsBtn) els.fuLogExportXlsBtn.addEventListener('click', exportTradeLogXls);
+  if(els.fuLogExportPdfBtn) els.fuLogExportPdfBtn.addEventListener('click', exportTradeLogPdf);
+
   tradeLogRange = computeTradeLogRange('today');
   renderTradeLog();
 }
@@ -1348,6 +1594,16 @@ function initLiveTradingControls(){
     });
   }
   if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.addEventListener('click', toggleLiveRunning);
+  // Browsers throttle setInterval heavily in a backgrounded tab (often to
+  // ~once/minute) — so a position closing (or a TP2 breakeven move) while
+  // this tab is out of focus can sit un-reflected in the Real Balance card
+  // and Trade Log for a while, looking exactly like "doesn't update until
+  // I refresh" even though the underlying polling loop is still running.
+  // Firing one cycle immediately the moment the tab becomes visible again
+  // closes that gap without waiting for the throttled timer to catch up.
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState === 'visible' && fu().liveRunning) runLiveCycle();
+  });
   if(els.fuLiveModeAutoBtn) els.fuLiveModeAutoBtn.addEventListener('click', () => setLiveTradeMode('auto'));
   if(els.fuLiveModeManualBtn) els.fuLiveModeManualBtn.addEventListener('click', () => setLiveTradeMode('manual'));
   if(els.fuLivePendingExecuteBtn) els.fuLivePendingExecuteBtn.addEventListener('click', executeLivePendingSignal);
