@@ -462,13 +462,13 @@
 
     <div id="fuMessages"></div>
 
-    <div class="ov-block" style="margin-bottom:18px;">
-      <div class="ov-block-title">Strategies</div>
+    <details class="ov-block fu-strategies" id="fuStrategiesDetails" style="margin-bottom:18px;">
+      <summary class="ov-block-title">Strategies <span class="fu-strategies-badge" id="fuStrategiesBadge"></span></summary>
       <div style="font-size:12px;color:var(--dim);margin:10px 0;line-height:1.5;">
         Which setup detectors are allowed to fire, and what reward:risk ratio each one builds its trades at (1:1 to 1:3). Shared by Paper and Live/Demo alike — multiple strategies can be on at once; if more than one fires on the same symbol in the same cycle, they either agree (confidence blends) or disagree (hard no-trade), same as before. <b>The win rate/trades shown per strategy are real numbers pulled from your own Trade Log below, filtered to that strategy — not a backtest, not a claim, not marketing.</b> They'll read "no trades yet" until you've actually traded with that strategy turned on; that's expected, not an error.
       </div>
       <div id="fuStrategyRows"></div>
-    </div>
+    </details>
 
     <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);">
       <div class="ov-card ov-highlight"><span class="ov-label">Current Balance</span><span class="ov-value" id="fuBalance">$10,000.00</span></div>

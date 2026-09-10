@@ -133,6 +133,8 @@ export const els = {
   fuStartingBalance: document.getElementById('fuStartingBalance'),
   fuResetSessionBtn: document.getElementById('fuResetSessionBtn'),
   fuStrategyRows: document.getElementById('fuStrategyRows'),
+  fuStrategiesDetails: document.getElementById('fuStrategiesDetails'),
+  fuStrategiesBadge: document.getElementById('fuStrategiesBadge'),
   fuLiveExchRows: document.getElementById('fuLiveExchRows'),
   fuLiveStatusLabel: document.getElementById('fuLiveStatusLabel'),
   fuLiveArmWrap: document.getElementById('fuLiveArmWrap'),

@@ -906,12 +906,14 @@ function computeStrategyStats(setupType){
 function renderStrategyRows(){
   if(!els.fuStrategyRows) return;
   const f = fu();
+  let enabledCount = 0;
   els.fuStrategyRows.innerHTML = STRATEGY_REGISTRY.map(s => {
     const stats = computeStrategyStats(s.type);
     const statsLine = stats.trades === 0
       ? 'No trades yet (this browser)'
       : `${stats.trades} trade${stats.trades===1?'':'s'} · ${stats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(stats.netUsd)} net — real Live/Demo results, this browser`;
     const enabled = f.strategies[s.id] ?? s.defaultEnabled;
+    if(enabled) enabledCount++;
     const rr = f.strategyRR[s.id] ?? s.defaultRR;
     return `
       <div class="ov-block" style="margin-bottom:10px;padding:12px;border-color:${enabled ? 'var(--line)' : 'var(--line-dim, var(--line))'};opacity:${enabled ? '1' : '.6'};">
@@ -934,11 +936,29 @@ function renderStrategyRows(){
       </div>
     `;
   }).join('');
+  // Shown next to "Strategies" in the collapsed <summary> row (see
+  // index.html/css/components.css) so collapsing the section to save
+  // space doesn't hide which/how many strategies are actually live.
+  if(els.fuStrategiesBadge) els.fuStrategiesBadge.textContent = `${enabledCount}/${STRATEGY_REGISTRY.length} enabled`;
+}
+
+const STRATEGIES_OPEN_KEY = 'nxtgen_futures_strategies_open_v1';
+
+function initStrategiesCollapse(){
+  const details = els.fuStrategiesDetails;
+  if(!details) return;
+  // Collapsed by default (the whole point of this section — see its own
+  // request) unless the user has explicitly left it open before.
+  try{ details.open = localStorage.getItem(STRATEGIES_OPEN_KEY) === '1'; }catch(e){ /* ignore — stays collapsed */ }
+  details.addEventListener('toggle', () => {
+    try{ localStorage.setItem(STRATEGIES_OPEN_KEY, details.open ? '1' : '0'); }catch(e){ /* non-fatal */ }
+  });
 }
 
 function initStrategySelector(){
   restoreStrategyConfig();
   renderStrategyRows();
+  initStrategiesCollapse();
   if(els.fuStrategyRows){
     els.fuStrategyRows.addEventListener('change', (e) => {
       const f = fu();
