@@ -418,7 +418,16 @@ async function runLiveCycle(){
 async function runLiveCycleInner(){
   const f = fu();
   const exchange = f.liveExchange;
-  if(!f.liveArmed) return;
+  const hadOpenPositions = Object.keys(f.livePositions).length > 0;
+  // Monitoring an already-open real position — closure detection, balance
+  // refresh, the TP2 breakeven stop-move — never requires being armed;
+  // arming only gates placing a NEW entry, further below. This matters
+  // specifically for a position restored after a page reload (see
+  // restoreLivePositions()): it's already real and already open on the
+  // exchange, and has to keep being watched whether or not "arm" has been
+  // redone yet — the alternative is a real, live position silently going
+  // unmonitored just because the page was reloaded to pick up a fix.
+  if(!f.liveArmed && !hadOpenPositions) return;
   decayAdaptiveConfidenceBoost(); // see its own comment — lets a stricter bar from a losing stretch ease back on its own, not only on a win
 
   // 1) Check whatever we're already tracking as open, for closure — using
@@ -563,6 +572,17 @@ async function runLiveCycleInner(){
   // (the balance refresh above already happened either way).
   if(Object.keys(f.livePositions).length > 0) return;
   if(els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = 'None';
+
+  if(!f.liveArmed){
+    // Reached with nothing left open and not armed — this is a
+    // restored-position monitoring cycle whose position just closed (or
+    // the position closed and armed was never re-confirmed). Nothing
+    // left to watch and no authorization to scan/place a new entry, so
+    // stop polling here instead of running forever in the background —
+    // toggleLiveRunning() also resets the Start/Stop button label.
+    if(f.liveRunning) toggleLiveRunning();
+    return;
+  }
 
   if(!LIVE_TRADEABLE_EXCHANGES.includes(exchange)){
     showLiveMessage(`"${exchange}" isn't a supported Live/Demo exchange.`, 'error');
@@ -1374,8 +1394,39 @@ function renderLiveHistory(){
   `).join('');
 }
 
+// Persisted so an open real position survives a page reload — see
+// LIVE_POSITIONS_KEY's own comment on renderLive() for why.
+const LIVE_POSITIONS_KEY = 'nxtgen_futures_live_positions_v1';
+
+function saveLivePositions(){
+  try{ localStorage.setItem(LIVE_POSITIONS_KEY, JSON.stringify(fu().livePositions || {})); }
+  catch(e){ /* storage full/unavailable — worst case a reload loses tracking, same as before this fix */ }
+}
+
+function loadSavedLivePositions(){
+  try{
+    const raw = localStorage.getItem(LIVE_POSITIONS_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  }catch(e){ return {}; }
+}
+
+function clearSavedLivePositions(){
+  try{ localStorage.removeItem(LIVE_POSITIONS_KEY); }catch(e){ /* non-fatal */ }
+}
+
 function renderLive(){
   const f = fu();
+  // f.livePositions itself was previously in-memory only, so a page
+  // reload — including one done deliberately to pick up a site fix —
+  // silently forgot about a real position still running on the exchange:
+  // the Open Position/Real Balance cards would show "None"/stale, and
+  // (worse) the close-detection loop above would have nothing telling it
+  // that position exists, so it would never get logged when it eventually
+  // closes. renderLive() runs after every open/close/cycle, so persisting
+  // here keeps this in sync everywhere without scattering save calls
+  // through runLiveCycleInner and placeLiveEntryOrder individually.
+  saveLivePositions();
   if(els.fuLiveStartingBalance) els.fuLiveStartingBalance.textContent = f.liveStartingEquity != null
     ? '$' + f.liveStartingEquity.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })
     : '—';
@@ -1667,6 +1718,23 @@ function initRiskPctInputs(){
   if(els.fuLiveRiskPct) els.fuLiveRiskPct.addEventListener('input', () => syncRiskPctInputs(els.fuLiveRiskPct.value));
 }
 
+// Resumes MONITORING (never new-order placement — f.liveArmed still
+// resets to false on every load, unchanged) for any real position that
+// was still open when the page last reloaded. See renderLive()'s
+// saveLivePositions comment for why this exists: without it, reloading
+// the page to pick up a site fix (or just an accidental refresh) silently
+// stranded a real, live position — the app forgot it existed, so it never
+// got monitored for TP2/breakeven or logged when it eventually closed.
+function restoreLivePositions(){
+  const saved = loadSavedLivePositions();
+  const symbols = Object.keys(saved);
+  if(!symbols.length) return;
+  const f = fu();
+  f.livePositions = saved;
+  showLiveMessage(`Restored tracking for ${symbols.length} real position(s) still open from before this reload (${symbols.join(', ')}) — monitoring resumed. No new orders will be placed until you re-arm.`, 'info');
+  if(!f.liveRunning) toggleLiveRunning(); // starts the same polling loop Start/Demo Trading uses — runLiveCycleInner already treats "has an open position" as enough reason to poll, even while liveArmed is false
+}
+
 export function initFuturesEngine(){
   ensureDayState();
   if(els.fuStartingBalance) els.fuStartingBalance.value = String(fu().dayState.startingEquity);
@@ -1676,6 +1744,7 @@ export function initFuturesEngine(){
   initStrategySelector();
   initLiveTradingControls();
   initTradeLog();
+  restoreLivePositions();
   renderLive();
   render();
 }
