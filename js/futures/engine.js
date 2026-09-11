@@ -51,7 +51,7 @@ export const TRADEABLE_FUTURES_SYMBOLS = FUTURES_SYMBOLS.filter(s => !EXCLUDED_F
 // If setups disagree on direction, NO TRADE. If they agree, combine
 // via a simple confidence-weighted average and take the strongest
 // setup's reasons as the primary explanation.
-function combineEnsemble(signals){
+export function combineEnsemble(signals){
   if(signals.length === 0) return null;
   const longs = signals.filter(s => s.direction === 'LONG');
   const shorts = signals.filter(s => s.direction === 'SHORT');
@@ -172,156 +172,165 @@ export function runScanCycle(cfg, dayState, opts){
 
   for(const symbol of symbols){
     const snap = snapshotFor(symbol);
-    if(!snap) continue; // real-data fetch for this symbol failed/unavailable this cycle — skip it, don't crash the whole scan
+    if(!snap){ continue; } // real-data fetch for this symbol failed/unavailable this cycle — skip it, don't crash the whole scan
     const regime = classifyRegime(snap.h1, snap.m15);
-    const setups = detectAllSetups(snap, regime, cfg.strategies);
-    const ensemble = combineEnsemble(setups);
-
-    if(!ensemble){
-      rows.push(baseRow(symbol, snap, regime, 'REJECTED', ['No qualifying setup detected this cycle']));
-      continue;
-    }
-    if(ensemble.conflict){
-      rows.push(baseRow(symbol, snap, regime, 'REJECTED', ['Setups disagree on direction — ensemble requires agreement']));
-      continue;
-    }
-
-    const direction = ensemble.direction;
-    const primary = ensemble.primary;
-    const factorScores = computeFactorScores(snap, regime, primary);
-    const weights = cfg.weights || DEFAULT_WEIGHTS;
-    let confidence = weightedScore(factorScores, weights);
-    confidence = Math.round((confidence + ensemble.ensembleConfidence) / 2);
-
-    // Stop distance only, at this point (see buildLevels' own comment) —
-    // strategyEntry/STRATEGY_REGISTRY is still consulted for the setup's
-    // enabled/disabled state elsewhere (detectAllSetups) and its display
-    // metadata, but no longer scales the take-profit target: TP1/TP2/TP3
-    // are now ALWAYS built at the fixed 1.0R/1.5R/2.25R structure below,
-    // the same for every strategy, per an explicit request that
-    // superseded the old per-strategy reward:risk target.
-    const levelsStopOnly = buildLevels(snap, direction, primary.type);
-    const volExp = volumeExpansion(snap.m5, 10);
-    const execution = decideExecution({ setupType: primary.type, volExpansionRatio: volExp });
-    const holdMinutes = primary.type === 'AI Scalp' ? 12 : primary.type === 'Range Scalp' ? 20 : 90; // scalp strategies are meant to resolve fast; used for funding-cost estimation
-
-    // Fees/spread/slippage have to be known BEFORE the TP levels are
-    // built (not after, like the old single-target flow) — TP1 has to
-    // be checked against them (requirement #3), not just informed by
-    // them after the fact.
-    const feeLookup = (cfg.feeConfig || DEFAULT_FEE_CONFIG)[cfg.exchange || 'binance'] || DEFAULT_FEE_CONFIG.binance;
-    const entryFeePct = execution === 'MAKER' ? feeLookup.makerPct : feeLookup.takerPct;
-    const exitFeePct = feeLookup.takerPct; // exits (SL/TP) conservatively assumed taker unless stated otherwise
-    const slippagePct = clamp(snap.meta.spreadPct * 0.6, 0.005, 0.05);
-    const levels = attachTpLevels(levelsStopOnly, direction, {
-      entryFeePct, exitFeePct, spreadPct: snap.meta.spreadPct, slippagePct,
-    });
-
-    const costs = estimateCosts({
-      exchange: cfg.exchange || 'binance',
-      execution,
-      grossTargetPct: levels.tp1Pct,
-      spreadPct: snap.meta.spreadPct,
-      slippagePct,
-      fundingRatePct: snap.meta.fundingRatePct,
-      holdMinutes,
-      feeConfig: cfg.feeConfig || DEFAULT_FEE_CONFIG,
-    });
-
-    // Weighted across all 3 legs (0.3 x TP1's R + 0.3 x TP2's R + 0.4 x
-    // TP3's R) rather than just TP1's — this is what actually reflects
-    // the whole trade's reward:risk now that it exits in three pieces,
-    // not one. With the fixed structure this is 1.65R before any fee
-    // bump to TP1 (never lower, since a bump only pushes TP1 further
-    // out) — see the fixed minRR floor below rather than a per-strategy
-    // target, since a fixed structure can't chase a per-strategy ratio.
-    const riskRewardRatio = levels.stopDistancePct > 0
-      ? (levels.tp1Pct * levels.tpFractions.tp1 + levels.tp2Pct * levels.tpFractions.tp2 + levels.tp3Pct * levels.tpFractions.tp3) / levels.stopDistancePct
-      : 0;
-    const leverage = cfg.leverage || RISK_DEFAULTS.defaultLeverage;
-    const liqSafety = checkLiquidationSafety({ entryPrice: levels.entry, stopPrice: levels.stopPrice, side: direction, leverage });
-    const isAltcoin = symbol !== 'BTCUSDT';
-
-    const minConfidence = cfg.highSelectivity ? 82 : (cfg.minConfidence ?? 60);
-    // Fixed, strategy-independent sanity floor now that TP1/TP2/TP3 are
-    // always built at the same 1.0R/1.5R/2.25R structure (weighted
-    // ~1.65R) rather than scaled per-strategy — comfortably below that
-    // fixed weighted ratio so this is a genuine backstop (catches a
-    // real bug in the TP math, e.g. a degenerate stop distance) rather
-    // than a target the construction above is chasing. NOTE: the old
-    // per-strategy Reward:Risk setting in the UI (cfg.strategyRR /
-    // STRATEGY_REGISTRY.defaultRR) no longer drives TP placement or this
-    // gate — it's superseded by the fixed structure requested. That
-    // control is left in place but is currently a no-op; worth removing
-    // from the UI in a follow-up if it shouldn't linger there looking
-    // live.
-    const minRR = 1.2;
-    // This floor is unrelated to R:R — it's still true that both scalp
-    // strategies' gross targets are comparatively small in absolute %
-    // terms, so the default 0.30% net-profit floor (sized for the
-    // bigger trend/breakout targets) would reject nearly every scalp
-    // signal even when it clears round-trip costs. Each still has to
-    // clear costs, just not by as much. Raised from 0.03% to 0.15% for
-    // AI Scalp after real Live/Demo trading showed 0.03% left almost no
-    // margin above real round-trip fees (~0.10-0.12%) once spread and
-    // slippage were added on top — trades were clearing the floor on
-    // paper while being fee-negative in practice.
-    const minNetProfit = primary.type === 'AI Scalp' ? (cfg.aiScalpMinNetProfitPct ?? 0.15)
-      : primary.type === 'Range Scalp' ? (cfg.scalpMinNetProfitPct ?? 0.04)
-      : (cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT);
-
-    const riskPctPerTrade = clamp(cfg.riskPctPerTrade || RISK_DEFAULTS.riskPctPerTrade, 0.1, RISK_DEFAULTS.maxRiskPctPerTrade);
-
-    // How much of the stop distance itself is round-trip fees — the
-    // direct measure of "is this stop too tight to survive real costs"
-    // that a net-profit floor on the WIN side alone can't catch (see
-    // noTradeEngine.js's cap on this).
-    const feeToStopRatioPct = levels.stopDistancePct > 0
-      ? ((costs.entryFeePct + costs.exitFeePct) / levels.stopDistancePct) * 100
-      : null;
-
-    const gate = evaluateNoTradeFilters({
-      snap, regime, confidence, minConfidence,
-      netTargetPct: costs.netTargetPct, minNetProfitPct: minNetProfit,
-      riskRewardRatio, minRiskReward: minRR,
-      liquidationSafety: liqSafety, dayState, btcShock, isAltcoin,
-      fundingCostPct: costs.fundingCostPct, grossTargetPct: levels.tp1Pct,
-      nowMs: nowFn(), riskPctPerTrade, feeToStopRatioPct,
-    });
-
-    const sizing = positionSize({
-      equity: dayState.equity, riskPct: riskPctPerTrade,
-      entryPrice: levels.entry, stopPrice: levels.stopPrice, leverage,
-    });
-
-    const row = {
-      symbol, exchange: (cfg.exchange === 'gateio' ? 'GATE.IO' : (cfg.exchange || 'binance').toUpperCase()), direction,
-      setup: primary.type, confidence,
-      entry: levels.entry, stop: levels.stopPrice, tp1: levels.tp1, tp2: levels.tp2, tp3: levels.tp3,
-      // Fractions to close at each level (always 30/30/40 — see
-      // costs.js TP_LEVELS) plus the fee-adjusted breakeven price the
-      // remaining 40% moves its stop to once TP2 fully fills (never at
-      // TP1 — see requirements #4-#7), so both Paper's managePositions
-      // and the real Live/Demo order placer read the exact same numbers.
-      tpFractions: levels.tpFractions,
-      breakevenStopPrice: feeAdjustedBreakevenPrice({ entry: levels.entry, direction, entryFeePct, exitFeePct, spreadPct: snap.meta.spreadPct, slippagePct }),
-      expectedGrossPct: levels.tp1Pct, estFeesPct: costs.entryFeePct + costs.exitFeePct,
-      estSlippagePct: costs.slippageCostPct, estFundingPct: costs.fundingCostPct,
-      expectedNetPct: costs.netTargetPct, riskReward: riskRewardRatio,
-      liquidityScore: snap.meta.liquidityScore, regime: regime.regime,
-      status: gate.allowed ? 'APPROVED' : 'REJECTED', rejectReasons: gate.reasons,
-      execution, sizing, leverage, liqPrice: liqSafety.liqPrice,
-      reasons: primary.reasons, costsBreakdown: costs,
-    };
-    row.explanation = buildExplanation({
-      symbol, direction, confidence, setup: primary.type, regime: regime.regime,
-      reasons: primary.reasons, netTargetPct: costs.netTargetPct, totalCostPct: costs.totalCostPct,
-      riskRewardRatio, status: row.status, rejectReasons: gate.reasons,
-    });
-    rows.push(row);
+    rows.push(evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, nowFn()));
   }
 
   return { rows, btcShock };
+}
+
+// The per-symbol detection -> scoring -> cost -> risk -> gate pipeline,
+// pulled out of runScanCycle's loop body so backtest.js can run the
+// EXACT same logic bar-by-bar against real historical candles — not a
+// re-implementation that could quietly drift from what Paper/Live mode
+// actually do. Takes an already-built snapshot/regime (so the caller
+// controls the data source and "now" entirely) and returns one scanner
+// row, APPROVED or REJECTED, same shape either way.
+export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, nowMs){
+  const setups = detectAllSetups(snap, regime, cfg.strategies);
+  const ensemble = combineEnsemble(setups);
+
+  if(!ensemble){
+    return baseRow(symbol, snap, regime, 'REJECTED', ['No qualifying setup detected this cycle']);
+  }
+  if(ensemble.conflict){
+    return baseRow(symbol, snap, regime, 'REJECTED', ['Setups disagree on direction — ensemble requires agreement']);
+  }
+
+  const direction = ensemble.direction;
+  const primary = ensemble.primary;
+  const factorScores = computeFactorScores(snap, regime, primary);
+  const weights = cfg.weights || DEFAULT_WEIGHTS;
+  let confidence = weightedScore(factorScores, weights);
+  confidence = Math.round((confidence + ensemble.ensembleConfidence) / 2);
+
+  // Stop distance only, at this point (see buildLevels' own comment) —
+  // strategyEntry/STRATEGY_REGISTRY is still consulted for the setup's
+  // enabled/disabled state elsewhere (detectAllSetups) and its display
+  // metadata, but no longer scales the take-profit target: TP1/TP2/TP3
+  // are now ALWAYS built at the fixed 1.0R/1.5R/2.25R structure below,
+  // the same for every strategy, per an explicit request that
+  // superseded the old per-strategy reward:risk target.
+  const levelsStopOnly = buildLevels(snap, direction, primary.type);
+  const volExp = volumeExpansion(snap.m5, 10);
+  const execution = decideExecution({ setupType: primary.type, volExpansionRatio: volExp });
+  const holdMinutes = primary.type === 'AI Scalp' ? 12 : primary.type === 'Range Scalp' ? 20 : 90; // scalp strategies are meant to resolve fast; used for funding-cost estimation
+
+  // Fees/spread/slippage have to be known BEFORE the TP levels are
+  // built (not after, like the old single-target flow) — TP1 has to
+  // be checked against them (requirement #3), not just informed by
+  // them after the fact.
+  const feeLookup = (cfg.feeConfig || DEFAULT_FEE_CONFIG)[cfg.exchange || 'binance'] || DEFAULT_FEE_CONFIG.binance;
+  const entryFeePct = execution === 'MAKER' ? feeLookup.makerPct : feeLookup.takerPct;
+  const exitFeePct = feeLookup.takerPct; // exits (SL/TP) conservatively assumed taker unless stated otherwise
+  const slippagePct = clamp(snap.meta.spreadPct * 0.6, 0.005, 0.05);
+  const levels = attachTpLevels(levelsStopOnly, direction, {
+    entryFeePct, exitFeePct, spreadPct: snap.meta.spreadPct, slippagePct,
+  });
+
+  const costs = estimateCosts({
+    exchange: cfg.exchange || 'binance',
+    execution,
+    grossTargetPct: levels.tp1Pct,
+    spreadPct: snap.meta.spreadPct,
+    slippagePct,
+    fundingRatePct: snap.meta.fundingRatePct,
+    holdMinutes,
+    feeConfig: cfg.feeConfig || DEFAULT_FEE_CONFIG,
+  });
+
+  // Weighted across all 3 legs (0.3 x TP1's R + 0.3 x TP2's R + 0.4 x
+  // TP3's R) rather than just TP1's — this is what actually reflects
+  // the whole trade's reward:risk now that it exits in three pieces,
+  // not one. With the fixed structure this is 1.65R before any fee
+  // bump to TP1 (never lower, since a bump only pushes TP1 further
+  // out) — see the fixed minRR floor below rather than a per-strategy
+  // target, since a fixed structure can't chase a per-strategy ratio.
+  const riskRewardRatio = levels.stopDistancePct > 0
+    ? (levels.tp1Pct * levels.tpFractions.tp1 + levels.tp2Pct * levels.tpFractions.tp2 + levels.tp3Pct * levels.tpFractions.tp3) / levels.stopDistancePct
+    : 0;
+  const leverage = cfg.leverage || RISK_DEFAULTS.defaultLeverage;
+  const liqSafety = checkLiquidationSafety({ entryPrice: levels.entry, stopPrice: levels.stopPrice, side: direction, leverage });
+  const isAltcoin = symbol !== 'BTCUSDT';
+
+  const minConfidence = cfg.highSelectivity ? 82 : (cfg.minConfidence ?? 60);
+  // Fixed, strategy-independent sanity floor now that TP1/TP2/TP3 are
+  // always built at the same 1.0R/1.5R/2.25R structure (weighted
+  // ~1.65R) rather than scaled per-strategy — comfortably below that
+  // fixed weighted ratio so this is a genuine backstop (catches a
+  // real bug in the TP math, e.g. a degenerate stop distance) rather
+  // than a target the construction above is chasing. NOTE: the old
+  // per-strategy Reward:Risk setting in the UI (cfg.strategyRR /
+  // STRATEGY_REGISTRY.defaultRR) no longer drives TP placement or this
+  // gate — it's superseded by the fixed structure requested. That
+  // control is left in place but is currently a no-op; worth removing
+  // from the UI in a follow-up if it shouldn't linger there looking
+  // live.
+  const minRR = 1.2;
+  // This floor is unrelated to R:R — it's still true that both scalp
+  // strategies' gross targets are comparatively small in absolute %
+  // terms, so the default 0.30% net-profit floor (sized for the
+  // bigger trend/breakout targets) would reject nearly every scalp
+  // signal even when it clears round-trip costs. Each still has to
+  // clear costs, just not by as much. Raised from 0.03% to 0.15% for
+  // AI Scalp after real Live/Demo trading showed 0.03% left almost no
+  // margin above real round-trip fees (~0.10-0.12%) once spread and
+  // slippage were added on top — trades were clearing the floor on
+  // paper while being fee-negative in practice.
+  const minNetProfit = primary.type === 'AI Scalp' ? (cfg.aiScalpMinNetProfitPct ?? 0.15)
+    : primary.type === 'Range Scalp' ? (cfg.scalpMinNetProfitPct ?? 0.04)
+    : (cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT);
+
+  const riskPctPerTrade = clamp(cfg.riskPctPerTrade || RISK_DEFAULTS.riskPctPerTrade, 0.1, RISK_DEFAULTS.maxRiskPctPerTrade);
+
+  // How much of the stop distance itself is round-trip fees — the
+  // direct measure of "is this stop too tight to survive real costs"
+  // that a net-profit floor on the WIN side alone can't catch (see
+  // noTradeEngine.js's cap on this).
+  const feeToStopRatioPct = levels.stopDistancePct > 0
+    ? ((costs.entryFeePct + costs.exitFeePct) / levels.stopDistancePct) * 100
+    : null;
+
+  const gate = evaluateNoTradeFilters({
+    snap, regime, confidence, minConfidence,
+    netTargetPct: costs.netTargetPct, minNetProfitPct: minNetProfit,
+    riskRewardRatio, minRiskReward: minRR,
+    liquidationSafety: liqSafety, dayState, btcShock, isAltcoin,
+    fundingCostPct: costs.fundingCostPct, grossTargetPct: levels.tp1Pct,
+    nowMs, riskPctPerTrade, feeToStopRatioPct,
+  });
+
+  const sizing = positionSize({
+    equity: dayState.equity, riskPct: riskPctPerTrade,
+    entryPrice: levels.entry, stopPrice: levels.stopPrice, leverage,
+  });
+
+  const row = {
+    symbol, exchange: (cfg.exchange === 'gateio' ? 'GATE.IO' : (cfg.exchange || 'binance').toUpperCase()), direction,
+    setup: primary.type, confidence,
+    entry: levels.entry, stop: levels.stopPrice, tp1: levels.tp1, tp2: levels.tp2, tp3: levels.tp3,
+    // Fractions to close at each level (always 30/30/40 — see
+    // costs.js TP_LEVELS) plus the fee-adjusted breakeven price the
+    // remaining 40% moves its stop to once TP2 fully fills (never at
+    // TP1 — see requirements #4-#7), so both Paper's managePositions
+    // and the real Live/Demo order placer read the exact same numbers.
+    tpFractions: levels.tpFractions,
+    breakevenStopPrice: feeAdjustedBreakevenPrice({ entry: levels.entry, direction, entryFeePct, exitFeePct, spreadPct: snap.meta.spreadPct, slippagePct }),
+    expectedGrossPct: levels.tp1Pct, estFeesPct: costs.entryFeePct + costs.exitFeePct,
+    estSlippagePct: costs.slippageCostPct, estFundingPct: costs.fundingCostPct,
+    expectedNetPct: costs.netTargetPct, riskReward: riskRewardRatio,
+    liquidityScore: snap.meta.liquidityScore, regime: regime.regime,
+    status: gate.allowed ? 'APPROVED' : 'REJECTED', rejectReasons: gate.reasons,
+    execution, sizing, leverage, liqPrice: liqSafety.liqPrice,
+    reasons: primary.reasons, costsBreakdown: costs,
+  };
+  row.explanation = buildExplanation({
+    symbol, direction, confidence, setup: primary.type, regime: regime.regime,
+    reasons: primary.reasons, netTargetPct: costs.netTargetPct, totalCostPct: costs.totalCostPct,
+    riskRewardRatio, status: row.status, rejectReasons: gate.reasons,
+  });
+  return row;
 }
 
 function baseRow(symbol, snap, regime, status, rejectReasons){
@@ -388,7 +397,7 @@ export function recomputeOpenRisk(dayState){
   dayState.openRiskPct = dayState.positions.reduce((a, p) => a + (p.riskAmountUsd || 0), 0) / Math.max(1, dayState.equity) * 100;
 }
 
-function netPnlForFraction(position, exitPrice, fraction, dayState){
+export function netPnlForFraction(position, exitPrice, fraction, dayState){
   const grossPct = ((exitPrice - position.entry) / position.entry) * 100 * (position.direction === 'LONG' ? 1 : -1);
   const costPct = position.entryFeePct + position.exitFeePct + position.fundingRatePct;
   const netPct = grossPct - costPct;

@@ -11,6 +11,7 @@ import { runXScan } from './cross-exchange.js';
 import { initAutotrade } from './autotrade.js';
 import { initFuturesEngine } from './futures-ui.js';
 import { initAiSignal } from './ai-signal.js';
+import { initBacktestUI } from './backtest-ui.js';
 
 els.tabOverviewBtn.addEventListener('click', () => switchTabAll('overview'));
 els.ovRunBtn.addEventListener('click', () => { runScan(); runXScan(); });
@@ -39,3 +40,4 @@ window.addEventListener('load', runScan);
 initAutotrade();
 initFuturesEngine();
 initAiSignal();
+initBacktestUI();

@@ -79,9 +79,6 @@
         <div class="ov-block-body" id="ovXSummary">No scan run yet. Open the Cross-Exchange tab and click Scan Markets, or use Run Full Scan above.</div>
       </div>
     </div>
-    <footer>
-      <b>About this dashboard —</b> every figure here is pulled directly from the most recent Triangular or Cross-Exchange scan; nothing on this page is simulated. Visit either tab to scan on demand, or click Run Full Scan to refresh both at once.
-    </footer>
   </div>
 
   <!-- ============ TRIANGULAR ============ -->
@@ -159,12 +156,6 @@
       <div class="skeleton-row"></div>
     </div>
 
-    <footer>
-      <b>How this works —</b> every leg multiplies your balance by the best bid (selling) or 1/ask (buying) available on that exchange's public order book, minus your taker fee. A positive % means the round trip A→B→C→A returns more than you started with, before slippage. All three legs of one cycle always execute on the <b>same</b> exchange — arbitrage never mixes order books mid-cycle. Fiat on/off-ramp pairs (USDT/TRY, USDC/IDR, etc.) and any leg under your min 24h volume are excluded before the graph is even built, the same two filters the CLI scanner applies — this is what keeps the results to cycles you could plausibly fill instead of noise from thin or non-tradeable pairs.<br>
-      <b>Theoretical (CLI-style) toggle —</b> checking this reproduces the bundled CLI scanner's math exactly: one last-traded price for both the buy and sell leg (no bid/ask spread) and no fee subtracted. It exists so you can compare the two side by side — it is <b>not</b> a more accurate mode, it's the CLI's shortcut that makes its numbers look better than a real fill would be. Leave it off for a realistic read.<br>
-      <b>Live Scan —</b> re-scans on the interval you set and tags each row <b>NEW</b> the first time it's seen and <b>OPEN</b> on every pass after that, with a first-seen timestamp — mirroring the CLI scanner's continuous-tracking output. Cycles that stop clearing the filter are logged to a closed strip above the results with how long they stayed open, then drop off.<br>
-      <b>Read before trading —</b> this is an informational scan of top-of-book prices, not a guarantee, and it does not manufacture profit that isn't really there. Real fills depend on order book depth, execution speed, and simultaneous availability of all three legs — thin books and latency routinely erase small or negative edges either way. This is not financial advice.
-    </footer>
   </div>
 
   <!-- ============ CROSS-EXCHANGE ============ -->
@@ -245,13 +236,6 @@
       <div class="skeleton-row"></div>
     </div>
 
-    <footer>
-      <b>How this works —</b> for every asset traded on 2+ of the selected exchanges, this finds the lowest ask (buy side) and the highest bid (sell side) and computes the spread after two taker fees. It requires the buy and sell exchange to be different — a gap on one exchange against itself isn't arbitrage.<br>
-      <b>Window, Liquidity —</b> Window is how long this session's scanner has continuously seen the gap ("just opened" under ~90s). Liquidity compares top-of-book depth and 24h volume on both sides against your trade amount.<br>
-      <b>D/W icons —</b> the small D and W badges next to each exchange show whether this coin is Depositable / Withdrawable on that specific exchange. This is anchored to Bitget's public coin/network status: a green check or red cross next to a Bitget leg is a real, verified answer. Binance and Bybit don't expose network status without an authenticated account, so their D/W badges show a grey "?" ("unverified") rather than a guess — use the ↗ link next to each exchange to check directly on their site before moving funds.<br>
-      <b>Advanced Filters —</b> narrows what's currently displayed (liquidity, window, quote asset, exchanges included, and a "D/W confirmed only" toggle for routes Bitget's data confirms are transferable) without re-scanning the exchanges.<br>
-      <b>Read before trading —</b> a live spread here is not automatically capturable: this scans price gaps only, and assumes quote-asset balance is already sitting on the buy exchange and base asset already sitting on the sell exchange — an actual on-chain or internal transfer takes minutes, and the gap is usually gone by the time it lands. Transfer time, withdrawal fees/limits, and the spread closing before you move funds are the main reasons a real gap this size rarely survives long enough to execute risk-free. Cost Breakdown's slippage and gas figures are estimates, not quotes. This is not financial advice.
-    </footer>
   </div>
 
   <!-- ============ AUTOTRADE & FUTURES (combined, sub-tab switch) ============ -->
@@ -266,17 +250,11 @@
 
     <div class="ov-block" style="margin-bottom:18px;">
       <div class="ov-block-title">Exchange API Keys</div>
-      <div style="font-size:12px;color:var(--dim);margin:10px 0;line-height:1.5;">
-        Connecting and managing exchange API keys now lives in its own <b>API Keys</b> tab — one place to bind a key per exchange, shared by Autotrade (Spot, below) and the AI Futures Engine (Futures) alike, instead of being buried inside this page. Nothing to reconnect: keys you already saved are still there.
-      </div>
       <button type="button" class="primary ghost" id="goToKeysBtn">Open API Keys tab</button>
     </div>
 
     <div class="ov-block" style="margin-bottom:18px;">
       <div class="ov-block-title">Balances (Spot)</div>
-      <div style="font-size:11px;color:var(--dim);margin:8px 0;">
-        Read from each exchange's own SPOT balance endpoint only — separate from the Futures balance shown in the AI Futures Engine tab's Live/Demo section, which is read from that exchange's separate FUTURES balance endpoint. A deposit, trade, or transfer on one side is never assumed to change the other.
-      </div>
       <div id="balanceRows" class="balance-list"></div>
     </div>
 
@@ -373,9 +351,6 @@
         <button type="button" class="primary" id="atPendingExecuteBtn">Execute Cycle</button>
         <button type="button" class="primary ghost" id="atPendingDismissBtn">Dismiss</button>
       </div>
-      <div style="font-size:11px;color:var(--dim);margin-top:8px;">
-        Re-scanned fresh the moment you click Execute — order-book prices move between scans, so what actually executes is verified again right before it fires, not just replayed from when this was first shown. Refreshes to the latest qualifying cycle each scan interval if you haven't acted on this one yet.
-      </div>
     </div>
 
     <div id="atMessages"></div>
@@ -398,20 +373,10 @@
       <div id="atCycleLog" class="cycle-log"></div>
     </div>
 
-    <footer>
-      <b>Scope —</b> Autotrade only trades <b>Triangular Arbitrage</b>, only on <b>Spot</b> markets, and only on the single exchange selected above. Cross-Exchange scanning is not included. Futures trading now lives in its own AI Futures Engine tab (paper mode).<br>
-      <b>How it decides —</b> each pass, it ranks every triangular cycle on the selected exchange and, if the single most profitable one clears both your min-profit field and the hard 0.8% floor, it "executes" it — this compounds a running day-balance rather than placing a real order (see the notice above).<br>
-      <b>Daily target —</b> once today's simulated balance is up 11% (or your configured target) from the starting balance you entered, Autotrade stops itself automatically for the day, however many cycles it took to get there, and the summary above is the full record.<br>
-      This is not financial advice, and simulated results will not exactly match a real fill — depth, slippage, and timing between the three legs all affect a real execution.
-    </footer>
   </div>
 
   <!-- ============ AI FUTURES ENGINE ============ -->
   <div class="panel" id="panelFutures">
-
-    <div class="warn-banner">
-      <b>PAPER MODE only, synthetic market data.</b> This engine is Phase 1 of the build: the scoring/regime/setup/risk/no-trade logic is real and runs every cycle, but the price data driving it is currently a seeded random-walk generator across a 35-symbol watchlist (see <code>js/futures/mockMarket.js</code>), not live Binance/Bybit futures feeds — that's Phase 2. Nothing here places, or is capable of placing, a real order; there is no LIVE MODE in this build. Whatever win rate / expectancy you see below is whatever the synthetic price path actually produced against these rules — it is not tuned to look good. The active strategy, AI Scalp, trades a genuine 1:1 stop:target by trading WITH the mock market's built-in short-term momentum rather than against it. <b>An earlier version of this notice quoted a specific win-rate range (69-73%, later 65-76%) as a settled result — that was wrong, not just optimistic: the synthetic generator turned out to use a fixed seed, so every "independent backtest run" used to produce those numbers was replaying the same one price sequence, not sampling different scenarios.</b> Fixed now — genuinely independent runs against the corrected generator show results ranging from clearly losing to clearly profitable, averaging close to breakeven. See "deterministic seed bug" in README-SCALP.md for the full account, including why this also helps explain a large gap reported between Paper backtest and real Live/Demo results.
-    </div>
 
     <div class="ov-head">
       <h2>AI Futures Engine <span class="pill" id="fuStatus" style="margin-left:8px;">PAUSED · PAPER</span></h2>
@@ -464,9 +429,6 @@
 
     <details class="ov-block fu-strategies" id="fuStrategiesDetails" style="margin-bottom:18px;">
       <summary class="ov-block-title">Strategies <span class="fu-strategies-badge" id="fuStrategiesBadge"></span></summary>
-      <div style="font-size:12px;color:var(--dim);margin:10px 0;line-height:1.5;">
-        Which setup detectors are allowed to fire, and what reward:risk ratio each one builds its trades at (1:1 to 1:3). Shared by Paper and Live/Demo alike — multiple strategies can be on at once; if more than one fires on the same symbol in the same cycle, they either agree (confidence blends) or disagree (hard no-trade), same as before. <b>Win rate/trades/net shown per strategy come from the Paper Trade Log (this browser) — a simulation against synthetic random-walk price action, not a historical backtest and not real money — because Paper can build a real sample size fast where actual Live/Demo trades never will.</b> A strategy needs at least 30 paper trades before its win rate is treated as reliable rather than noise; below that it's shown flagged as provisional, not hidden.
-      </div>
       <div id="fuStrategiesBest" style="font-size:12.5px;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);padding:8px 12px;margin-bottom:10px;"></div>
       <div id="fuStrategyRows"></div>
     </details>
@@ -512,18 +474,6 @@
 
     <div class="ov-block" style="margin-top:18px;border-color:var(--amber-dim);">
       <div class="ov-block-title">Live / Demo Trading <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">ALL FIVE EXCHANGES</span></div>
-      <div style="font-size:12px;color:var(--dim);margin-bottom:14px;line-height:1.5;">
-        Separate from the paper engine above, which keeps running exactly as it always has regardless of what's set here — this section has no "Paper" option of its own on purpose, since Paper mode already lives above and this section is only ever real orders. Pick ONE exchange below (only one trades Live/Demo at a time in this app) using the key already connected for it in <b>Autotrade &amp; Balances</b> — nothing new to connect. Every position opens with an exchange-side stop-loss and take-profit attached at creation (not something this app watches and reacts to), so the exchange itself enforces the exit even if this tab is closed or your connection drops.
-      </div>
-      <div style="font-size:11px;color:var(--dim);margin-bottom:6px;">
-        Binance and Gate.io both need two extra signed calls per position (their stop-loss and take-profit can't be attached to the entry order the way Bybit's, MEXC's, and Bitget's can) — if the entry fills but either of those fails, this app will tell you plainly that the position is open and unprotected rather than reporting a generic error. Check the exchange directly if you ever see that message.
-      </div>
-      <div style="font-size:11px;color:var(--dim);margin-bottom:10px;">
-        MEXC is <b>Live only</b> — it has no Demo Trading exposed through its API — and its API only gained the ability to place Futures orders at all in <b>March 2026</b>, about five months before this was built. That's not a reason to distrust it (everything here comes straight from MEXC's own current documentation), but it has the least real-world mileage of the five; start smaller and watch it more closely than the other four.
-      </div>
-      <div style="font-size:11px;color:var(--dim);margin-bottom:10px;">
-        Bitget's Demo mode uses the same account-level "Demo API key + a request header" mechanism as Bitget spot demo already in this app — documented by Bitget as their general approach, but its exact behavior on these specific futures endpoints hasn't been independently confirmed end-to-end against a real Demo account. Watch a few Demo trades closely before trusting it further, same advice as MEXC above.
-      </div>
 
       <div class="fu-live-exch-rows" id="fuLiveExchRows"><!-- rendered by js/futures-ui.js — one row per exchange, click to select, click Live/Demo to set that exchange's network --></div>
 
@@ -546,9 +496,6 @@
         <div class="btn-row">
           <button type="button" class="primary" id="fuLivePendingExecuteBtn">Execute Trade</button>
           <button type="button" class="primary ghost" id="fuLivePendingDismissBtn">Dismiss</button>
-        </div>
-        <div style="font-size:11px;color:var(--dim);margin-top:8px;">
-          Re-checked against fresh market data the moment you click Execute — if it no longer qualifies by then, nothing is placed and you'll be told why. Refreshes automatically to the latest qualifying signal each scan cycle (~8s) if you haven't acted on this one yet.
         </div>
       </div>
 
@@ -585,10 +532,6 @@
         <div class="ov-card"><span class="ov-label">Fees</span><span class="ov-value" id="fuLiveFees">-$0.00</span></div>
         <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value" id="fuLiveNetPnl">$0.00</span></div>
       </div>
-      <div style="font-size:11px;color:var(--dim);margin-top:6px;">
-        Gross/Fees are now read from every exchange's own real trade/execution history, Bybit included (via its execution list endpoint, which works in both Live and Demo) — if a figure ever can't be confirmed from the exchange for a specific trade, it's left blank rather than guessed. "Session" above means since the last Arm/Stop or page reload — the Starting Balance card is the real balance read the moment this session was armed, for comparison against the current one; the Trade Log below is unaffected by any of that and keeps every trade across every session.
-      </div>
-
 
       <div class="ov-block" style="margin-top:14px;">
         <div class="ov-block-title" style="font-size:13px;">Live/Demo Trade History <span style="font-weight:400;color:var(--dim);">(this session)</span></div>
@@ -600,9 +543,6 @@
 
       <div class="ov-block" style="margin-top:14px;">
         <div class="ov-block-title" style="font-size:13px;">Trade Log <span style="font-weight:400;color:var(--dim);">(every real trade, every session — kept in this browser)</span></div>
-        <div style="font-size:11px;color:var(--dim);margin:8px 0;">
-          Recorded the moment a trade closes, independently of the session stats above — arming/stopping, switching exchanges, or reloading this page never clears it. Kept in this browser only (not synced anywhere), capped at the most recent 5,000 trades.
-        </div>
         <div class="mode-toggle" role="group" aria-label="Trade log time range" style="margin-bottom:10px;">
           <button type="button" class="mode-btn active" id="fuLogRangeToday" data-range="today">Today</button>
           <button type="button" class="mode-btn" id="fuLogRangeWeek" data-range="week">Last 7 Days</button>
@@ -636,26 +576,121 @@
       </div>
     </div>
 
-    <footer>
-      <b>Scope —</b> USDT-margined perpetuals, excluding BTC, ETH, SOL, LTC, DOGE and BNB on every exchange (see <code>EXCLUDED_FUTURES_SYMBOLS</code> in <code>js/futures/engine.js</code>; BTC price data is still used internally for the shock filter, just never traded). Paper mode scans a fixed 35-symbol synthetic watchlist (see <code>js/futures/mockMarket.js</code>) minus those exclusions; Live/Demo scans each exchange's REAL, FULL current list of USDT-M perpetuals minus the same exclusions — see the Live/Demo note below for why that's a ranked top-N rather than literally every listed pair every cycle. Default risk 1% of equity per trade (configurable 1–50%, see the "Risk per trade (%)" field above), a FIXED 1:2 reward:risk on every trade (no longer user-adjustable), max 3 simultaneous positions, max total portfolio risk scaling with your risk-per-trade setting, stopped for the day at ±2%/+10% (loss/profit — see "Pausing and stopping" below), 60min cooling-off after 3 consecutive losses — all enforced by the No-Trade Engine before any position opens.<br>
-      <b>Pausing and stopping —</b> three separate mechanisms, easy to conflate with each other since they all show up as "no qualifying signal" or a stopped session: (1) <b>Adaptive confidence</b> — every consecutive real loss raises the confidence bar the next signal has to clear (+8, capped at +25); it decays back down on its own over time (one step per 30min with no new loss) as well as resetting fully on a win, and it never stops the bot from scanning — it's still checking every cycle, just being pickier. (2) <b>Consecutive-loss cooling-off</b> (engine-level, both Paper and Live) — 3 losses in a row pauses new entries for 60 minutes from the last one, then resumes on its own; no action needed. (3) <b>Daily stop</b> — trading stops entirely for the rest of the day at either -2% or +10% on the day's starting balance (see the Starting Balance card above), loss or profit alike; this is the one genuinely deliberate full stop, and it clears at the next Reset Session or new day, not on its own mid-day. Separately, Live/Demo also has its own hard circuit breaker after 6 consecutive REAL losses specifically (not Paper) that forces a full manual re-arm rather than auto-resuming at all — that one's deliberate too: real money losing 6 in a row is treated as something a human should look at before continuing, not something to keep running through unattended.<br>
-      <b>Fee-drag fix —</b> real Live/Demo trading on Bybit surfaced a genuine bug, not a misunderstanding: AI Scalp's stop distance could be as tight as 0.15% of price, while real round-trip futures fees run ~0.10-0.12% on most of these exchanges (0.06% taker one-way on Bitget, the highest of the five — see <code>DEFAULT_FEE_CONFIG</code> in <code>js/futures/costs.js</code>, sourced from each exchange's own published fee schedule) — so fees alone could eat 70%+ of the risk on every trade regardless of signal quality, turning a near-breakeven gross win rate sharply net-negative. Fixed at the source: the stop-distance floor is now 0.35%, the reward:risk is fixed at 1:2 instead of 1.2, the AI Scalp net-profit floor was raised, and a new gate rejects any setup where round-trip fees exceed 35% of its own stop distance. None of this changes what confidence score a setup gets — it changes what a stop and target are actually allowed to look like once one fires.<br>
-      <b>Doubled-position bug (fixed)</b> — real Bybit trading also exposed a genuine, separate bug: this app is meant to hold at most one real position per symbol at a time, but if an order's fill confirmation ever came back ambiguous (a 6-second confirmation window timing out, or a dropped response after Bybit had actually already filled it), the client showed "Order failed" and never recorded the position — so its own memory believed nothing was open. The next cycle then had nothing telling it a real position already existed, and could place a second real entry on the same symbol, which the exchange nets into one bigger position (same-side fills accumulate) — silently taking roughly double the intended risk on that trade while this app's own display only ever showed the second order's own size. Fixed at the source, not just for Bybit: <code>/api/futures/order</code> now checks the exchange's OWN live position for that exact symbol — ground truth, not this app's memory — before ever placing a new entry, on all five exchanges, and refuses to place the order at all if a position already exists or if that check itself can't be confirmed. This is very likely most of what made some real losses land far larger than a correctly-sized 1% trade should.<br>
-      <b>On "it's not doing 1:2"</b> — checked against real numbers from that same session: a matched win/loss pair on the same symbol (HYPEUSDT) moved -0.35% into the stop and +0.69% into the target — a real ~1:2 price ratio, working as designed. Dollar amounts differing trade-to-trade is expected, not a bug: position size is deliberately set smaller for a wider-stop symbol and larger for a tighter-stop one, so the $ risk stays ~1% either way — comparing raw dollar P&L across different symbols isn't actually a valid way to check the ratio, only comparing one trade's own win-side vs loss-side percentage is. The doubling bug above is the more likely real explanation for outsized losses specifically: a doubled loss is a genuinely bigger number next to a correctly-sized win, not a broken ratio.<br>
-      <b>On win rate</b> — the confidence floor was quietly not filtering anything: AI Scalp's score ranges 60 (bare momentum, zero RSI/volume confirmation) to 87 (fully confirmed), and the default "Min confidence" was set to exactly 60 — the floor of that range — so every signal that cleared the earlier structural checks passed regardless of whether anything actually confirmed it. Raised to 70, which requires at least one real confirmation now. What this footer will NOT do is claim that fixes the win rate — deliberately: this exact codebase already tried the more obvious-looking fix (penalizing counter-trend entries against the regime) and reverted it, because tested against the only data available to test against, it turned a profitable setup into a losing one across three separate runs (see <code>js/futures/setups.js</code>'s own comment on that, and <code>README-SCALP.md</code>). Repeating a change with documented evidence it hurts, on the strength of it merely sounding right, would be worse than leaving it alone.<br>
-      <b>Two more strategies enabled</b> — per an explicit request to try a genuinely different approach rather than tune AI Scalp further: <b>Trend Continuation</b> (enters on a pullback INTO an established trend — price retracing toward EMA20/VWAP on contracting volume, then momentum resuming — rather than fresh momentum) and <b>Liquidity Sweep Reversal</b> (a real reversal pattern: price sweeps past a recent swing high/low, a classic stop-hunt shape, then immediately reclaims it, with volume confirmation required to fire at all, not just a bonus). Both were already fully built in <code>js/futures/setups.js</code> but sitting inactive; enabling them surfaced a real, separate landmine — every setup OTHER than AI Scalp shared a stop-distance floor of 0.12%, tighter even than the value that caused AI Scalp's own fee-drag bug, just never exercised in Live/Demo trading because nothing but AI Scalp was ever active. Fixed to the same 0.35% floor before enabling anything. Deliberately NOT enabled: Range Reversal (still philosophically a fade/mean-reversion approach, and this build has a documented, measured case — Range Scalp's ~25-29% win rate — of fading systematically losing to this feed's short-run momentum) and Breakout + Retest (conceptually closer to AI Scalp's own momentum-chasing than a real change of style). Honesty note matching the rest of this footer: neither newly-enabled setup has been measured against this engine's current fixed-1:2-RR/fee model — this is a reasoned, differently-shaped addition, not a proven improvement. Multiple setups agreeing on a symbol blend confidence; disagreeing is a hard no-trade, same ensemble logic as before.<br>
-      <b>On win rate —</b> we won't invent a number here. A specific win-rate range isn't something any of this can honestly promise in live markets, and this build has been burned by an overclaim before (see the deterministic-seed postmortem in <code>README-SCALP.md</code>) — it won't repeat that. What changed above is the breakeven bar itself: at the old 1.2 ratio and 0.15% stop floor, the math required roughly a 79-82% win rate just to break even against real round-trip fees — a bar this kind of momentum scalp was never going to clear, which is exactly what real trading exposed. At the new fixed 1:2 ratio and 0.35% stop floor, breakeven drops to roughly 37-45% depending on exchange fees and where the stop lands in its range — a bar a genuine, even modest, edge can plausibly clear. That's a real, computed shift in what's required to be profitable, not a claim about what win rate you'll actually get. The optional AI Signal check (API Keys tab) adds an independent second filter on top, which may or may not move the real number further — judge it against your own Live/Demo trade history, not a claim made here.<br>
-      <b>Win rate vs. expectancy —</b> the dashboard reports whatever win rate and profit factor the session's trades actually produced. A high win rate with poor expectancy is not something this build is tuned toward, and it will show a losing session honestly if that's what happens against the current (synthetic, Paper-mode) price data.<br>
-      <b>Five strategies, per-strategy stats</b> — every trade is now tagged with which strategy produced it, and the Strategies block (top of this tab) shows each one's OWN real Trades/Win Rate/Net, computed live from your actual Trade Log, filtered to that strategy — never a backtest number, never marketing copy. "No trades yet" is the expected, honest state for a strategy you haven't traded with yet, not an error. Each strategy's reward:risk (1:1-1:3) is independently adjustable there too — see STRATEGY_REGISTRY in <code>js/futures/setups.js</code>.<br>
-      <b>Manual / Auto trade mode</b> — both this tab's Live/Demo Trading section and the Autotrade & Balances tab's Triangular Arbitrage now have a Trade Mode toggle. Auto is unchanged from before: a qualifying signal/cycle executes the moment it's found. Manual shows the same qualifying signal/cycle and waits for an explicit Execute click — and re-verifies against fresh market data at the moment of that click, never acting on what was true when it was first detected. Switching back to Auto while something's pending drops it, on purpose, rather than risk it firing on its own right after the switch.<br>
-      <b>On matching another product's advertised win rate</b> — asked directly, so answered directly: no, this build doesn't know how a specific third-party signals product achieves a number shown in its own marketing UI, and won't pretend to reverse-engineer one from a screenshot. Advertised win-rate/lifetime-stats displays in the retail crypto signals space are frequently unverifiable — cherry-picked windows, survivorship bias, or simply asserted — and there's no way to audit one from the outside. Every real-performance claim in THIS build comes from your own Trade Log, not a number chosen to look good; that standard doesn't bend for a competitor's number either.<br>
-      <b>Live/Demo trading</b> (Bybit, Binance, Gate.io, MEXC, and Bitget — MEXC is Live only, no Demo) places real orders through <code>server/server.js</code> with a native/exchange-enforced stop-loss and take-profit on every position — see the Live/Demo Trading section above and <code>server/README.md</code> before arming it with a Live key. It scans each exchange's real, full current USDT-M perpetual list (fetched live via <code>/api/futures/universe</code> — not a hardcoded roster), minus your exclusions, ranked by 24h volume, with the top 15 most liquid/active names actually getting the full per-symbol scan each cycle. That top-15 figure (<code>LIVE_SCAN_TOP_N</code> in <code>js/futures-ui.js</code>) is a real rate-limit ceiling, not a preference: an exchange can list 300+ USDT perpetuals, each needing 4-6 separate calls to build a real signal-detection snapshot, and doing that for every listed symbol every 8 seconds would be 1,000+ calls/cycle — enough to trip every one of these exchanges' rate limits at once (see the Binance ban/weight-budget notes in <code>server.js</code> for what that looks like when it happens to just one of them). Which 15 symbols that covers shifts on its own, cycle to cycle, as real trading activity shifts.<br>
-      <b>AI Signal (optional)</b> — if enabled in the API Keys tab, every APPROVED Live/Demo signal also gets a second opinion from whichever model provider you've connected there before an order is placed. It can only make the bot MORE cautious (reject a signal the engine above already approved) — it cannot approve a signal the engine rejected, size a position, or touch any risk control on this page. See the API Keys tab for the honest caveats on that feature; it is not tuned or proven to raise win rate. Its prompt was re-tuned after real use showed it rejecting trades over metrics the engine had already cleared (e.g. "modest confidence", "low liquidity") — it's now told those thresholds are the engine's job, not its own, and to approve by default unless there's a specific, concrete, disqualifying problem. It can still say no; it should just no longer manufacture reasons to.<br>
-      <b>Binance's shared-IP rate limiting</b> — this app's own Binance call volume (~540 weight/min across the whole watchlist, measured) sits well under Binance's 2400/min-per-IP cap on its own, so a recurring "rate-limited/banned this server's IP" specifically on Binance (and only Binance, when the others work fine through the same host) most likely means OTHER traffic sharing this server's outbound IP is pushing the shared bucket over the edge — not this app's own usage. Two things now happen automatically: a reactive cooldown once Binance actually reports a ban (unchanged from before), and a new proactive one that reads Binance's own real-time usage figure on every response and pauses this app's own Binance calls for a few seconds if that figure is already running high, so this app isn't the request that tips a shared bucket over. Neither of those can fix the underlying cause, though — the only real fix for a shared-IP problem is getting this server off a shared IP for Binance specifically: a static/dedicated outbound IP (a paid add-on on most hosts, including Render) registered as that Binance API key's sole allowed IP. That's an account/infra change, not something this codebase can do on its own.<br>
-      <b>Trade Log</b> — every closed real trade (Live or Demo, any exchange) is now also written to a persistent log that survives arming/stopping, switching exchanges, and reloading the page — unlike the session-scoped stats and history table above it in the Live/Demo Trading section, which intentionally reset on any of those. Filterable there by Today/Last 7 Days/Last 30 Days/All Time/Custom range. Stored in this browser only (localStorage, capped at the most recent 5,000 trades) — there's no server-side account system in this app to sync it to or back it up elsewhere, so it won't follow you to a different browser or device, and clearing this browser's site data clears it too.<br>
-      <b>What's next —</b> real historical backtesting, walk-forward optimization, and Monte Carlo analysis all require actual historical OHLCV + a place to store it, which this static app doesn't have yet. All five exchanges now have Live/Demo (or Live-only, for MEXC) execution built.<br>
-      This is not financial advice.
-    </footer>
+    <div class="ov-block" id="btBlock">
+      <div class="ov-block-title">Backtest <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">REAL HISTORICAL DATA — BINANCE / BYBIT</span></div>
+
+      <div class="controls">
+        <div class="field">
+          <label for="btExchange">Exchange (historical data source)</label>
+          <select id="btExchange"><option value="binance">Binance Futures</option><option value="bybit">Bybit Derivatives</option></select>
+        </div>
+        <div class="field">
+          <label for="btRangePreset">Date range</label>
+          <select id="btRangePreset">
+            <option value="7">Last 7 days</option>
+            <option value="14">Last 14 days</option>
+            <option value="30" selected>Last 30 days</option>
+            <option value="60">Last 60 days</option>
+            <option value="90">Last 90 days</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </div>
+        <div class="field" id="btCustomFromField" style="display:none;">
+          <label for="btCustomFrom">From</label>
+          <input id="btCustomFrom" type="date">
+        </div>
+        <div class="field" id="btCustomToField" style="display:none;">
+          <label for="btCustomTo">To</label>
+          <input id="btCustomTo" type="date">
+        </div>
+        <div class="field">
+          <label for="btStartingBalance">Starting balance (USDT)</label>
+          <input id="btStartingBalance" type="number" min="100" step="100" value="10000">
+        </div>
+        <div class="field">
+          <label for="btRiskPct" title="Position size is derived from equity x risk% and the stop distance, exactly like Paper/Live — never a fixed dollar amount.">Risk per trade (%)</label>
+          <input id="btRiskPct" type="number" min="0.1" max="50" step="0.5" value="1">
+        </div>
+        <div class="field">
+          <label for="btLeverage">Leverage</label>
+          <input id="btLeverage" type="number" min="1" max="10" step="1" value="5">
+        </div>
+        <div class="field">
+          <label for="btMinConfidence">Min confidence</label>
+          <input id="btMinConfidence" type="number" min="0" max="100" step="1" value="70">
+        </div>
+        <div class="field">
+          <label for="btMakerFee" title="Defaults to this exchange's own published rate (js/futures/costs.js) — edit to model a different fee tier.">Maker fee (%)</label>
+          <input id="btMakerFee" type="number" min="0" max="1" step="0.005" value="0.02">
+        </div>
+        <div class="field">
+          <label for="btTakerFee">Taker fee (%)</label>
+          <input id="btTakerFee" type="number" min="0" max="1" step="0.005" value="0.05">
+        </div>
+        <div class="field">
+          <label for="btSpreadPct" title="Estimated, not fetched — no free historical spread feed exists at this granularity. Round-trip, % of notional.">Est. spread (%, round-trip)</label>
+          <input id="btSpreadPct" type="number" min="0" max="1" step="0.01" value="0.04">
+        </div>
+        <div class="field">
+          <label for="btFundingPct" title="Estimated, not fetched — per-8h funding rate, %. 0 is a neutral default.">Est. funding rate (%/8h)</label>
+          <input id="btFundingPct" type="number" min="-1" max="1" step="0.001" value="0">
+        </div>
+      </div>
+
+      <div class="field" style="margin-bottom:14px;">
+        <label>Symbols to test</label>
+        <div id="btSymbolChecks" style="display:flex;flex-wrap:wrap;gap:6px 14px;max-height:140px;overflow:auto;border:1px solid var(--line);border-radius:var(--r-md);padding:10px;background:var(--panel2);"></div>
+        <div class="btn-row" style="margin-top:6px;gap:8px;">
+          <button type="button" class="primary ghost" id="btSymbolsAllBtn">Select All</button>
+          <button type="button" class="primary ghost" id="btSymbolsNoneBtn">Select None</button>
+        </div>
+      </div>
+
+      <div class="field" style="margin-bottom:14px;">
+        <label>Strategies to test</label>
+        <div id="btStrategyChecks" style="display:flex;flex-wrap:wrap;gap:10px;"></div>
+      </div>
+
+      <div class="btn-row" style="gap:10px;align-items:center;">
+        <button type="button" class="primary" id="btRunBtn">Run Backtest</button>
+        <span id="btProgress" style="font-size:12px;color:var(--dim);"></span>
+      </div>
+
+      <div id="btMessages" style="margin-top:8px;font-size:12.5px;"></div>
+
+      <div id="btResults" style="display:none;margin-top:20px;">
+        <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);margin-bottom:12px;">
+          <div class="ov-card"><span class="ov-label">Trades</span><span class="ov-value" id="btrTrades">0</span></div>
+          <div class="ov-card"><span class="ov-label">Win Rate</span><span class="ov-value" id="btrWinRate">0%</span></div>
+          <div class="ov-card"><span class="ov-label">Profit Factor</span><span class="ov-value" id="btrPF">0</span></div>
+          <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value" id="btrNet">$0.00</span></div>
+        </div>
+        <div class="ov-grid" style="grid-template-columns:repeat(4, 1fr);margin-bottom:16px;">
+          <div class="ov-card"><span class="ov-label">Return</span><span class="ov-value" id="btrReturn">0%</span></div>
+          <div class="ov-card"><span class="ov-label">Max Drawdown</span><span class="ov-value" id="btrDD">0%</span></div>
+          <div class="ov-card"><span class="ov-label">Avg Win / Loss</span><span class="ov-value" id="btrAvg" style="font-size:15px;">$0 / $0</span></div>
+          <div class="ov-card"><span class="ov-label">Total Fees</span><span class="ov-value" id="btrFees">$0.00</span></div>
+        </div>
+
+        <div class="ov-block-title" style="font-size:13px;">Equity Curve</div>
+        <div id="btEquityChart" style="margin:8px 0 16px;"></div>
+
+        <div class="ov-block-title" style="font-size:13px;">By Strategy</div>
+        <div id="btByStrategy" style="margin:8px 0 16px;font-size:12.5px;"></div>
+
+        <div class="btn-row" style="margin-bottom:10px;gap:8px;flex-wrap:wrap;align-items:center;">
+          <div class="ov-block-title" style="font-size:13px;margin:0;">Trades</div>
+          <button type="button" class="primary ghost" id="btExportCsvBtn">Export CSV</button>
+          <button type="button" class="primary ghost" id="btExportXlsBtn">Export XLS</button>
+          <button type="button" class="primary ghost" id="btExportPdfBtn">Export PDF</button>
+        </div>
+        <div class="fu-hrow fu-head" style="grid-template-columns:1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr .9fr;">
+          <div>Date/Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div><div>Exit Reason</div>
+        </div>
+        <div id="btTradeRows"></div>
+      </div>
+    </div>
+
   </div>
   </div>
 
@@ -664,28 +699,18 @@
     <div class="ov-head">
       <h2>API Keys</h2>
     </div>
-    <div style="font-size:12px;color:var(--dim);margin-bottom:18px;line-height:1.5;">
-      One place to bind every credential this app uses — exchange keys (shared by Autotrade's Spot trading and the AI Futures Engine's Live/Demo trading) and, optionally, an AI model provider key for the AI Futures Engine's second-opinion signal check. Every key here lives only in this browser (and, for the one signed call each needs, in this server's request memory for the length of that call) — see <code>server/README.md</code>. Nothing on this page places an order by itself.
-    </div>
 
     <div class="ov-block" style="margin-bottom:18px;">
       <div class="ov-block-title">Exchange API Keys</div>
       <div class="field" style="max-width:560px; margin:12px 0 4px;">
         <label for="atProxyUrl">Verification proxy <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);" title="This is pre-configured for every device — nothing to enter here.">MANAGED</span></label>
         <input id="atProxyUrl" type="text" readonly aria-readonly="true" title="Managed automatically — verification is pre-configured for every device, no setup needed.">
-        <div style="font-size:11px;color:var(--dim);margin-top:4px;">Balance verification is pre-configured for this site — nothing to set up on any device.</div>
       </div>
       <div id="connectRows" class="connect-list"></div>
-      <div style="font-size:11px;color:var(--dim);margin-top:10px;">
-        One key per exchange, used everywhere that exchange appears in this app — Autotrade (Spot, in the Autotrade &amp; Balances tab) and the AI Futures Engine (Futures, Live/Demo section) both read the same saved key instead of asking you to connect twice.
-      </div>
     </div>
 
     <div class="ov-block" style="border-color:var(--amber-dim);">
       <div class="ov-block-title">AI Signal Provider <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">OPTIONAL · EXPERIMENTAL</span></div>
-      <div style="font-size:12px;color:var(--dim);margin:10px 0;line-height:1.5;">
-        Bind your own API key for ChatGPT (OpenAI), Claude (Anthropic), Gemini (Google), or Grok (xAI) to have that model give a second opinion on every Live/Demo signal the AI Futures Engine's own scoring/risk/no-trade logic has ALREADY approved, right before an order is placed. The model can only reject a signal the engine approved — it never sees, and cannot override, anything the engine already rejected, and it has no access to position sizing, leverage, or any risk control. <b>This is not proven to improve win rate</b> — it's an extra, independent filter you can turn on and judge for yourself against the Live/Demo trade history, not a guarantee. Costs whatever the provider bills you for each API call it makes (roughly one small call per approved signal). Your key is sent straight through to that provider's own API on each check and is never stored on this app's server.
-      </div>
       <div class="field" style="max-width:280px;">
         <label for="aiProviderSelect">Provider</label>
         <select id="aiProviderSelect">
@@ -711,9 +736,6 @@
         </label>
       </div>
       <div id="aiStatusNote" style="font-size:12px;color:var(--dim);margin-top:10px;">No AI provider key saved yet.</div>
-      <div style="font-size:11px;color:var(--dim);margin-top:10px;">
-        Model names drift fast on these providers, and the models themselves keep changing shape underneath the same names — Gemini's original model here was confirmed retired by a real Test Connection call (fixed: now uses Flash-Lite specifically, Google's fast/cheap tier); a follow-up real test then caught a second, subtler bug — the newer default models on Google, OpenAI, and xAI alike now "think" internally before answering, silently eating the same token budget the actual answer needs, which is what produced the timeout and the "no JSON object found" error. Token budgets were raised and reasoning kept minimal to fix it; OpenAI's GPT-5 line also turned out to reject the old temperature/max_tokens fields outright, which is fixed too. None of this guarantees they'll stay current — if Test Connection ever comes back with a similar error again, that's expected provider-side churn, not a deeper bug.
-      </div>
     </div>
   </div>
 

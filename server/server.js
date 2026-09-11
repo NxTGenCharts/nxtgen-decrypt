@@ -1099,6 +1099,97 @@ app.get('/api/futures/snapshot', async (req, res) => {
   }
 });
 
+// =============================================================
+// Backtest: historical OHLCV klines — public endpoints, no API key
+// needed (this is exactly why the Backtest tab can run for anyone, no
+// connected/verified exchange key required, unlike Live/Demo trading).
+// Binance USDT-M futures klines: GET /fapi/v1/klines. Bybit linear
+// klines: GET /v5/market/kline. Both exchanges cap each request to a
+// few hundred/thousand candles, so a wide date range is walked forward
+// in pages and merged here rather than in the browser — keeps the
+// front-end to one request per symbol regardless of range length, and
+// lets results be cached server-side across repeat backtests over the
+// same symbol/interval/range (common — e.g. testing different risk %
+// or strategy combinations against identical price history).
+// Only Binance and Bybit are wired up, matching this app's existing
+// "Binance/Bybit first, others best-effort/later" pattern elsewhere
+// (see triangular-arbitrage-scanner's own history for the same
+// sequencing) — MEXC/Gate.io/Bitget historical klines aren't included
+// yet.
+// =============================================================
+const klineCache = new Map(); // `${exchange}:${symbol}:${interval}:${startMs}:${endMs}` -> { fetchedAt, candles }
+const KLINE_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — candles this far in the past never change, this just bounds cache growth
+const KLINE_CACHE_MAX_ENTRIES = 500; // simple unbounded-growth guard — oldest entries evicted past this
+
+const BINANCE_KLINE_INTERVAL = { '5m': '5m', '15m': '15m', '1h': '1h' };
+const BYBIT_KLINE_INTERVAL = { '5m': '5', '15m': '15', '1h': '60' };
+
+async function fetchBinanceFuturesKlines(symbol, interval, startMs, endMs){
+  const out = [];
+  let cursor = startMs;
+  while(cursor < endMs){
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${BINANCE_KLINE_INTERVAL[interval]}&startTime=${cursor}&endTime=${endMs}&limit=1500`;
+    const r = await fetch(url);
+    if(!r.ok) throw new Error(`Binance klines HTTP ${r.status}`);
+    const rows = await r.json();
+    if(!Array.isArray(rows) || !rows.length) break;
+    for(const row of rows) out.push({ t: row[0], o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] });
+    const lastT = rows[rows.length - 1][0];
+    if(lastT <= cursor) break; // guards against a stuck page ever looping forever
+    cursor = lastT + 1;
+    if(rows.length < 1500) break; // short page = caught up to endMs already
+  }
+  return out;
+}
+
+async function fetchBybitLinearKlines(symbol, interval, startMs, endMs){
+  const out = [];
+  let cursor = startMs;
+  while(cursor < endMs){
+    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${encodeURIComponent(symbol)}&interval=${BYBIT_KLINE_INTERVAL[interval]}&start=${cursor}&end=${endMs}&limit=1000`;
+    const r = await fetch(url);
+    if(!r.ok) throw new Error(`Bybit klines HTTP ${r.status}`);
+    const data = await r.json();
+    if(data.retCode !== 0) throw new Error(`Bybit klines error: ${data.retMsg || data.retCode}`);
+    const rows = (data.result && data.result.list) || [];
+    if(!rows.length) break;
+    const chron = rows.slice().reverse(); // Bybit returns newest-first
+    for(const row of chron) out.push({ t: +row[0], o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] });
+    const lastT = +chron[chron.length - 1][0];
+    if(lastT <= cursor) break;
+    cursor = lastT + 1;
+    if(rows.length < 1000) break;
+  }
+  return out;
+}
+
+const BACKTEST_KLINE_FETCHERS = { binance: fetchBinanceFuturesKlines, bybit: fetchBybitLinearKlines };
+
+app.post('/api/backtest/klines', async (req, res) => {
+  const { exchange, symbol, interval, startMs, endMs } = req.body || {};
+  const fetcher = BACKTEST_KLINE_FETCHERS[exchange];
+  if(!fetcher) return res.json({ ok: false, message: `Historical data isn't wired up for "${exchange}" yet — Binance and Bybit are supported.` });
+  if(!symbol || !interval || !startMs || !endMs || endMs <= startMs){
+    return res.json({ ok: false, message: 'symbol, interval, startMs and endMs (with endMs after startMs) are all required.' });
+  }
+  const cacheKey = `${exchange}:${symbol}:${interval}:${startMs}:${endMs}`;
+  const cached = klineCache.get(cacheKey);
+  if(cached && Date.now() - cached.fetchedAt < KLINE_CACHE_TTL_MS){
+    return res.json({ ok: true, candles: cached.candles, cached: true });
+  }
+  try{
+    const candles = await fetcher(symbol, interval, startMs, endMs);
+    if(klineCache.size >= KLINE_CACHE_MAX_ENTRIES){
+      const oldestKey = klineCache.keys().next().value;
+      klineCache.delete(oldestKey);
+    }
+    klineCache.set(cacheKey, { fetchedAt: Date.now(), candles });
+    res.json({ ok: true, candles, cached: false });
+  }catch(err){
+    res.json({ ok: false, message: `Could not fetch ${exchange} history for ${symbol}: ${err.message}` });
+  }
+});
+
 // ---- Gate.io: currency pair details (precision, minimum amounts) ----
 async function gateioSymbolFilters(base, symbol){
   const res = await fetch(`${base}/api/v4/spot/currency_pairs/${symbol}`);

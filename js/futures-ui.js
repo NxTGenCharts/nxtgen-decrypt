@@ -131,7 +131,7 @@ function resetSession(){
   render();
 }
 
-function fmtUsd(x){
+export function fmtUsd(x){
   const sign = x > 0 ? '+' : (x < 0 ? '' : '');
   return sign + '$' + x.toFixed(2);
 }
@@ -320,7 +320,7 @@ const LIVE_TRADEABLE_EXCHANGES = ['bybit', 'binance', 'gateio', 'mexc', 'bitget'
 // always had in this app). Live is still available; Demo just isn't.
 const LIVE_ONLY_EXCHANGES = ['mexc'];
 
-function callProxy(path, body){
+export function callProxy(path, body){
   const proxyUrl = (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
   if(!proxyUrl) return Promise.reject(new Error('No verification proxy configured — set one in Autotrade & Balances.'));
   return fetch(proxyUrl + path, {
