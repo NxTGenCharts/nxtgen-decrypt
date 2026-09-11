@@ -4,7 +4,7 @@
 <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>NxTGen DeCrypt — Arbitrage Terminal</title>
+<title>Cross-Exchange Arbitrage — NxTGen DeCrypt</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
@@ -48,118 +48,14 @@
   </header>
 
   <nav class="term-nav">
-    <a class="navtab active" href="/" aria-current="page"><span class="ic">&#9635;</span>Overview</a>
+    <a class="navtab" href="/"><span class="ic">&#9635;</span>Overview</a>
     <a class="navtab" href="/triangular-arbitrage/"><span class="ic">&#9651;</span>Triangular Arbitrage</a>
-    <a class="navtab" href="/cross-arbitrage/"><span class="ic">&#8645;</span>Cross-Exchange</a>
+    <a class="navtab active" href="/cross-arbitrage/" aria-current="page"><span class="ic">&#8645;</span>Cross-Exchange</a>
     <a class="navtab" href="/autotrade-futures/"><span class="ic">&#9889;</span>Autotrade &amp; Futures</a>
     <a class="navtab" href="/api-keys/"><span class="ic">&#128273;</span>API Keys</a>
   </nav>
 
-<div class="panel active" id="panelOverview">
-    <div class="ov-head">
-      <h2>Market Status</h2>
-      <button class="primary ghost" id="ovRunBtn"><span class="btn-spinner"></span><span class="btn-label">Run Full Scan</span></button>
-    </div>
-    <div class="ov-grid">
-      <div class="ov-card"><span class="ov-label">Exchanges Connected</span><span class="ov-value" id="ovExchanges">0 / 3</span></div>
-      <div class="ov-card"><span class="ov-label">Markets Loaded</span><span class="ov-value" id="ovMarkets">—</span></div>
-      <div class="ov-card"><span class="ov-label">Cycles Checked</span><span class="ov-value" id="ovCycles">—</span></div>
-      <div class="ov-card"><span class="ov-label">Profitable Opportunities</span><span class="ov-value" id="ovProfitable">—</span></div>
-      <div class="ov-card ov-highlight"><span class="ov-label">Best Opportunity</span><span class="ov-value" id="ovBest">—</span></div>
-      <div class="ov-card"><span class="ov-label">Scanner Status</span><span class="ov-value" id="ovStatus">IDLE</span></div>
-    </div>
-    <div class="ov-summary">
-      <div class="ov-block">
-        <div class="ov-block-title">Triangular Arbitrage</div>
-        <div class="ov-block-body" id="ovTriSummary">Waiting for the first scan — this runs automatically on page load.</div>
-      </div>
-      <div class="ov-block">
-        <div class="ov-block-title">Cross-Exchange</div>
-        <div class="ov-block-body" id="ovXSummary">No scan run yet. Open the Cross-Exchange tab and click Scan Markets, or use Run Full Scan above.</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Hidden helper copies: not shown, but give runScan()/runXScan() the
-       input fields and output containers they expect so Overview's
-       dashboard (and Run Full Scan / auto-scan-on-load) work without
-       duplicating scan logic. See js/app.js. -->
-<div class="panel" id="panelTri">
-    <div class="controls">
-      <div class="field">
-        <label for="exchange">Exchange</label>
-        <select id="exchange" title="Which exchange's order book to scan">
-          <option value="ALL">All 5 (best across books)</option>
-          <option value="bitget">Bitget</option>
-          <option value="binance">Binance</option>
-          <option selected value="bybit">Bybit</option>
-          <option value="mexc">MEXC</option>
-          <option value="gateio">Gate.io</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="anchor">Start / anchor currency</label>
-        <select id="anchor" title="The currency each cycle starts and ends in">
-          <option value="ALL">All currencies</option>
-          <option selected value="USDT">USDT</option>
-          <option value="USDC">USDC</option>
-          <option value="BTC">BTC</option>
-          <option value="ETH">ETH</option>
-          <option value="BNB">BNB</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="fee">Taker fee / leg (%)</label>
-        <input id="fee" type="number" min="0" max="1" step="0.01" value="0.10" title="Taker fee charged per leg by your exchange tier">
-      </div>
-      <div class="field">
-        <label for="cliMode" title="Reproduces the CLI scanner's math exactly: one last-traded price used for both legs (no bid/ask spread), and no fee subtracted. This is why that script shows bigger positive numbers — it isn't a more realistic scan, it's ignoring two real costs. Off (default), the app uses live bid/ask plus your fee assumption above, which is the realistic read.">
-          Theoretical (CLI-style)
-        </label>
-        <label class="toggle-check">
-          <input id="cliMode" type="checkbox" checked>
-          <span>last price, no fee</span>
-        </label>
-      </div>
-      <div class="field">
-        <label for="minProfit">Min profit filter (%)</label>
-        <input id="minProfit" type="number" min="-5" max="5" step="0.01" value="0.05" title="Only show cycles at or above this net profit">
-      </div>
-      <div class="field">
-        <label for="minVolume">Min 24h volume (quote ccy)</label>
-        <input id="minVolume" type="number" min="0" step="1000" value="10000" title="Filters out any leg whose 24h quote-currency volume is below this. Thin markets can show a spread that looks profitable on paper but can't really be filled — same filter the CLI scanner uses.">
-      </div>
-      <div class="field">
-        <label for="resultsLimit">Results to show</label>
-        <input id="resultsLimit" type="number" min="5" max="50" step="1" value="20" title="How many cycles to list, best first. 5–50.">
-      </div>
-      <div class="field">
-        <label for="scanInterval">Live interval (s)</label>
-        <input id="scanInterval" type="number" min="5" max="300" step="1" value="20" title="How often Live Scan re-scans while running">
-      </div>
-      <div class="btn-row">
-        <button class="primary" id="scanBtn"><span class="btn-spinner"></span><span class="btn-label">Scan Markets</span></button>
-        <button class="primary ghost live-toggle" id="liveBtn" title="Continuously re-scan and track which cycles are newly opened, still open, or have closed since the last pass — same NEW/OPEN/CLOSED tracking as the CLI scanner">
-          <span class="dot"></span><span class="btn-label">Start Live Scan</span>
-        </button>
-      </div>
-      <div class="stats-row">
-        <div class="stat"><span class="n" id="statPairs">—</span><span class="l">Pairs loaded</span></div>
-        <div class="stat"><span class="n" id="statCycles">—</span><span class="l">Cycles checked</span></div>
-        <div class="stat"><span class="n" id="statHits">—</span><span class="l">Profitable</span></div>
-      </div>
-    </div>
-
-    <div id="messages"></div>
-    <div class="closed-strip" id="closedStrip"></div>
-    <div class="grid" id="results">
-      <div class="skeleton-row"></div>
-      <div class="skeleton-row"></div>
-      <div class="skeleton-row"></div>
-    </div>
-
-  </div>
-<div class="panel" id="panelX">
+<div class="panel active" id="panelX">
     <div class="controls">
       <div class="field">
         <label for="xAmount">Amount (USDT)</label>

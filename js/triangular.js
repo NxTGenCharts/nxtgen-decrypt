@@ -202,28 +202,36 @@ function renderClosedStrip(closed){
 // Expand/collapse the execution-path detail on click (presentation only —
 // no calculation happens here, it only toggles visibility of the already
 // rendered .steps block for that row).
-els.results.addEventListener('click', (e) => {
-  const row = e.target.closest('.row');
-  if(!row) return;
-  const open = row.classList.toggle('row--open');
-  row.setAttribute('aria-expanded', open ? 'true' : 'false');
-});
-els.results.addEventListener('keydown', (e) => {
-  if(e.key !== 'Enter' && e.key !== ' ') return;
-  const row = e.target.closest('.row');
-  if(!row) return;
-  e.preventDefault();
-  const open = row.classList.toggle('row--open');
-  row.setAttribute('aria-expanded', open ? 'true' : 'false');
-});
+// This module is imported on every page, but els.results (and the fee/cliMode
+// controls below) only exist on pages that actually render the Triangular
+// Arbitrage panel (the dedicated page, plus the hidden copy on Overview used
+// to power its background scan) — guard so import doesn't throw elsewhere.
+if(els.results){
+  els.results.addEventListener('click', (e) => {
+    const row = e.target.closest('.row');
+    if(!row) return;
+    const open = row.classList.toggle('row--open');
+    row.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  els.results.addEventListener('keydown', (e) => {
+    if(e.key !== 'Enter' && e.key !== ' ') return;
+    const row = e.target.closest('.row');
+    if(!row) return;
+    e.preventDefault();
+    const open = row.classList.toggle('row--open');
+    row.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+}
 
-els.fee.disabled = els.cliMode.checked; // reflect the checkbox's initial (checked-by-default) state on load
-els.cliMode.addEventListener('change', () => {
-  els.fee.disabled = els.cliMode.checked;
-  showMessage(els.cliMode.checked
-    ? `Theoretical mode is on — this uses one last-traded price for both the buy and sell leg (no bid/ask spread) and applies no fee, exactly like the CLI scanner. Real fills always cost more than this suggests; treat any positive % here as a ceiling, not a plan.`
-    : '', els.cliMode.checked ? 'info' : '');
-});
+if(els.fee && els.cliMode){
+  els.fee.disabled = els.cliMode.checked; // reflect the checkbox's initial (checked-by-default) state on load
+  els.cliMode.addEventListener('change', () => {
+    els.fee.disabled = els.cliMode.checked;
+    showMessage(els.cliMode.checked
+      ? `Theoretical mode is on — this uses one last-traded price for both the buy and sell leg (no bid/ask spread) and applies no fee, exactly like the CLI scanner. Real fills always cost more than this suggests; treat any positive % here as a ceiling, not a plan.`
+      : '', els.cliMode.checked ? 'info' : '');
+  });
+}
 
 export async function runScan(){
   if(state.scanInFlight) return; // a manual click landed mid-tick of an active Live Scan — skip rather than overlap

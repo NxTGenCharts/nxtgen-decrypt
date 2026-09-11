@@ -4,7 +4,7 @@
 <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>NxTGen DeCrypt — Arbitrage Terminal</title>
+<title>Triangular Arbitrage — NxTGen DeCrypt</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
@@ -48,43 +48,14 @@
   </header>
 
   <nav class="term-nav">
-    <a class="navtab active" href="/" aria-current="page"><span class="ic">&#9635;</span>Overview</a>
-    <a class="navtab" href="/triangular-arbitrage/"><span class="ic">&#9651;</span>Triangular Arbitrage</a>
+    <a class="navtab" href="/"><span class="ic">&#9635;</span>Overview</a>
+    <a class="navtab active" href="/triangular-arbitrage/" aria-current="page"><span class="ic">&#9651;</span>Triangular Arbitrage</a>
     <a class="navtab" href="/cross-arbitrage/"><span class="ic">&#8645;</span>Cross-Exchange</a>
     <a class="navtab" href="/autotrade-futures/"><span class="ic">&#9889;</span>Autotrade &amp; Futures</a>
     <a class="navtab" href="/api-keys/"><span class="ic">&#128273;</span>API Keys</a>
   </nav>
 
-<div class="panel active" id="panelOverview">
-    <div class="ov-head">
-      <h2>Market Status</h2>
-      <button class="primary ghost" id="ovRunBtn"><span class="btn-spinner"></span><span class="btn-label">Run Full Scan</span></button>
-    </div>
-    <div class="ov-grid">
-      <div class="ov-card"><span class="ov-label">Exchanges Connected</span><span class="ov-value" id="ovExchanges">0 / 3</span></div>
-      <div class="ov-card"><span class="ov-label">Markets Loaded</span><span class="ov-value" id="ovMarkets">—</span></div>
-      <div class="ov-card"><span class="ov-label">Cycles Checked</span><span class="ov-value" id="ovCycles">—</span></div>
-      <div class="ov-card"><span class="ov-label">Profitable Opportunities</span><span class="ov-value" id="ovProfitable">—</span></div>
-      <div class="ov-card ov-highlight"><span class="ov-label">Best Opportunity</span><span class="ov-value" id="ovBest">—</span></div>
-      <div class="ov-card"><span class="ov-label">Scanner Status</span><span class="ov-value" id="ovStatus">IDLE</span></div>
-    </div>
-    <div class="ov-summary">
-      <div class="ov-block">
-        <div class="ov-block-title">Triangular Arbitrage</div>
-        <div class="ov-block-body" id="ovTriSummary">Waiting for the first scan — this runs automatically on page load.</div>
-      </div>
-      <div class="ov-block">
-        <div class="ov-block-title">Cross-Exchange</div>
-        <div class="ov-block-body" id="ovXSummary">No scan run yet. Open the Cross-Exchange tab and click Scan Markets, or use Run Full Scan above.</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Hidden helper copies: not shown, but give runScan()/runXScan() the
-       input fields and output containers they expect so Overview's
-       dashboard (and Run Full Scan / auto-scan-on-load) work without
-       duplicating scan logic. See js/app.js. -->
-<div class="panel" id="panelTri">
+<div class="panel active" id="panelTri">
     <div class="controls">
       <div class="field">
         <label for="exchange">Exchange</label>
@@ -153,84 +124,6 @@
     <div id="messages"></div>
     <div class="closed-strip" id="closedStrip"></div>
     <div class="grid" id="results">
-      <div class="skeleton-row"></div>
-      <div class="skeleton-row"></div>
-      <div class="skeleton-row"></div>
-    </div>
-
-  </div>
-<div class="panel" id="panelX">
-    <div class="controls">
-      <div class="field">
-        <label for="xAmount">Amount (USDT)</label>
-        <input id="xAmount" type="number" min="1" step="10" value="100" title="Notional amount used to size the final-amount column">
-      </div>
-      <div class="field">
-        <label for="xFee">Taker fee / leg (%)</label>
-        <input id="xFee" type="number" min="0" max="1" step="0.01" value="0.10" title="Taker fee charged per leg by your exchange tier">
-      </div>
-      <div class="field">
-        <label for="xMinProfit">Profit threshold (%)</label>
-        <input id="xMinProfit" type="number" min="-5" max="10" step="0.01" value="0.10" title="Only show assets at or above this net spread">
-      </div>
-      <div class="field">
-        <label for="xResultsLimit">Results to show</label>
-        <input id="xResultsLimit" type="number" min="5" max="50" step="1" value="20" title="How many gaps to list, best first. 5–50.">
-      </div>
-      <div class="btn-row">
-        <button class="primary" id="xScanBtn"><span class="btn-spinner"></span><span class="btn-label">Scan Markets</span></button>
-      </div>
-      <div class="stats-row">
-        <div class="stat"><span class="n" id="xStatAssets">—</span><span class="l">Assets compared</span></div>
-        <div class="stat"><span class="n" id="xStatBest">—</span><span class="l">Best profit</span></div>
-        <div class="stat"><span class="n" id="xStatAvg">—</span><span class="l">Avg profit</span></div>
-      </div>
-    </div>
-
-    <div class="xfilters-row">
-      <button class="primary ghost" id="xFiltersToggleBtn" type="button" aria-expanded="false" aria-controls="xFiltersPanel">Advanced Filters ▾</button>
-      <span class="xfilters-summary" id="xFiltersSummary"></span>
-    </div>
-    <div class="xfilters" id="xFiltersPanel" hidden>
-      <div class="field">
-        <label for="xFilterLiquidity">Min liquidity</label>
-        <select id="xFilterLiquidity" title="Only show rows at or above this liquidity level">
-          <option value="any">Any</option>
-          <option value="medium">Medium &amp; above</option>
-          <option value="high">High only</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="xFilterWindow">Window</label>
-        <select id="xFilterWindow" title="Filter by how long this session has continuously seen the gap">
-          <option value="any">Any</option>
-          <option value="fresh">Just opened only</option>
-          <option value="aged">Aged only</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="xFilterQuote">Quote asset</label>
-        <select id="xFilterQuote" title="Restrict to a specific quote currency">
-          <option value="any">Any</option>
-          <option value="usdt">USDT only</option>
-        </select>
-      </div>
-      <label class="toggle-check" title="Only show routes where Bitget's public data confirms withdraw is enabled on the buy exchange and deposit is enabled on the sell exchange">
-        <input type="checkbox" id="xFilterDwVerified"> D/W confirmed only
-      </label>
-      <label class="toggle-check"><input type="checkbox" id="xFilterExBitget" checked> Bitget</label>
-      <label class="toggle-check"><input type="checkbox" id="xFilterExBinance" checked> Binance</label>
-      <label class="toggle-check"><input type="checkbox" id="xFilterExBybit" checked> Bybit</label>
-      <label class="toggle-check"><input type="checkbox" id="xFilterExMexc" checked> MEXC</label>
-      <label class="toggle-check"><input type="checkbox" id="xFilterExGateio" checked> Gate.io</label>
-    </div>
-
-    <div id="xMessages"></div>
-    <div class="xrow head">
-      <div></div><div>Asset</div><div>Buy on</div><div>Sell on</div><div>Final amount</div>
-      <div>Window</div><div>Liquidity</div><div style="text-align:right;">Profit</div>
-    </div>
-    <div class="xresults-wrap" id="xResults">
       <div class="skeleton-row"></div>
       <div class="skeleton-row"></div>
       <div class="skeleton-row"></div>

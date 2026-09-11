@@ -1,11 +1,17 @@
 // =============================================================
 // app.js — application initialization and orchestration.
-// Wires up the tab-level and cross-cutting event listeners that
-// don't belong to a single engine module, then kicks off the
-// first scan on load (same behavior as the original file).
+// The site is now a set of separate HTML pages (Overview,
+// Triangular Arbitrage, Cross-Exchange, Autotrade & Futures, API
+// Keys) instead of one single-page app with JS-driven tabs, so
+// top-level nav is just real <a href> links now — no click-based
+// tab switching needed for it.
+//
+// This module is still imported on every page, but each page
+// only contains a subset of the elements below, so every wire-up
+// is guarded on the element actually existing before touching it.
 // =============================================================
 import { els, state } from './state.js';
-import { switchTabAll, switchSubTab } from './ui.js';
+import { switchSubTab } from './ui.js';
 import { runScan, startLiveScan, stopLiveScan } from './triangular.js';
 import { runXScan } from './cross-exchange.js';
 import { initAutotrade } from './autotrade.js';
@@ -13,30 +19,36 @@ import { initFuturesEngine } from './futures-ui.js';
 import { initAiSignal } from './ai-signal.js';
 import { initBacktestUI } from './backtest-ui.js';
 
-els.tabOverviewBtn.addEventListener('click', () => switchTabAll('overview'));
-els.ovRunBtn.addEventListener('click', () => { runScan(); runXScan(); });
+// ---- Overview page ----
+// "Run Full Scan" runs both engines to refresh the dashboard cards. Overview
+// carries a hidden copy of the Triangular/Cross-Exchange panel markup (see
+// index.html) purely so these two functions have the input/output elements
+// they expect — same scan code as the dedicated pages, just not shown.
+if(els.ovRunBtn) els.ovRunBtn.addEventListener('click', () => { runScan(); runXScan(); });
 
-// Route the tri/x/trading/keys tab buttons through the same switchTabAll used
-// for Overview above, so clicking them also deactivates the other panels correctly.
-els.tabTriBtn.addEventListener('click', () => switchTabAll('tri'));
-els.tabXBtn.addEventListener('click', () => switchTabAll('x'));
-els.tabTradingBtn.addEventListener('click', () => switchTabAll('trading'));
-els.tabKeysBtn.addEventListener('click', () => switchTabAll('keys'));
-// Pointer button left in the Autotrade & Balances sub-panel where "Connect
-// Exchanges" used to live — jumps straight to the now-separate API Keys tab.
-if(els.goToKeysBtn) els.goToKeysBtn.addEventListener('click', () => switchTabAll('keys'));
+// Auto-run the triangular scan on load wherever its panel exists (visibly on
+// the Triangular Arbitrage page, or hidden on Overview) so the Overview
+// dashboard and the Triangular results are populated without a click —
+// matches the original single-page behavior. Cross-Exchange has never
+// auto-scanned on load; it only runs via its own Scan button or Overview's
+// Run Full Scan.
+if(els.results) window.addEventListener('load', runScan);
 
-// Within the combined Autotrade & Futures panel, tabAutoBtn/tabFuturesBtn
-// are now the sub-tab switch, not top-level tabs — see switchSubTab.
-els.tabAutoBtn.addEventListener('click', () => switchSubTab('auto'));
-els.tabFuturesBtn.addEventListener('click', () => switchSubTab('futures'));
+// ---- Triangular Arbitrage page ----
+if(els.liveBtn) els.liveBtn.addEventListener('click', () => { state.isLive ? stopLiveScan() : startLiveScan(); });
+if(els.scanBtn) els.scanBtn.addEventListener('click', runScan);
 
-els.liveBtn.addEventListener('click', () => { state.isLive ? stopLiveScan() : startLiveScan(); });
+// ---- Cross-Exchange page ----
+if(els.xScanBtn) els.xScanBtn.addEventListener('click', runXScan);
 
-els.scanBtn.addEventListener('click', runScan);
-els.xScanBtn.addEventListener('click', runXScan);
+// ---- Autotrade & Futures page ----
+// tabAutoBtn/tabFuturesBtn are the sub-tab switch within this one page.
+if(els.tabAutoBtn) els.tabAutoBtn.addEventListener('click', () => switchSubTab('auto'));
+if(els.tabFuturesBtn) els.tabFuturesBtn.addEventListener('click', () => switchSubTab('futures'));
 
-window.addEventListener('load', runScan);
+// ---- Init calls: each one is a no-op (or close to it) on a page that
+// doesn't have its elements, since every render function it calls now
+// guards on its own elements existing. ----
 initAutotrade();
 initFuturesEngine();
 initAiSignal();

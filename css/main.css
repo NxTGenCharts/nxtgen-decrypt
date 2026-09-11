@@ -138,6 +138,7 @@ h1,h2,h3{ font-family:var(--disp); margin:0; letter-spacing:.005em; }
   transition:color .15s, border-color .15s;
   white-space:nowrap; flex-shrink:0;
   min-height:var(--touch-target);
+  text-decoration:none; /* nav items are real <a> links between pages now */
 }
 .navtab .ic{ font-size:13px; opacity:.85; }
 .navtab:hover{ color:var(--ink-dim); }

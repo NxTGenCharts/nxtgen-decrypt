@@ -238,21 +238,26 @@ function renderCross(opps, amount, feePct){
 // Expand/collapse the execution-detail panel on click (presentation only).
 // Clicks on the "open exchange" link should just open the link, not also
 // toggle the row.
-els.xResults.addEventListener('click', (e) => {
-  if(e.target.closest('.xlink')) return;
-  const row = e.target.closest('.xrow');
-  if(!row || row.classList.contains('head')) return;
-  const open = row.classList.toggle('xrow--open');
-  row.setAttribute('aria-expanded', open ? 'true' : 'false');
-});
-els.xResults.addEventListener('keydown', (e) => {
-  if(e.key !== 'Enter' && e.key !== ' ') return;
-  const row = e.target.closest('.xrow');
-  if(!row || row.classList.contains('head')) return;
-  e.preventDefault();
-  const open = row.classList.toggle('xrow--open');
-  row.setAttribute('aria-expanded', open ? 'true' : 'false');
-});
+// This module is imported on every page, but els.xResults only exists on
+// pages that render the Cross-Exchange panel (the dedicated page, plus the
+// hidden copy on Overview) — guard so import doesn't throw elsewhere.
+if(els.xResults){
+  els.xResults.addEventListener('click', (e) => {
+    if(e.target.closest('.xlink')) return;
+    const row = e.target.closest('.xrow');
+    if(!row || row.classList.contains('head')) return;
+    const open = row.classList.toggle('xrow--open');
+    row.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  els.xResults.addEventListener('keydown', (e) => {
+    if(e.key !== 'Enter' && e.key !== ' ') return;
+    const row = e.target.closest('.xrow');
+    if(!row || row.classList.contains('head')) return;
+    e.preventDefault();
+    const open = row.classList.toggle('xrow--open');
+    row.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+}
 
 // ---- Advanced filters: a display-only narrowing layer on top of whatever
 // the last scan already found. Re-applying these never re-fetches from the

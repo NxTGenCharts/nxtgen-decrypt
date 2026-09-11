@@ -318,6 +318,7 @@ function showAtMessage(html, type){
 
 // ---------------- Connect Exchanges ----------------
 function renderConnectRows(){
+  if(!els.connectRows) return; // lives on the API Keys page only
   els.connectRows.innerHTML = Object.keys(EXCHANGES).map(key => {
     const label = EXCHANGES[key].label;
     const supportsDemo = EXCHANGES[key].demoSupported;
@@ -449,7 +450,9 @@ async function refreshAllConnectedBalances(){
 }
 const BALANCE_REFRESH_INTERVAL_MS = 90 * 1000; // matches a "reasonably fresh without hammering the proxy" cadence
 
-els.connectRows.addEventListener('click', async (e) => {
+// This module is imported on every page, but els.connectRows only exists on
+// the API Keys page — guard so import doesn't throw elsewhere.
+if(els.connectRows) els.connectRows.addEventListener('click', async (e) => {
   const revealBtn = e.target.closest('.reveal-btn');
   if(revealBtn){
     const row = e.target.closest('.connect-row');
@@ -593,6 +596,7 @@ els.connectRows.addEventListener('click', async (e) => {
 
 // ---------------- Balances ----------------
 function renderBalances(){
+  if(!els.balanceRows) return; // lives on the Autotrade & Futures page only
   els.balanceRows.innerHTML = Object.keys(EXCHANGES).map(key => {
     const label = EXCHANGES[key].label;
     const mode = EXCHANGES[key].demoSupported ? (state.exchangeMode[key] || 'live') : 'live';
@@ -620,6 +624,7 @@ function renderBalances(){
 // orders (see the "Simulated only" note in the UI) — it just makes sure
 // the *simulation's* starting point can't drift from reality by accident.
 function syncStartBalanceField(){
+  if(!els.atStartBalance) return; // lives on the Autotrade & Futures page only
   const key = state.autotrade.exchange;
   const mode = EXCHANGES[key].demoSupported ? state.autotrade.mode : 'live';
   const bal = state.balances[key]?.[mode];
@@ -630,7 +635,8 @@ function syncStartBalanceField(){
     : `No balance found for ${EXCHANGES[key].label} (${mode}) yet — connect that account or click Refresh Balance on the row above first.`;
 }
 
-els.balanceRows.addEventListener('click', (e) => {
+// els.balanceRows lives on the Autotrade & Futures page only.
+if(els.balanceRows) els.balanceRows.addEventListener('click', (e) => {
   const btn = e.target.closest('.bal-save-btn');
   if(!btn) return;
   const row = e.target.closest('.balance-row');
@@ -649,6 +655,7 @@ els.balanceRows.addEventListener('click', (e) => {
 
 // ---------------- Autotrade config UI ----------------
 function renderExchangeOptions(){
+  if(!els.atExchange) return; // lives on the Autotrade & Futures page only
   if(els.atExchange.options.length === 0 || els.atExchange.dataset.built !== '1'){
     els.atExchange.innerHTML = Object.keys(EXCHANGES).map(k => `<option value="${k}">${EXCHANGES[k].label}</option>`).join('');
     els.atExchange.dataset.built = '1';
@@ -658,6 +665,7 @@ function renderExchangeOptions(){
 }
 
 function syncAtModeToggle(){
+  if(!els.atExchange || !els.atModeRow) return; // lives on the Autotrade & Futures page only
   const key = els.atExchange.value;
   const supportsDemo = EXCHANGES[key].demoSupported;
   els.atModeRow.style.display = supportsDemo ? '' : 'none';
@@ -668,8 +676,11 @@ function syncAtModeToggle(){
   disarmLiveExecution(); // switching account/network invalidates any prior arm — never carry it over silently
 }
 
-els.atModeLive.addEventListener('click', () => { state.autotrade.mode = 'live'; syncAtModeToggle(); renderBalances(); });
-els.atModeDemo.addEventListener('click', () => {
+// The atMode*/atTestMode/atLiveExecution/atArmBtn/atToggleBtn/atExchange
+// controls below all live on the Autotrade & Futures page only — this
+// module is imported on every page, so each listener is guarded.
+if(els.atModeLive) els.atModeLive.addEventListener('click', () => { state.autotrade.mode = 'live'; syncAtModeToggle(); renderBalances(); });
+if(els.atModeDemo) els.atModeDemo.addEventListener('click', () => {
   if(!EXCHANGES[els.atExchange.value].demoSupported) return;
   state.autotrade.mode = 'demo'; syncAtModeToggle(); renderBalances();
 });
@@ -686,7 +697,7 @@ function currentAtMode(){
   return EXCHANGES[key].demoSupported ? state.autotrade.mode : 'live';
 }
 
-els.atTestMode.addEventListener('change', () => {
+if(els.atTestMode) els.atTestMode.addEventListener('change', () => {
   state.autotrade.testMode = els.atTestMode.checked;
   if(state.autotrade.testMode && state.autotrade.liveExecution && currentAtMode() !== 'demo'){
     state.autotrade.liveExecution = false;
@@ -699,12 +710,13 @@ const ARM_PHRASE = 'PLACE REAL ORDERS';
 
 function disarmLiveExecution(){
   state.autotrade.liveExecution = false;
+  if(!els.atLiveExecution) return; // lives on the Autotrade & Futures page only
   els.atLiveExecution.checked = false;
   els.atArmRow.style.display = 'none';
   els.atArmPhrase.value = '';
 }
 
-els.atLiveExecution.addEventListener('change', () => {
+if(els.atLiveExecution) els.atLiveExecution.addEventListener('change', () => {
   if(!els.atLiveExecution.checked){
     disarmLiveExecution();
     persist();
@@ -726,7 +738,7 @@ els.atLiveExecution.addEventListener('change', () => {
   els.atArmPhrase.focus();
 });
 
-els.atArmBtn.addEventListener('click', () => {
+if(els.atArmBtn) els.atArmBtn.addEventListener('click', () => {
   const key = els.atExchange.value;
   const mode = currentAtMode();
   const cred = state.exchangeCreds[key]?.[mode];
@@ -754,7 +766,7 @@ function ensureDay(){
   const today = todayKey();
   if(state.autotrade.dateKey !== today){
     // New day: roll current balance into the new starting balance, reset counters.
-    const rollFrom = state.autotrade.currentBalance || state.autotrade.startingBalance || parseFloat(els.atStartBalance.value) || 0;
+    const rollFrom = state.autotrade.currentBalance || state.autotrade.startingBalance || parseFloat(els.atStartBalance?.value) || 0;
     state.autotrade.dateKey = today;
     state.autotrade.startingBalance = rollFrom;
     state.autotrade.currentBalance = rollFrom;
@@ -767,6 +779,7 @@ function ensureDay(){
 }
 
 function renderAutotradeStatus(){
+  if(!els.atStatDay) return; // lives on the Autotrade & Futures page only
   const at = state.autotrade;
   els.atStatDay.textContent = at.dateKey || '—';
   els.atStatBalance.textContent = money(at.currentBalance || 0);
@@ -793,6 +806,7 @@ function renderAutotradeStatus(){
 }
 
 function renderCycleLog(){
+  if(!els.atCycleLog) return; // lives on the Autotrade & Futures page only
   const cycles = state.autotrade.cycles;
   if(cycles.length === 0){
     els.atCycleLog.innerHTML = `<div class="empty">No cycles executed yet today. Autotrade fires on the single highest-profit triangular cycle above your floor, each time it scans.</div>`;
@@ -1301,11 +1315,11 @@ function stopAutotrade(){
   renderAutotradeStatus();
 }
 
-els.atToggleBtn.addEventListener('click', () => {
+if(els.atToggleBtn) els.atToggleBtn.addEventListener('click', () => {
   state.autotrade.enabled ? stopAutotrade() : startAutotrade();
 });
 
-els.atExchange.addEventListener('change', () => {
+if(els.atExchange) els.atExchange.addEventListener('change', () => {
   state.autotrade.exchange = els.atExchange.value;
   syncAtModeToggle();
   renderBalances();
@@ -1314,16 +1328,18 @@ els.atExchange.addEventListener('change', () => {
 export function initAutotrade(){
   try{
     restore();
-    els.atProxyUrl.value = maskProxyUrl(state.verifyProxyUrl || DEFAULT_VERIFY_PROXY_URL);
-    els.atProxyUrl.setAttribute('readonly', 'readonly');
-    els.atProxyUrl.title = 'Managed automatically — verification is pre-configured for every device, no setup needed.';
+    if(els.atProxyUrl){
+      els.atProxyUrl.value = maskProxyUrl(state.verifyProxyUrl || DEFAULT_VERIFY_PROXY_URL);
+      els.atProxyUrl.setAttribute('readonly', 'readonly');
+      els.atProxyUrl.title = 'Managed automatically — verification is pre-configured for every device, no setup needed.';
+    }
     renderExchangeOptions();
     renderConnectRows();
     renderBalances();
     ensureDay();
-    els.atTestMode.checked = !!state.autotrade.testMode;
-    els.atLiveExecution.checked = false; // always starts unarmed — see restore()
-    els.atArmRow.style.display = 'none';
+    if(els.atTestMode) els.atTestMode.checked = !!state.autotrade.testMode;
+    if(els.atLiveExecution) els.atLiveExecution.checked = false; // always starts unarmed — see restore()
+    if(els.atArmRow) els.atArmRow.style.display = 'none';
     syncStartBalanceField();
     if(els.atModeAutoBtn) els.atModeAutoBtn.addEventListener('click', () => setAtTradeMode('auto'));
     if(els.atModeManualBtn) els.atModeManualBtn.addEventListener('click', () => setAtTradeMode('manual'));
@@ -1332,7 +1348,7 @@ export function initAutotrade(){
     setAtTradeMode(state.autotrade.tradeMode || 'auto');
     renderAutotradeStatus();
     // If Autotrade was left ON from a previous session (page refresh), resume it.
-    if(state.autotrade.enabled && !state.autotrade.targetReached){
+    if(els.atExchange && state.autotrade.enabled && !state.autotrade.targetReached){
       const intervalMs = Math.max(5, parseFloat(els.atInterval.value) || 15) * 1000;
       state.autotrade.running = true;
       els.atExchange.disabled = true;
