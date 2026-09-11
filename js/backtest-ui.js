@@ -131,6 +131,19 @@ async function runBacktestFlow(){
     return;
   }
 
+  // Sanity-check coverage BEFORE simulating: what was actually fetched,
+  // in days, versus what was requested — so a fetch that silently comes
+  // up short (a pagination bug, a symbol with less exchange history than
+  // the range asked for, etc.) is visible immediately instead of only
+  // showing up as "surprisingly few trades" after the fact.
+  const requestedDays = (range.endMs - range.startMs) / 86_400_000;
+  const coverage = usableSymbols.slice(0, 4).map(s => {
+    const arr = candlesBySymbol[s];
+    const gotDays = arr.length ? (arr[arr.length - 1].t - arr[0].t) / 86_400_000 : 0;
+    return `${s}: ${arr.length} bars (~${gotDays.toFixed(1)}d)`;
+  }).join(', ');
+  console.log(`[Backtest] Requested ~${requestedDays.toFixed(1)}d — got: ${coverage}${usableSymbols.length > 4 ? ', …' : ''}`);
+
   const cfg = {
     exchange, strategies, minConfidence, riskPctPerTrade, leverage,
     feeConfig: { ...DEFAULT_FEE_CONFIG, [exchange]: { makerPct, takerPct } },
@@ -148,7 +161,7 @@ async function runBacktestFlow(){
     showBtMessage(
       failed.length
         ? `Done. Skipped: ${failed.join('; ')}.`
-        : `Done — ${result.barsEvaluated.toLocaleString()} symbol-bars evaluated across ${usableSymbols.length} symbol(s).`,
+        : `Done — ${result.barsEvaluated.toLocaleString()} symbol-bars evaluated across ${usableSymbols.length} symbol(s). Coverage: ${coverage}${usableSymbols.length > 4 ? ', …' : ''} (requested ~${requestedDays.toFixed(1)}d).`,
       failed.length ? 'error' : 'ok'
     );
   }catch(err){

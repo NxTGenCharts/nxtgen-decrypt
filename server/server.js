@@ -1178,24 +1178,51 @@ async function fetchBinanceFuturesKlines(symbol, interval, startMs, endMs){
   return out;
 }
 
+// Bybit's /v5/market/kline does NOT behave like Binance's when a
+// start+end window spans more bars than `limit`: it anchors to `end` and
+// hands back the most recent `limit` candles inside the window, not the
+// oldest ones from `start`. A forward-cursor loop (like Binance's, and
+// like this used to be) therefore only ever fetches one page near
+// `endMs` before its own cursor jumps almost all the way to `endMs` and
+// the loop exits — silently capping every fetch at ~limit bars of the
+// MOST RECENT history, regardless of how far back `startMs` actually
+// asked for. This is what made the Backtest tab show the same small
+// handful of trades clustered on one recent date no matter which date
+// range (7/30/60/90 days) was selected — the extra history was simply
+// never being fetched. Paging backward from `endMs` instead — each
+// request asks for "everything up to this cursor", then moves the
+// cursor to just before the oldest bar that page returned — matches how
+// Bybit actually anchors the window and reliably walks the full range.
 async function fetchBybitLinearKlines(symbol, interval, startMs, endMs){
-  const out = [];
-  let cursor = startMs;
-  while(cursor < endMs){
-    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${encodeURIComponent(symbol)}&interval=${BYBIT_KLINE_INTERVAL[interval]}&start=${cursor}&end=${endMs}&limit=1000`;
+  const pages = []; // oldest page unshifted to the front, so pages[0] is the oldest chunk once the loop ends
+  let cursorEnd = endMs;
+  let guard = 0;
+  while(cursorEnd > startMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
+    guard++;
+    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${encodeURIComponent(symbol)}&interval=${BYBIT_KLINE_INTERVAL[interval]}&start=${startMs}&end=${cursorEnd}&limit=1000`;
     const r = await fetch(url);
     if(!r.ok) throw new Error(`Bybit klines HTTP ${r.status}`);
     const data = await r.json();
     if(data.retCode !== 0) throw new Error(`Bybit klines error: ${data.retMsg || data.retCode}`);
     const rows = (data.result && data.result.list) || [];
     if(!rows.length) break;
-    const chron = rows.slice().reverse(); // Bybit returns newest-first
-    for(const row of chron) out.push({ t: +row[0], o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] });
-    const lastT = +chron[chron.length - 1][0];
-    if(lastT <= cursor) break;
-    cursor = lastT + 1;
-    if(rows.length < 1000) break;
+    const chron = rows.slice().reverse().map(row => ({ t: +row[0], o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] })); // Bybit returns newest-first
+    pages.unshift(chron);
+    const oldestT = chron[0].t;
+    if(oldestT <= startMs) break; // this page already reached back to (or past) the requested start — done
+    if(oldestT >= cursorEnd) break; // stuck page (didn't move backward at all) — stop rather than loop forever
+    cursorEnd = oldestT - 1; // next page: everything up to just before this page's oldest bar
   }
+  const seenT = new Set();
+  const out = [];
+  for(const page of pages){
+    for(const c of page){
+      if(c.t < startMs || c.t > endMs || seenT.has(c.t)) continue;
+      seenT.add(c.t);
+      out.push(c);
+    }
+  }
+  out.sort((a, b) => a.t - b.t);
   return out;
 }
 
