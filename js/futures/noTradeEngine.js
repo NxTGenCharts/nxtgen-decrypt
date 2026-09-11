@@ -50,18 +50,32 @@ export function evaluateNoTradeFilters({
   if(feeToStopRatioPct != null && feeToStopRatioPct > 35) reasons.push(`Round-trip fees are ${feeToStopRatioPct.toFixed(0)}% of the stop distance (cap 35%) — too fee-heavy relative to risk`);
 
   if(dayState){
-    if(dayState.dailyPnlPct <= -RISK_DEFAULTS.maxDailyLossPct) reasons.push('Daily drawdown limit reached — trading stopped for the day');
+    // dayState.maxDailyLossPct is a per-session, user-set override (see
+    // js/futures-ui.js's initLiveMaxDailyLossInput, capped at 50%) —
+    // falls back to the fixed RISK_DEFAULTS value for Paper mode dayState
+    // objects, which don't set it.
+    const maxDailyLossPct = dayState.maxDailyLossPct != null ? dayState.maxDailyLossPct : RISK_DEFAULTS.maxDailyLossPct;
+    if(dayState.dailyPnlPct <= -maxDailyLossPct) reasons.push(`Daily drawdown limit reached (-${maxDailyLossPct}%) — trading stopped for the day`);
     // Symmetric to the loss cap above, per an explicit request: stop for
     // the day once a genuine profit target is banked, not just once a
     // loss limit is hit. Resets the same way the loss cap does — at the
     // next Reset Session / new day, not by any manual re-arm ritual.
-    if(dayState.dailyPnlPct >= RISK_DEFAULTS.dailyProfitTargetPct) reasons.push(`Daily profit target (+${RISK_DEFAULTS.dailyProfitTargetPct}%) reached — trading stopped for the day`);
-    if(dayState.consecutiveLosses >= RISK_DEFAULTS.maxConsecutiveLosses){
-      const cooldownUntil = (dayState.lastLossAt || 0) + RISK_DEFAULTS.coolingOffMinutes * 60_000;
-      if(now < cooldownUntil){
-        reasons.push(`${dayState.consecutiveLosses} consecutive losses — cooling off for ${RISK_DEFAULTS.coolingOffMinutes}min`);
-      }
-    }
+    // dayState.dailyProfitTargetPct is a per-session, user-set override
+    // (see js/futures-ui.js's initLiveDailyProfitTargetInput, capped at
+    // 50%) — falls back to the fixed RISK_DEFAULTS value for Paper mode
+    // dayState objects, which don't set it.
+    const profitTargetPct = dayState.dailyProfitTargetPct != null ? dayState.dailyProfitTargetPct : RISK_DEFAULTS.dailyProfitTargetPct;
+    if(dayState.dailyPnlPct >= profitTargetPct) reasons.push(`Daily profit target (+${profitTargetPct}%) reached — trading stopped for the day`);
+    // NOTE: there is deliberately no "N consecutive losses → cool off /
+    // stop" filter here anymore. This bot is meant to run continuously —
+    // 24/7 — and only stop when the user clicks Stop Live/Demo Trading
+    // (or the daily loss/profit limits just above are hit); a losing
+    // streak on its own should never pause or halt it. See
+    // js/futures-ui.js's checkAdaptiveCircuitBreaker for the equivalent
+    // removal on the Live/Demo side (it still tightens confidence after
+    // losses — pickier, not stopped) and RISK_DEFAULTS.maxConsecutiveLosses/
+    // coolingOffMinutes (risk.js), which are now unused by this function
+    // and kept only for anything else that might still reference them.
     if(dayState.openPositions >= RISK_DEFAULTS.maxSimultaneousPositions) reasons.push('Max simultaneous positions already open');
     // A count check alone ("fewer than N positions open") never stops a
     // SECOND entry on a symbol that's already open — if maxSimultaneousPositions

@@ -44,7 +44,12 @@ function getBtcShock(){ return mockMarket.btcShock(); }
 // data is still read separately for the cross-market "BTC shock" filter
 // (getBtcShock above / isAltcoin below), which every remaining altcoin
 // signal is still checked against.
-export const EXCLUDED_FUTURES_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'LTCUSDT', 'DOGEUSDT', 'BNBUSDT']);
+// CLUSDT is also excluded: it's a TradFi-underlying pair (WTI Crude Oil),
+// not a normal perpetual, and it doesn't trade on Bybit's Demo account
+// at all — the engine could still "approve" it in Demo mode and then have
+// the order rejected at the exchange, or (worse) behave inconsistently
+// between Demo and Live. Excluded from both, same as everything else here.
+export const EXCLUDED_FUTURES_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'LTCUSDT', 'DOGEUSDT', 'BNBUSDT', 'CLUSDT']);
 export const TRADEABLE_FUTURES_SYMBOLS = FUTURES_SYMBOLS.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s));
 
 // Ensemble: each setup already carries its own direction+confidence.

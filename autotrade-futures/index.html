@@ -298,6 +298,16 @@
         <input id="fuLiveRiskPct" type="number" min="1" max="50" step="0.5" value="1">
       </div>
 
+      <div class="field" style="max-width:320px;margin-bottom:10px;">
+        <label for="fuLiveDailyProfitTargetPct" title="Once real profit for the session reaches this % of the starting balance, no new entries are placed for the rest of the session (open positions still run their own TP/SL as normal) — a deliberate stop-for-the-day, not a pause. Adjustable 1-50% of the selected exchange's account size for this session. Does not stop the bot on losses — only a manual Stop Live/Demo Trading click does that.">Daily Profit Target (%)</label>
+        <input id="fuLiveDailyProfitTargetPct" type="number" min="1" max="50" step="0.5" value="10">
+      </div>
+
+      <div class="field" style="max-width:320px;margin-bottom:10px;">
+        <label for="fuLiveMaxDailyLossPct" title="Once real loss for the session reaches this % of the starting balance, no new entries are placed for the rest of the session (open positions still run their own TP/SL as normal, and the bot keeps scanning — it just won't act on anything until Reset Session or the next day). Adjustable 0.5-15%.">Max Daily Loss (%)</label>
+        <input id="fuLiveMaxDailyLossPct" type="number" min="0.5" max="15" step="0.5" value="2">
+      </div>
+
       <div class="field" style="max-width:420px;margin-bottom:10px;">
         <label title="Auto: the moment a signal clears every check, it's placed automatically — no click needed. Manual: the same scan and checks run every cycle, but a qualifying signal is shown here and waits for you to click Execute — nothing is placed on its own. Applies to real Live/Demo trading only, not Paper.">Trade Mode</label>
         <div class="mode-toggle" role="group" aria-label="Futures trade mode">

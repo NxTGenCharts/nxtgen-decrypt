@@ -216,6 +216,8 @@ export const els = {
   fuMinNetProfit: document.getElementById('fuMinNetProfit'),
   fuRiskPct: document.getElementById('fuRiskPct'),
   fuLiveRiskPct: document.getElementById('fuLiveRiskPct'),
+  fuLiveDailyProfitTargetPct: document.getElementById('fuLiveDailyProfitTargetPct'),
+  fuLiveMaxDailyLossPct: document.getElementById('fuLiveMaxDailyLossPct'),
   fuLiveModeAutoBtn: document.getElementById('fuLiveModeAutoBtn'),
   fuLiveModeManualBtn: document.getElementById('fuLiveModeManualBtn'),
   fuLivePendingCard: document.getElementById('fuLivePendingCard'),

@@ -678,9 +678,18 @@ async function placeBybitFuturesOrder(mode, apiKey, secretKey, { symbol, side, r
 
   await bybitSetLeverage(mode, apiKey, secretKey, symbol, clampedLeverage);
 
+  // orderLinkId is Bybit's own custom client-order-ID field — stamping
+  // every order this app places with an "nxtgen-" prefix (entry below,
+  // and each TP leg further down) tags them as bot-originated directly on
+  // the exchange side, visible in Bybit's own Order History/API for that
+  // orderId, without needing any separate lookup table. Uses a short
+  // random suffix (not just Date.now()) so a TP leg placed in the same
+  // millisecond as another call can't collide.
+  const botTag = () => `nxtgen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const entryBody = {
     category: 'linear', symbol, side, orderType: 'Market', qty: qty.toString(),
     timeInForce: 'IOC', positionIdx: 0, // one-way mode — see note below if this ever rejects
+    orderLinkId: `nxtgen-entry-${botTag()}`,
   };
   if(!hasLegs){
     // Legacy single-TP path — TP/SL embedded directly on the entry order.
@@ -768,6 +777,7 @@ async function placeBybitFuturesOrder(mode, apiKey, secretKey, { symbol, side, r
       // a LONG's take-profit needs price to rise; a SHORT's needs it to fall.
       triggerDirection: isLong ? 1 : 2,
       reduceOnly: true, positionIdx: 0,
+      orderLinkId: `nxtgen-tp${i + 1}-${botTag()}`,
     };
     if(isLast){
       const remainderQty = Math.max(0, qty - allocatedQty);
@@ -822,7 +832,33 @@ async function getBybitPosition(mode, apiKey, secretKey, symbol){
     size: parseFloat(pos.size), side: pos.side, avgPrice: parseFloat(pos.avgPrice || '0'),
     markPrice: parseFloat(pos.markPrice || '0'), unrealisedPnl: parseFloat(pos.unrealisedPnl || '0'),
     leverage: parseFloat(pos.leverage || '0'), liqPrice: pos.liqPrice ? parseFloat(pos.liqPrice) : null,
+    // Cumulative realized P&L on THIS still-open position (resets to 0 when
+    // the position fully closes and a fresh one opens) — this is what lets
+    // the client detect a TP1/TP2 partial fill (size drops, curRealisedPnl
+    // jumps) between two polls and log it, instead of only ever recording
+    // one row for the whole position's lifetime at final close. Bybit
+    // returns this on every /v5/position/list response, no extra call needed.
+    curRealisedPnl: pos.curRealisedPnl != null ? parseFloat(pos.curRealisedPnl) : null,
   };
+}
+
+// Lists EVERY open Bybit linear position for the account (no symbol
+// filter — settleCoin scopes it to USDT-margined perps), used for
+// broad reconciliation: catching a real open position this app never
+// placed (or lost track of — a different browser/session, a manual
+// open on the exchange itself, cleared localStorage, etc.) that the
+// per-symbol preflight/monitoring checks would otherwise never surface
+// until/unless an order attempt happened to target that exact symbol.
+async function getAllBybitPositions(mode, apiKey, secretKey){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const data = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/position/list', 'category=linear&settleCoin=USDT');
+  const list = data.result?.list || [];
+  return list.filter(p => parseFloat(p.size || '0') !== 0).map(p => ({
+    symbol: p.symbol, size: parseFloat(p.size), side: p.side, avgPrice: parseFloat(p.avgPrice || '0'),
+    markPrice: parseFloat(p.markPrice || '0'), unrealisedPnl: parseFloat(p.unrealisedPnl || '0'),
+    leverage: parseFloat(p.leverage || '0'), liqPrice: p.liqPrice ? parseFloat(p.liqPrice) : null,
+    curRealisedPnl: p.curRealisedPnl != null ? parseFloat(p.curRealisedPnl) : null,
+  }));
 }
 
 // Once getBybitPosition reports a symbol closed, this pulls the actual
@@ -2096,6 +2132,37 @@ app.post('/api/order', async (req, res) => {
 // so extending to the others later is additive, not a rewrite. ----
 const FUTURES_ORDER_PLACERS = { bybit: placeBybitFuturesOrder, binance: placeBinanceFuturesOrder, gateio: placeGateioFuturesOrder, mexc: placeMexcFuturesOrder, bitget: placeBitgetFuturesOrder };
 const FUTURES_POSITION_GETTERS = { bybit: getBybitPosition, binance: getBinanceFuturesPosition, gateio: getGateioFuturesPosition, mexc: getMexcFuturesPosition, bitget: getBitgetFuturesPosition };
+// Account-wide "list everything open" getters, for the broad reconciliation
+// route below — bybit only for now (getAllBybitPositions above); other
+// exchanges keep working exactly as before (per-symbol preflight/monitoring
+// only) until each gets its own all-positions getter added here.
+const FUTURES_ALL_POSITIONS_GETTERS = { bybit: getAllBybitPositions };
+
+// Broad reconciliation: "what's actually open on this account right now,
+// for ANY symbol" — not scoped to one symbol like /api/futures/position.
+// Called once per live cycle (see js/futures-ui.js's runLiveCycleInner) so
+// a real position this app isn't currently tracking (never placed by it,
+// or lost track of after a reload/localStorage clear/different browser)
+// gets surfaced and can be adopted into tracking, instead of silently
+// running unmonitored and invisible in this app's own UI until something
+// happens to target that exact symbol again.
+app.post('/api/futures/positions', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey, and secretKey are required.' });
+  }
+  const getter = FUTURES_ALL_POSITIONS_GETTERS[exchange];
+  if(!getter){
+    return res.json({ ok:true, supported:false, positions: [] }); // exchange not yet migrated to broad reconciliation — not an error
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const positions = await getter(netMode, apiKey, secretKey, passphrase);
+    return res.json({ ok:true, supported:true, positions });
+  }catch(err){
+    return res.json({ ok:false, message: `Could not list open ${exchange} positions: ${err.message}` });
+  }
+});
 const FUTURES_CLOSED_PNL_GETTERS = { bybit: getBybitClosedPnl, binance: getBinanceFuturesRealizedResult, gateio: getGateioFuturesRealizedResult, mexc: getMexcFuturesRealizedResult, bitget: getBitgetFuturesRealizedResult };
 // Moving the SL to a fee-adjusted breakeven once TP2 fully closes
 // (requirements #6/#7) is only wired up for Binance and Bybit so far,
@@ -2339,7 +2406,12 @@ app.post('/api/futures/order', async (req, res) => {
     try{
       const existing = await positionGetterPreflight(netMode, apiKey, secretKey, symbol, passphrase);
       if(existing){
-        return res.json({ ok:false, rejected:true, message: `${exchange} already has an open ${symbol} position (size ${existing.size}) — refusing to place a second entry on top of it. If this app's own display shows no open position, its memory of this session is out of sync with the real account; check ${symbol} directly on ${exchange} before doing anything else.` });
+        // existingPosition is returned (not just the message string) so the
+        // client can ADOPT this real position into its own tracking right
+        // here, instead of just showing an error and continuing to display
+        // "None" every cycle after — see js/futures-ui.js's
+        // placeLiveEntryOrder handling of result.existingPosition.
+        return res.json({ ok:false, rejected:true, message: `${exchange} already has an open ${symbol} position (size ${existing.size}) — refusing to place a second entry on top of it. If this app's own display shows no open position, its memory of this session is out of sync with the real account; check ${symbol} directly on ${exchange} before doing anything else.`, existingPosition: existing });
       }
     }catch(err){
       // Couldn't confirm either way (rate limit, transient error) — do
