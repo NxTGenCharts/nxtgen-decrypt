@@ -2,9 +2,9 @@
 // engine.js — the orchestrator. runScanCycle() produces one
 // "Live Opportunity Scanner" row per symbol (APPROVED or
 // REJECTED-with-reasons), and managePositions() advances any open
-// paper trades against the latest price action: TP1 @ 1.0R closes 30%
-// (original stop unchanged), TP2 @ 1.5R closes another 30% (stop THEN
-// moves to a fee-adjusted breakeven for what's left), TP3 @ 2.25R
+// paper trades against the latest price action: TP1 @ 1.5R closes 30%
+// (original stop unchanged), TP2 @ 2.5R closes another 30% (stop THEN
+// moves to a fee-adjusted breakeven for what's left), TP3 @ 3.25R
 // closes the remaining 40% — see costs.js's buildTpLevels/
 // feeAdjustedBreakevenPrice for where the actual prices come from.
 //
@@ -133,14 +133,14 @@ function buildLevels(snap, direction, setupType){
   return { entry, stopPrice, stopDistancePct, atrPct };
 }
 
-// Attaches the fixed 1.0R / 1.5R / 2.25R partial take-profit structure
+// Attaches the fixed 1.5R / 2.5R / 3.25R partial take-profit structure
 // (buildTpLevels, costs.js) to whatever stop-distance buildLevels()
 // above already produced for this setup — same structure for every
 // setup type now (previously AI Scalp/Range Scalp were single-exit and
 // the trend/breakout setups used a per-strategy reward:risk ratio; the
-// exact TP1/TP2/TP3-at-1.0R/1.5R/2.25R structure requested replaces
+// exact TP1/TP2/TP3-at-1.5R/2.5R/3.25R structure requested replaces
 // both). entryFeePct/exitFeePct/spreadPct/slippagePct are what makes
-// TP1 fee-aware (requirement #3) instead of a raw 1.0R distance that
+// TP1 fee-aware (requirement #3) instead of a raw 1.5R distance that
 // could still be a net loss after real costs on a very tight stop.
 function attachTpLevels(levels, direction, feeInputs){
   const tp = buildTpLevels({
@@ -248,10 +248,9 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   // Weighted across all 3 legs (0.3 x TP1's R + 0.3 x TP2's R + 0.4 x
   // TP3's R) rather than just TP1's — this is what actually reflects
   // the whole trade's reward:risk now that it exits in three pieces,
-  // not one. With the fixed structure this is 1.65R before any fee
-  // bump to TP1 (never lower, since a bump only pushes TP1 further
-  // out) — see the fixed minRR floor below rather than a per-strategy
-  // target, since a fixed structure can't chase a per-strategy ratio.
+  // not one. With the fixed structure this is exactly 2.5R (never
+  // lower — a fee bump only pushes TP1 further out, which can only
+  // raise the weighted figure) — see the minRR floor below.
   const riskRewardRatio = levels.stopDistancePct > 0
     ? (levels.tp1Pct * levels.tpFractions.tp1 + levels.tp2Pct * levels.tpFractions.tp2 + levels.tp3Pct * levels.tpFractions.tp3) / levels.stopDistancePct
     : 0;
@@ -260,19 +259,21 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   const isAltcoin = symbol !== 'BTCUSDT';
 
   const minConfidence = cfg.highSelectivity ? 82 : (cfg.minConfidence ?? 60);
-  // Fixed, strategy-independent sanity floor now that TP1/TP2/TP3 are
-  // always built at the same 1.0R/1.5R/2.25R structure (weighted
-  // ~1.65R) rather than scaled per-strategy — comfortably below that
-  // fixed weighted ratio so this is a genuine backstop (catches a
-  // real bug in the TP math, e.g. a degenerate stop distance) rather
-  // than a target the construction above is chasing. NOTE: the old
-  // per-strategy Reward:Risk setting in the UI (cfg.strategyRR /
+  // Sanity floor now that TP1/TP2/TP3 are always built at the same
+  // 1.5R/2.5R/3.25R structure (weighted exactly 2.5R) rather than
+  // scaled per-strategy. Set to 2.0 — the "at least 1:2R" requirement
+  // itself, not just a backstop below it — so a signal only reaches
+  // this gate with room to spare (the fixed structure is always 2.5R
+  // pre-bump, and a TP1 fee-bump only raises it further); this still
+  // catches a genuine bug in the TP math (e.g. a degenerate stop
+  // distance) without ever approving something under 1:2. NOTE: the
+  // old per-strategy Reward:Risk setting in the UI (cfg.strategyRR /
   // STRATEGY_REGISTRY.defaultRR) no longer drives TP placement or this
   // gate — it's superseded by the fixed structure requested. That
   // control is left in place but is currently a no-op; worth removing
   // from the UI in a follow-up if it shouldn't linger there looking
   // live.
-  const minRR = 1.2;
+  const minRR = 2.0;
   // This floor is unrelated to R:R — it's still true that both scalp
   // strategies' gross targets are comparatively small in absolute %
   // terms, so the default 0.30% net-profit floor (sized for the

@@ -61,18 +61,28 @@ export function estimateCosts({
 // Fixed partial take-profit structure, used everywhere a trade's exits
 // get built (Paper mode's managePositions in engine.js, and the real
 // order legs placed for Live/Demo — see futures-ui.js/server.js):
-//   TP1 @ 1.0R  — closes 30% of the position
-//   TP2 @ 1.5R  — closes another 30%
-//   TP3 @ 2.25R — closes the remaining 40%
+//   TP1 @ 1.5R  — closes 30% of the position
+//   TP2 @ 2.5R  — closes another 30%
+//   TP3 @ 3.25R — closes the remaining 40%
 // "R" is always THIS trade's own initial stop-loss distance
 // (stopDistancePct, computed the same way it always was — this module
 // never touches how the stop itself is calculated), never a flat %, so
 // every trade's exits scale to its own risk. Fractions sum to 1.0.
+// Weighted across the three legs (0.3x1.5 + 0.3x2.5 + 0.4x3.25) this is
+// exactly 2.5R — inside the requested "at least 1:2R, up to 1:3R,
+// preferably 1:2.5R" band on every single trade, not just on average.
+// Previously 1.0R/1.5R/2.25R (weighted ~1.65R, BELOW the 1:2 floor
+// requirement itself, mathematically requiring an unrealistically high
+// win rate just to break even) — real Live/Demo and backtest results
+// both showed the win rate this fixed structure actually produces
+// (25-40%) losing money at that old weighted ratio; at a genuine 2.5R
+// the same win rates are solidly profitable (breakeven is ~29% at 2.5R
+// before fees, vs ~38% at 1.65R).
 // =============================================================
 export const TP_LEVELS = [
-  { id: 'tp1', rMultiple: 1.0, closeFraction: 0.30 },
-  { id: 'tp2', rMultiple: 1.5, closeFraction: 0.30 },
-  { id: 'tp3', rMultiple: 2.25, closeFraction: 0.40 },
+  { id: 'tp1', rMultiple: 1.5, closeFraction: 0.30 },
+  { id: 'tp2', rMultiple: 2.5, closeFraction: 0.30 },
+  { id: 'tp3', rMultiple: 3.25, closeFraction: 0.40 },
 ];
 
 // Extra headroom above the exact fee-break-even point so a "profitable"
@@ -90,12 +100,12 @@ export function minProfitableMovePct({ entryFeePct, exitFeePct, spreadPct, slipp
 }
 
 // Builds the 3 TP price levels from the stop distance (1R). TP1 is
-// bumped out past its raw 1.0R distance whenever that distance alone
+// bumped out past its raw 1.5R distance whenever that distance alone
 // wouldn't clear real round-trip costs with the safety margin above —
 // this is what guarantees requirement #3 (TP1 must never be a level
 // where closing 30% nets a loss after fees). TP2/TP3 are then kept
 // strictly beyond whatever TP1 ended up at (preserving increasing
-// levels) rather than left sitting at their own un-bumped 1.5R/2.25R,
+// levels) rather than left sitting at their own un-bumped 2.5R/3.25R,
 // which could otherwise land behind a bumped TP1 on a very tight stop.
 export function buildTpLevels({ entry, direction, stopDistancePct, entryFeePct, exitFeePct, spreadPct, slippagePct }){
   const sign = direction === 'LONG' ? 1 : -1;

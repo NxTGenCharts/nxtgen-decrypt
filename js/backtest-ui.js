@@ -77,11 +77,17 @@ function computeRangeMs(){
   return { startMs, endMs: Math.min(customEndMs, endMs) };
 }
 
-async function fetchSymbolKlines(exchange, symbol, startMs, endMs){
-  const data = await callProxy('/api/backtest/klines', { exchange, symbol, interval: '5m', startMs, endMs });
+async function fetchSymbolKlines(exchange, symbol, interval, startMs, endMs){
+  const data = await callProxy('/api/backtest/klines', { exchange, symbol, interval, startMs, endMs });
   if(!data.ok) throw new Error(data.message || `Could not fetch ${symbol} history.`);
   return data.candles || [];
 }
+
+// Minutes-per-bar for each selectable timeframe — used to size the
+// warmup window and the M15/H1 aggregation group sizes in backtest.js
+// (runBacktest's intervalMinutes param) relative to whichever timeframe
+// was actually fetched, instead of backtest.js silently assuming 5m.
+const TIMEFRAME_MINUTES = { '3m': 3, '5m': 5, '15m': 15, '30m': 30, '1h': 60 };
 
 async function runBacktestFlow(){
   const range = computeRangeMs();
@@ -92,6 +98,8 @@ async function runBacktestFlow(){
   if(!Object.values(strategies).some(Boolean)){ showBtMessage('Enable at least one strategy to test.', 'error'); return; }
 
   const exchange = els.btExchange.value;
+  const timeframe = els.btTimeframe ? els.btTimeframe.value : '5m';
+  const intervalMinutes = TIMEFRAME_MINUTES[timeframe] || 5;
   const startingEquity = Math.max(100, parseFloat(els.btStartingBalance.value) || 10000);
   const riskPctPerTrade = Math.min(50, Math.max(0.1, parseFloat(els.btRiskPct.value) || 1));
   const leverage = Math.min(10, Math.max(1, parseInt(els.btLeverage.value, 10) || 5));
@@ -116,7 +124,7 @@ async function runBacktestFlow(){
     const sym = fetchList[i];
     els.btProgress.textContent = `Fetching history: ${i + 1}/${fetchList.length} (${sym})`;
     try{
-      candlesBySymbol[sym] = await fetchSymbolKlines(exchange, sym, range.startMs, range.endMs);
+      candlesBySymbol[sym] = await fetchSymbolKlines(exchange, sym, timeframe, range.startMs, range.endMs);
       if(!candlesBySymbol[sym].length) failed.push(`${sym} (no data returned)`);
     }catch(err){
       failed.push(`${sym} (${err.message})`);
@@ -152,7 +160,7 @@ async function runBacktestFlow(){
   showBtMessage(failed.length ? `Simulating (skipped: ${failed.join('; ')})…` : 'Simulating…');
   try{
     const result = await runBacktest({
-      candlesBySymbol, symbols: usableSymbols, cfg, startingEquity,
+      candlesBySymbol, symbols: usableSymbols, cfg, startingEquity, intervalMinutes,
       metaOverrides: { spreadPct, fundingRatePct },
       onProgress: (frac) => { els.btProgress.textContent = `Simulating… ${Math.round(frac * 100)}%`; },
     });

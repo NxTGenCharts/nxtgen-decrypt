@@ -29,20 +29,13 @@ export const RISK_DEFAULTS = {
   dailyProfitTargetPct: 10.0,
   maxConsecutiveLosses: 3,
   coolingOffMinutes: 60,
-  // Every trade is now constructed so its take-profit sits at exactly
-  // this multiple of its stop-loss distance away (see engine.js's
-  // applyRewardRiskFloor) — a 1% loss targets a 2% (=1% x 2) gain.
-  // FIXED at 2.0 system-wide as of the fee-drag fix below — no longer a
-  // user-adjustable field. Real Live/Demo trading on Bybit exposed that
-  // the previous 1.2 ratio, combined with AI Scalp's old 0.15% stop
-  // floor, needed a ~79-82% win rate just to break even once real
-  // round-trip fees (~0.10-0.12% on most of these exchanges) were
-  // included — a bar this kind of momentum scalp was never going to
-  // clear. At 2.0, combined with the wider 0.35% stop floor (see
-  // buildLevels in engine.js), breakeven drops to roughly 37-45%
-  // depending on exchange fees — see the AI Futures Engine tab's footer
-  // for the full account and the numbers behind both claims.
-  riskRewardRatio: 2.0,
+  // Every trade is constructed with a fixed 1.5R/2.5R/3.25R TP1/TP2/TP3
+  // structure (TP_LEVELS, costs.js) that weights out to exactly 2.5R
+  // overall — this field itself is no longer read anywhere (TP
+  // placement comes straight from TP_LEVELS, not from here) and is kept
+  // only as documentation of that same 2.5R figure; update TP_LEVELS if
+  // that structure ever changes; this won't follow it automatically.
+  riskRewardRatio: 2.5,
 };
 
 // Total risk allowed open across all simultaneous positions at once. This

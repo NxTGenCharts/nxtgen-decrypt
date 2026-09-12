@@ -218,6 +218,8 @@ export const els = {
   fuLiveRiskPct: document.getElementById('fuLiveRiskPct'),
   fuLiveDailyProfitTargetPct: document.getElementById('fuLiveDailyProfitTargetPct'),
   fuLiveMaxDailyLossPct: document.getElementById('fuLiveMaxDailyLossPct'),
+  btTimeframe: document.getElementById('btTimeframe'),
+  fuLiveTimeframe: document.getElementById('fuLiveTimeframe'),
   fuLiveModeAutoBtn: document.getElementById('fuLiveModeAutoBtn'),
   fuLiveModeManualBtn: document.getElementById('fuLiveModeManualBtn'),
   fuLivePendingCard: document.getElementById('fuLivePendingCard'),

@@ -331,16 +331,27 @@ export function callProxy(path, body){
   });
 }
 
-function fetchLiveSnapshot(exchange, symbol){
+function fetchLiveSnapshot(exchange, symbol, timeframe){
   const proxyUrl = (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
   if(!proxyUrl) return Promise.reject(new Error('No verification proxy configured.'));
-  return fetch(`${proxyUrl}/api/futures/snapshot?exchange=${exchange}&symbol=${symbol}`)
+  const tf = timeframe || '5m';
+  return fetch(`${proxyUrl}/api/futures/snapshot?exchange=${exchange}&symbol=${symbol}&interval=${tf}`)
     .then(res => res.json().catch(() => null))
     .then(data => {
       if(!data || !data.ok) throw new Error((data && data.message) || 'Snapshot fetch failed.');
+      // timeframeFallback: the requested timeframe isn't natively supported
+      // by this exchange (Gate.io/MEXC have no 3m kline; see server.js's
+      // SNAPSHOT_TIMEFRAME_MAP) — server already substituted 5m so the
+      // scan still runs, this just surfaces it once instead of silently
+      // trading on a different timeframe than what's selected.
+      if(data.timeframeFallback && !warnedTimeframeFallback.has(exchange)){
+        warnedTimeframeFallback.add(exchange);
+        showLiveMessage(`${exchange} doesn't support the ${tf} timeframe for live klines — using 5m for ${exchange} instead.`, 'error');
+      }
       return data.snapshot;
     });
 }
+const warnedTimeframeFallback = new Set(); // one warning per exchange per page load, not one per cycle
 
 function liveCred(exchange, mode){
   const cred = state.exchangeCreds[exchange] && state.exchangeCreds[exchange][mode];
@@ -705,8 +716,9 @@ async function runLiveCycleInner(){
   }
   const fetchSymbols = ['BTCUSDT', ...universe.top.filter(s => s !== 'BTCUSDT')];
   const snapshots = {};
+  const timeframe = fu().liveTimeframe || '5m';
   await Promise.all(fetchSymbols.map(async symbol => {
-    try{ snapshots[symbol] = await fetchLiveSnapshot(exchange, symbol); }catch(err){ /* skip this symbol this cycle */ }
+    try{ snapshots[symbol] = await fetchLiveSnapshot(exchange, symbol, timeframe); }catch(err){ /* skip this symbol this cycle */ }
   }));
   if(!snapshots.BTCUSDT){
     showLiveMessage(`Could not fetch real BTC market data from ${exchange} this cycle (needed for the shock filter) — skipping.`, 'error');
@@ -928,9 +940,10 @@ async function executeLivePendingSignal(){
     strategies: f2.strategies, strategyRR: f2.strategyRR,
   };
   let snap, btcSnap;
+  const tf = f2.liveTimeframe || '5m';
   try{
-    snap = await fetchLiveSnapshot(p.exchange, p.symbol);
-    btcSnap = p.symbol === 'BTCUSDT' ? snap : await fetchLiveSnapshot(p.exchange, 'BTCUSDT');
+    snap = await fetchLiveSnapshot(p.exchange, p.symbol, tf);
+    btcSnap = p.symbol === 'BTCUSDT' ? snap : await fetchLiveSnapshot(p.exchange, 'BTCUSDT', tf);
   }catch(err){ snap = null; }
   if(!snap || !btcSnap){
     showLiveMessage(`Could not fetch fresh market data for ${p.symbol} — not executing. It'll refresh again next scan cycle.`, 'error');
@@ -1910,6 +1923,24 @@ function initLiveMaxDailyLossInput(){
   }
 }
 
+// Which candle size real Live/Demo trades are evaluated against —
+// previously always 5m, hardcoded in every exchange's snapshot builder
+// (server.js). f.liveTimeframe feeds fetchLiveSnapshot's `interval`
+// query param on every scan cycle and manual-mode re-check; the server
+// substitutes 5m on its own for Gate.io/MEXC, which don't offer a native
+// 3m kline (see server.js's SNAPSHOT_TIMEFRAME_MAP), and that fallback
+// surfaces as a one-time chat message rather than failing silently.
+function initLiveTimeframeInput(){
+  const f = fu();
+  if(!f.liveTimeframe) f.liveTimeframe = '5m';
+  if(els.fuLiveTimeframe){
+    els.fuLiveTimeframe.value = f.liveTimeframe;
+    els.fuLiveTimeframe.addEventListener('change', () => {
+      f.liveTimeframe = els.fuLiveTimeframe.value || '5m';
+    });
+  }
+}
+
 // Resumes MONITORING (never new-order placement — f.liveArmed still
 // resets to false on every load, unchanged) for any real position that
 // was still open when the page last reloaded. See renderLive()'s
@@ -1935,6 +1966,7 @@ export function initFuturesEngine(){
   initRiskPctInputs();
   initLiveDailyProfitTargetInput();
   initLiveMaxDailyLossInput();
+  initLiveTimeframeInput();
   initStrategySelector();
   initLiveTradingControls();
   initTradeLog();

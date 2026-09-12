@@ -42,18 +42,28 @@ export const DEFAULT_BACKTEST_META = {
   liquidityScore: 60,   // 0-100
 };
 
-// Every symbol needs this many 5m bars of its OWN history behind it
+// Every symbol needs enough of its OWN base-timeframe history behind it
 // before it's evaluated at all — regime.js's classifyRegime requires
-// >=30 H1 candles (=360 5m bars) and >=30 M15 candles (=90 5m bars) to
-// return anything but "insufficient history"; 400 bars (~33h) covers
-// both with margin.
-const WARMUP_BARS = 400;
+// >=30 H1 candles and >=30 M15 candles to return anything but
+// "insufficient history". How many BASE bars that translates to depends
+// on which timeframe was actually fetched (intervalMinutes — 3/5/15/30/
+// 60m, see js/backtest-ui.js's TIMEFRAME_MINUTES): at 5m it's the same
+// 400-bar (~33h) figure this always used; at 1h (intervalMinutes=60,
+// where the base IS already H1) it's a much smaller ~30 bars, so a
+// short date range doesn't get entirely eaten by warmup the way a fixed
+// 400 would have. warmupBarsFor() below computes this from the same
+// aggregation group sizes buildSnapshotAt uses, plus a small buffer.
+function m15GroupSize(intervalMinutes){ return Math.max(1, Math.round(15 / intervalMinutes)); }
+function h1GroupSize(intervalMinutes){ return Math.max(1, Math.round(60 / intervalMinutes)); }
+function warmupBarsFor(intervalMinutes){
+  return Math.max(30 * m15GroupSize(intervalMinutes), 30 * h1GroupSize(intervalMinutes)) + 20;
+}
 
-function aggregate5m(base5m, uptoIndex, groupSize, count){
+function aggregateBase(baseCandles, uptoIndex, groupSize, count){
   const out = [];
   for(let end = uptoIndex + 1; end > 0 && out.length < count; end -= groupSize){
     const start = Math.max(0, end - groupSize);
-    const slice = base5m.slice(start, end);
+    const slice = baseCandles.slice(start, end);
     if(!slice.length) continue;
     out.unshift({
       t: slice[0].t, o: slice[0].o,
@@ -64,21 +74,28 @@ function aggregate5m(base5m, uptoIndex, groupSize, count){
   return out;
 }
 
-function buildSnapshotAt(symbol, base5m, uptoIndex, metaOverrides){
-  const last = base5m[uptoIndex];
+function buildSnapshotAt(symbol, baseCandles, uptoIndex, metaOverrides, intervalMinutes){
+  const last = baseCandles[uptoIndex];
+  const barsPerDay = 1440 / intervalMinutes;
   return {
     symbol, price: last.c,
-    m5: base5m.slice(Math.max(0, uptoIndex - 119), uptoIndex + 1),
-    m15: aggregate5m(base5m, uptoIndex, 3, 120),
-    h1: aggregate5m(base5m, uptoIndex, 12, 60),
+    // "m5" is really "the base/execution timeframe" now, not literally
+    // always 5-minute bars — every setup/indicator reading snap.m5 just
+    // wants the nearest-term price-action window at whatever granularity
+    // trades are actually being evaluated/executed at (intervalMinutes),
+    // and none of that logic hardcodes an actual 5-minute duration.
+    m5: baseCandles.slice(Math.max(0, uptoIndex - 119), uptoIndex + 1),
+    m15: aggregateBase(baseCandles, uptoIndex, m15GroupSize(intervalMinutes), 120),
+    h1: aggregateBase(baseCandles, uptoIndex, h1GroupSize(intervalMinutes), 60),
     meta: {
       ...DEFAULT_BACKTEST_META, ...metaOverrides,
-      // Rough day-volume estimate from this single bar's own turnover
-      // (x288 5m bars/day) — only feeds the liquidityScore/spread gates,
-      // which are overridden to fixed values above anyway unless the
-      // caller passes real overrides; kept for completeness, not
-      // depended on for anything precise.
-      volume24hUsd: (last.v || 0) * 288 * last.c,
+      // Rough day-volume estimate from this single bar's own turnover —
+      // only feeds the liquidityScore/spread gates, which are overridden
+      // to fixed values above anyway unless the caller passes real
+      // overrides; kept for completeness, not depended on for anything
+      // precise. barsPerDay scales with intervalMinutes instead of the
+      // old fixed 288 (5m-bars/day).
+      volume24hUsd: (last.v || 0) * barsPerDay * last.c,
     },
   };
 }
@@ -232,7 +249,8 @@ function timeStopMinutesFor(setupType){
 // onProgress(fraction 0..1) is called periodically if provided —
 // backtests over months of 5m data across several symbols are tens of
 // thousands of bars and can take a few seconds.
-export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquity, metaOverrides, onProgress }){
+export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquity, metaOverrides, onProgress, intervalMinutes }){
+  const barIntervalMinutes = intervalMinutes || 5; // defaults to the original 5m assumption if a caller doesn't pass one
   const testSymbols = (symbols || Object.keys(candlesBySymbol)).filter(s => candlesBySymbol[s] && candlesBySymbol[s].length);
   if(!testSymbols.length) throw new Error('No historical candles to backtest against.');
 
@@ -281,10 +299,10 @@ export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquit
       if(EXCLUDED_FUTURES_SYMBOLS.has(symbol)) continue; // same permanently-excluded set Paper/Live use (BTC/ETH/SOL/LTC/DOGE/BNB — see engine.js)
       if(dayState.positions.some(p => p.symbol === symbol)) continue; // already open — evaluateSymbol's own gate would reject this anyway, skip the compute
       const idx = idxBySymbol[symbol].get(nowMs);
-      if(idx == null || idx < WARMUP_BARS){ if(idx != null) skippedWarmup++; continue; }
+      if(idx == null || idx < warmupBarsFor(barIntervalMinutes)){ if(idx != null) skippedWarmup++; continue; }
 
       barsEvaluated++;
-      const snap = buildSnapshotAt(symbol, candlesBySymbol[symbol], idx, metaOverrides);
+      const snap = buildSnapshotAt(symbol, candlesBySymbol[symbol], idx, metaOverrides, barIntervalMinutes);
       const regime = classifyRegime(snap.h1, snap.m15);
       const row = evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, nowMs);
       if(row.status === 'APPROVED' && row.sizing && row.sizing.qty > 0){

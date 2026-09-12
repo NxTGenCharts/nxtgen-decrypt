@@ -299,6 +299,17 @@
       </div>
 
       <div class="field" style="max-width:320px;margin-bottom:10px;">
+        <label for="fuLiveTimeframe" title="The candle size real trades are evaluated and TP1/TP2/TP3/SL are checked against — this is the scalp's actual execution timeframe, not just a chart setting. Regime/trend context (M15/H1) is still fetched independently at its own fixed granularity either way. Gate.io and MEXC don't offer a 3m kline — 5m is used for those two automatically if 3m is picked, with a one-time notice.">Timeframe</label>
+        <select id="fuLiveTimeframe">
+          <option value="3m">3m</option>
+          <option value="5m" selected>5m</option>
+          <option value="15m">15m</option>
+          <option value="30m">30m</option>
+          <option value="1h">1h</option>
+        </select>
+      </div>
+
+      <div class="field" style="max-width:320px;margin-bottom:10px;">
         <label for="fuLiveDailyProfitTargetPct" title="Once real profit for the session reaches this % of the starting balance, no new entries are placed for the rest of the session (open positions still run their own TP/SL as normal) — a deliberate stop-for-the-day, not a pause. Adjustable 1-50% of the selected exchange's account size for this session. Does not stop the bot on losses — only a manual Stop Live/Demo Trading click does that.">Daily Profit Target (%)</label>
         <input id="fuLiveDailyProfitTargetPct" type="number" min="1" max="50" step="0.5" value="10">
       </div>
@@ -409,6 +420,16 @@
         <div class="field">
           <label for="btExchange">Exchange (historical data source)</label>
           <select id="btExchange"><option value="binance">Binance Futures</option><option value="bybit">Bybit Derivatives</option></select>
+        </div>
+        <div class="field">
+          <label for="btTimeframe" title="The candle size trades are evaluated and TP1/TP2/TP3/SL are checked against — this is the scalp's actual execution timeframe, not just a chart setting. Regime/trend context (M15/H1) is still computed independently at its own fixed granularity either way, aggregated up from whichever timeframe is picked here.">Timeframe</label>
+          <select id="btTimeframe">
+            <option value="3m">3m</option>
+            <option value="5m" selected>5m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
+          </select>
         </div>
         <div class="field">
           <label for="btRangePreset">Date range</label>

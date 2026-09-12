@@ -919,10 +919,33 @@ function bybitCandlesFromKline(raw){
   }));
 }
 
-async function bybitBuildFuturesSnapshot(symbol){
+// Per-exchange native kline-interval string for each selectable Live/
+// Demo timeframe (js/futures-ui.js's fuLiveTimeframe field / Backtest's
+// btTimeframe). Bybit and Binance both support a native 3m kline;
+// Gate.io's and MEXC's futures kline endpoints do not (confirmed against
+// their own API docs — Gate.io: 10s/1m/5m/15m/30m/1h/...; MEXC:
+// Min1/Min5/Min15/Min30/Min60/...), so those two fall back to 5m when 3m
+// is requested — resolveSnapshotTimeframe below reports that fallback so
+// the caller can surface it once instead of silently trading a different
+// timeframe than what's selected.
+const SNAPSHOT_TIMEFRAME_MAP = {
+  bybit:   { '3m': '3',   '5m': '5',   '15m': '15',  '30m': '30',  '1h': '60' },
+  binance: { '3m': '3m',  '5m': '5m',  '15m': '15m', '30m': '30m', '1h': '1h' },
+  bitget:  { '3m': '3m',  '5m': '5m',  '15m': '15m', '30m': '30m', '1h': '1H' },
+  gateio:  {              '5m': '5m',  '15m': '15m', '30m': '30m', '1h': '1h' }, // no 3m
+  mexc:    {              '5m': 'Min5','15m': 'Min15','30m': 'Min30','1h': 'Min60' }, // no 3m
+};
+function resolveSnapshotTimeframe(exchange, timeframe){
+  const map = SNAPSHOT_TIMEFRAME_MAP[exchange] || {};
+  const requested = timeframe && map[timeframe] ? timeframe : '5m';
+  return { native: map[requested] || map['5m'], fallback: requested !== (timeframe || '5m') };
+}
+
+async function bybitBuildFuturesSnapshot(symbol, timeframe){
   const base = BYBIT_BASE.live;
+  const { native: m5Interval, fallback } = resolveSnapshotTimeframe('bybit', timeframe);
   const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([
-    fetchJSON(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=5&limit=150`),
+    fetchJSON(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=${m5Interval}&limit=150`),
     fetchJSON(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=15&limit=150`),
     fetchJSON(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=60&limit=80`),
     fetchJSON(`${base}/v5/market/tickers?category=linear&symbol=${symbol}`),
@@ -947,7 +970,7 @@ async function bybitBuildFuturesSnapshot(symbol){
 
   return {
     symbol, price: last || m5[m5.length - 1].c,
-    m5, m15, h1,
+    m5, m15, h1, timeframeFallback: fallback,
     meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd },
   };
 }
@@ -961,13 +984,14 @@ function binanceCandlesFromKline(raw){
     t: row[0], o: parseFloat(row[1]), h: parseFloat(row[2]), l: parseFloat(row[3]), c: parseFloat(row[4]), v: parseFloat(row[5]),
   }));
 }
-async function binanceBuildFuturesSnapshot(symbol){
+async function binanceBuildFuturesSnapshot(symbol, timeframe){
   checkBinanceBan('live'); // public data always hits the live host regardless of Live/Demo trading mode — see the base comment below
   const base = BINANCE_FAPI_BASE.live; // public market data — same regardless of Live/Demo trading mode
+  const { native: m5Interval, fallback } = resolveSnapshotTimeframe('binance', timeframe);
   let m5Raw, m15Raw, h1Raw, book, premium, ticker24h;
   try{
     [m5Raw, m15Raw, h1Raw, book, premium, ticker24h] = await Promise.all([
-      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=150`, 10_000, h => recordBinanceWeight('live', h)),
+      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=${m5Interval}&limit=150`, 10_000, h => recordBinanceWeight('live', h)),
       fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=150`, 10_000, h => recordBinanceWeight('live', h)),
       fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=80`, 10_000, h => recordBinanceWeight('live', h)),
       fetchJSON(`${base}/fapi/v1/ticker/bookTicker?symbol=${symbol}`, 10_000, h => recordBinanceWeight('live', h)),
@@ -996,7 +1020,7 @@ async function binanceBuildFuturesSnapshot(symbol){
 
   return {
     symbol, price: last || m5[m5.length - 1].c,
-    m5, m15, h1,
+    m5, m15, h1, timeframeFallback: fallback,
     meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
   };
 }
@@ -1010,11 +1034,12 @@ function gateioCandlesFromKline(raw){
     t: (parseInt(row.t, 10) || 0) * 1000, o: parseFloat(row.o), h: parseFloat(row.h), l: parseFloat(row.l), c: parseFloat(row.c), v: parseFloat(row.v),
   }));
 }
-async function gateioBuildFuturesSnapshot(symbol){
+async function gateioBuildFuturesSnapshot(symbol, timeframe){
   const base = GATEIO_FAPI_BASE.live; // public market data — same regardless of Live/Demo trading mode
   const contract = toGateioContract(symbol);
+  const { native: m5Interval, fallback } = resolveSnapshotTimeframe('gateio', timeframe);
   const [m5Raw, m15Raw, h1Raw, tickerRaw] = await Promise.all([
-    fetchJSON(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=5m&limit=150`),
+    fetchJSON(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=${m5Interval}&limit=150`),
     fetchJSON(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=15m&limit=150`),
     fetchJSON(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=1h&limit=80`),
     fetchJSON(`${base}/api/v4/futures/usdt/tickers?contract=${contract}`),
@@ -1038,7 +1063,7 @@ async function gateioBuildFuturesSnapshot(symbol){
 
   return {
     symbol, price: last || m5[m5.length - 1].c,
-    m5, m15, h1,
+    m5, m15, h1, timeframeFallback: fallback,
     meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
   };
 }
@@ -1063,10 +1088,11 @@ function mexcCandlesFromKline(raw){
   }
   return out;
 }
-async function mexcBuildFuturesSnapshot(symbol){
+async function mexcBuildFuturesSnapshot(symbol, timeframe){
   const contract = toMexcContract(symbol);
+  const { native: m5Interval, fallback } = resolveSnapshotTimeframe('mexc', timeframe);
   const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([
-    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min5`),
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=${m5Interval}`),
     fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min15`),
     fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min60`),
     fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/ticker?symbol=${contract}`),
@@ -1090,7 +1116,7 @@ async function mexcBuildFuturesSnapshot(symbol){
 
   return {
     symbol, price: last || m5[m5.length - 1].c,
-    m5, m15, h1,
+    m5, m15, h1, timeframeFallback: fallback,
     meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
   };
 }
@@ -1100,16 +1126,17 @@ const FUTURES_SNAPSHOT_CACHE_TTL_MS = 15_000;
 const futuresSnapshotCache = new Map(); // "exchange:symbol" -> { data, at }
 const futuresSnapshotInFlight = new Map();
 
-async function getFuturesSnapshotCached(exchange, symbol){
+async function getFuturesSnapshotCached(exchange, symbol, timeframe){
   const builder = FUTURES_SNAPSHOT_BUILDERS[exchange];
   if(!builder) throw new Error(`No real-data snapshot builder for "${exchange}" yet.`);
-  const key = `${exchange}:${symbol}`;
+  const tf = timeframe || '5m';
+  const key = `${exchange}:${symbol}:${tf}`; // timeframe included — a 3m and a 1h snapshot for the same symbol are genuinely different data, not interchangeable cache hits
   const now = Date.now();
   const cached = futuresSnapshotCache.get(key);
   if(cached && (now - cached.at) < FUTURES_SNAPSHOT_CACHE_TTL_MS) return cached.data;
   if(futuresSnapshotInFlight.has(key)) return futuresSnapshotInFlight.get(key);
   const p = (async () => {
-    const data = await builder(symbol);
+    const data = await builder(symbol, tf);
     futuresSnapshotCache.set(key, { data, at: Date.now() });
     return data;
   })();
@@ -1125,11 +1152,12 @@ app.use('/api/futures/snapshot', rateLimit({ windowMs: 60_000, max: 120, standar
 app.get('/api/futures/snapshot', async (req, res) => {
   const symbol = req.query.symbol;
   const exchange = String(req.query.exchange || 'bybit');
+  const timeframe = String(req.query.interval || req.query.timeframe || '5m');
   if(!symbol) return res.status(400).json({ ok:false, message:'symbol is required.' });
   try{
-    const snap = await getFuturesSnapshotCached(exchange, String(symbol));
+    const snap = await getFuturesSnapshotCached(exchange, String(symbol), timeframe);
     res.set('Cache-Control', 'public, max-age=10');
-    res.json({ ok:true, snapshot: snap });
+    res.json({ ok:true, snapshot: snap, timeframeFallback: !!snap.timeframeFallback });
   }catch(err){
     res.status(502).json({ ok:false, message: `Could not fetch ${exchange} market data for ${symbol}: ${err.message}` });
   }
@@ -1157,8 +1185,8 @@ const klineCache = new Map(); // `${exchange}:${symbol}:${interval}:${startMs}:$
 const KLINE_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — candles this far in the past never change, this just bounds cache growth
 const KLINE_CACHE_MAX_ENTRIES = 500; // simple unbounded-growth guard — oldest entries evicted past this
 
-const BINANCE_KLINE_INTERVAL = { '5m': '5m', '15m': '15m', '1h': '1h' };
-const BYBIT_KLINE_INTERVAL = { '5m': '5', '15m': '15', '1h': '60' };
+const BINANCE_KLINE_INTERVAL = { '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h' };
+const BYBIT_KLINE_INTERVAL = { '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60' };
 
 async function fetchBinanceFuturesKlines(symbol, interval, startMs, endMs){
   const out = [];
@@ -1845,10 +1873,11 @@ function bitgetFuturesCandlesFromKline(raw){
     t: parseInt(row[0], 10), o: parseFloat(row[1]), h: parseFloat(row[2]), l: parseFloat(row[3]), c: parseFloat(row[4]), v: parseFloat(row[5]),
   }));
 }
-async function bitgetBuildFuturesSnapshot(symbol){
+async function bitgetBuildFuturesSnapshot(symbol, timeframe){
   const base = BITGET_BASE;
+  const { native: m5Interval, fallback } = resolveSnapshotTimeframe('bitget', timeframe);
   const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([
-    fetchJSON(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=5m&limit=150`),
+    fetchJSON(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=${m5Interval}&limit=150`),
     fetchJSON(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=15m&limit=150`),
     fetchJSON(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=1H&limit=80`),
     fetchJSON(`${base}/api/v2/mix/market/ticker?symbol=${symbol}&productType=USDT-FUTURES`),
@@ -1872,7 +1901,7 @@ async function bitgetBuildFuturesSnapshot(symbol){
 
   return {
     symbol, price: last || m5[m5.length - 1].c,
-    m5, m15, h1,
+    m5, m15, h1, timeframeFallback: fallback,
     meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
   };
 }
