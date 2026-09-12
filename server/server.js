@@ -842,6 +842,32 @@ async function getBybitPosition(mode, apiKey, secretKey, symbol){
   };
 }
 
+// Manually flattens an open Bybit position — used by the app's own
+// "Close Position" button rather than waiting on the exchange-side
+// TP/SL to trigger. Reads the position fresh (not from any client-
+// cached qty) so it closes exactly what's actually open, places a
+// reduce-only market order in the opposite direction for that size, then
+// best-effort cancels whatever conditional orders are still resting on
+// the symbol (the TP legs from placeBybitFuturesOrder, and the SL lives
+// on the position itself so it clears on its own once flat) — a cancel
+// failure here is untidy, not unsafe, since the position is already
+// closed by the time it runs, so it's swallowed rather than surfaced.
+async function closeBybitFuturesPosition(mode, apiKey, secretKey, symbol){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const pos = await getBybitPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) throw new VerifyRejected(`No open ${symbol} position found on Bybit — nothing to close.`);
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const qty = floorToStep(pos.size, filters.qtyStep);
+  const exitSide = pos.side === 'Buy' ? 'Sell' : 'Buy';
+  const closed = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+    category: 'linear', symbol, side: exitSide, orderType: 'Market', qty: qty.toString(),
+    reduceOnly: true, positionIdx: 0, timeInForce: 'IOC',
+    orderLinkId: `nxtgen-close-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  });
+  await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/cancel-all', { category: 'linear', symbol }).catch(() => {});
+  return { orderId: closed.result?.orderId || null };
+}
+
 // Lists EVERY open Bybit linear position for the account (no symbol
 // filter — settleCoin scopes it to USDT-margined perps), used for
 // broad reconciliation: catching a real open position this app never
@@ -1570,6 +1596,24 @@ async function getGateioFuturesPosition(mode, apiKey, secretKey, symbol){
   };
 }
 
+// Manually flattens an open Gate.io position using its dedicated
+// close:true order flag (size must be 0 when set — Gate.io then closes
+// whatever's actually open on that contract itself, in whichever
+// direction that requires, rather than this app having to compute and
+// sign an opposite-direction size). Also best-effort cancels any
+// resting SL/TP price-triggered orders left on the contract (see
+// placeGateioFuturesOrder) now that the position is flat.
+async function closeGateioFuturesPosition(mode, apiKey, secretKey, symbol){
+  const contract = toGateioContract(symbol);
+  const pos = await getGateioFuturesPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) throw new VerifyRejected(`No open ${symbol} position found on Gate.io — nothing to close.`);
+  const order = await gateioFuturesSignedRequest('POST', '/api/v4/futures/usdt/orders', '', {
+    contract, size: 0, price: '0', tif: 'ioc', close: true, text: 't-nxtgen-close',
+  }, apiKey, secretKey, mode);
+  await gateioFuturesSignedRequest('DELETE', '/api/v4/futures/usdt/price_orders', `contract=${contract}`, null, apiKey, secretKey, mode).catch(() => {});
+  return { orderId: order && order.id };
+}
+
 // No single "closed PnL" endpoint — sums the account ledger's pnl entries
 // for this contract since the position was opened, matching the same
 // approach used for Binance (see getBinanceFuturesRealizedResult).
@@ -1729,6 +1773,25 @@ async function getMexcFuturesPosition(mode, apiKey, secretKey, symbol){
   };
 }
 
+// Manually flattens an open MEXC position — side 4 closes an existing
+// long, side 2 closes an existing short (MEXC's side enum: 1/3 open
+// long/short, 2/4 close short/long), sized to the position's own current
+// holdVol (already in contracts, matching what placeMexcFuturesOrder
+// itself sends — see getMexcFuturesPosition's size field) rather than
+// anything cached client-side.
+async function closeMexcFuturesPosition(mode, apiKey, secretKey, symbol){
+  const contract = toMexcContract(symbol);
+  const pos = await getMexcFuturesPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) throw new VerifyRejected(`No open ${symbol} position found on MEXC — nothing to close.`);
+  const closeSide = pos.side === 'Buy' ? 4 : 2;
+  const order = await mexcFuturesSignedRequest('POST', '/api/v1/private/order/create', {
+    symbol: contract, vol: Math.round(pos.size), side: closeSide, type: 5, openType: 1, reduceOnly: true,
+  }, apiKey, secretKey);
+  const orderId = order && order.orderId;
+  if(!orderId) throw new VerifyRejected('MEXC accepted the close order but returned no orderId to confirm with.');
+  return { orderId };
+}
+
 async function getMexcFuturesRealizedResult(mode, apiKey, secretKey, symbol, passphrase, openedAtMs){
   const contract = toMexcContract(symbol);
   const history = await mexcFuturesSignedRequest('GET', '/api/v1/private/position/list/history_positions', {
@@ -1846,6 +1909,22 @@ async function getBitgetFuturesPosition(mode, apiKey, secretKey, symbol, passphr
     markPrice: parseFloat(pos.markPrice || '0'), unrealisedPnl: parseFloat(pos.unrealizedPL || '0'),
     leverage: parseFloat(pos.leverage || '0'), liqPrice: pos.liquidationPrice ? parseFloat(pos.liquidationPrice) : null,
   };
+}
+
+// Manually flattens an open Bitget position using Bitget's own dedicated
+// close-positions endpoint (closes everything open on this symbol/side
+// itself, rather than this app computing an opposite-direction market
+// order) — holdSide tells it which side to close, read fresh from the
+// position rather than anything cached client-side.
+async function closeBitgetFuturesPosition(mode, apiKey, secretKey, symbol, passphrase){
+  const pos = await getBitgetFuturesPosition(mode, apiKey, secretKey, symbol, passphrase);
+  if(!pos) throw new VerifyRejected(`No open ${symbol} position found on Bitget — nothing to close.`);
+  const holdSide = pos.side === 'Buy' ? 'long' : 'short';
+  const result = await bitgetSignedRequest('POST', '/api/v2/mix/order/close-positions', '', {
+    symbol, productType: 'USDT-FUTURES', marginCoin: 'USDT', holdSide,
+  }, apiKey, secretKey, passphrase, mode);
+  const first = result && Array.isArray(result.successList) ? result.successList[0] : null;
+  return { orderId: first ? (first.orderId || null) : null };
 }
 
 // No single "closed PnL" endpoint — sums the account bill ledger's
@@ -2124,6 +2203,26 @@ async function getBinanceFuturesPosition(mode, apiKey, secretKey, symbol){
   };
 }
 
+// Manually flattens an open Binance position with a reduce-only market
+// order sized to whatever's actually open right now. NOTE: this
+// deliberately does NOT try to bulk-cancel the resting SL/TP conditional
+// orders placed alongside entry (see placeBinanceFuturesOrder) —
+// Binance's algo-order cancel-all endpoint wasn't confirmed here with
+// the same certainty as the rest of this integration, so rather than
+// guess at an endpoint that might silently no-op or error, those are
+// left resting; being closePosition:true orders, they simply have
+// nothing left to close and are harmless sitting there. Cancel them on
+// Binance directly if you'd rather they not show up as open orders.
+async function closeBinanceFuturesPosition(mode, apiKey, secretKey, symbol){
+  const pos = await getBinanceFuturesPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) throw new VerifyRejected(`No open ${symbol} position found on Binance — nothing to close.`);
+  const exitSide = pos.side === 'Buy' ? 'SELL' : 'BUY';
+  const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+    symbol, side: exitSide, type: 'MARKET', quantity: pos.size.toString(), reduceOnly: 'true', newOrderRespType: 'RESULT',
+  }, apiKey, secretKey, mode);
+  return { orderId: order && order.orderId };
+}
+
 // No single "closed PnL" endpoint like Bybit's — sums the income ledger
 // (realized PnL from price movement, trading fees, and any funding paid)
 // for this symbol since the position was opened, which nets out to the
@@ -2220,6 +2319,11 @@ app.post('/api/futures/positions', async (req, res) => {
   }
 });
 const FUTURES_CLOSED_PNL_GETTERS = { bybit: getBybitClosedPnl, binance: getBinanceFuturesRealizedResult, gateio: getGateioFuturesRealizedResult, mexc: getMexcFuturesRealizedResult, bitget: getBitgetFuturesRealizedResult };
+// Manual "Close Position" button (js/futures-ui.js's closeLivePosition) —
+// all five exchanges supported, same set as FUTURES_ORDER_PLACERS/
+// FUTURES_POSITION_GETTERS above. Each closer reads the position fresh
+// itself rather than trusting a client-supplied size/side.
+const FUTURES_CLOSE_POSITION = { bybit: closeBybitFuturesPosition, binance: closeBinanceFuturesPosition, gateio: closeGateioFuturesPosition, mexc: closeMexcFuturesPosition, bitget: closeBitgetFuturesPosition };
 // Moving the SL to a fee-adjusted breakeven once TP2 fully closes
 // (requirements #6/#7) is only wired up for Binance and Bybit so far,
 // matching the partial-TP order-placement work above — Gate.io, MEXC,
@@ -2294,6 +2398,12 @@ async function binanceFuturesUniverse(){
     throw err;
   }
   const tradeable = new Set((info?.symbols || [])
+    // contractType === 'PERPETUAL' already excludes Binance's own TradFi
+    // listings on its own: Binance tags those with a distinct
+    // TRADIFI_PERPETUAL contractType (confirmed via Binance's own
+    // TSLAUSDT listing announcement, which calls out its dedicated
+    // "[TradFi] tab" for exactly this), so this filter was never
+    // ambiguous here the way Bybit's needed fixing above.
     .filter(s => s.status === 'TRADING' && s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT')
     .map(s => s.symbol));
   return (tickers || [])
@@ -2303,12 +2413,38 @@ async function binanceFuturesUniverse(){
 
 async function bybitFuturesUniverse(){
   const base = BYBIT_BASE.live;
-  const [info, tickers] = await Promise.all([
+  // TradFi perpetuals (AAPLUSDT, TSLAUSDT, XAUUSDT, forex pairs, etc.)
+  // sit in the SAME category=linear list as normal crypto perpetuals and
+  // pass every filter above (Trading status, USDT quote, "Perpetual"
+  // contractType) — nothing here tells them apart from BTCUSDT by
+  // shape alone. Bybit's own instruments-info endpoint supports a
+  // symbolType filter for exactly this (confirmed in Bybit's official
+  // API changelog and skill docs): symbolType=stock / commodity / forex
+  // for category=linear. Bybit adds new TradFi tickers most weeks — was
+  // 20 stocks + 3 commodities + 3 ETFs in May 2026, over 200 markets
+  // total by August — so a fixed ticker list (the CLUSDT fix in
+  // EXCLUDED_FUTURES_SYMBOLS, engine.js) goes stale almost immediately;
+  // querying Bybit's own classification stays correct as that list grows
+  // without needing another manual update here.
+  const [info, tickers, stockInfo, commodityInfo, forexInfo] = await Promise.all([
     fetchJSON(`${base}/v5/market/instruments-info?category=linear`),
     fetchJSON(`${base}/v5/market/tickers?category=linear`),
+    // Each wrapped separately: if Bybit ever rejects one of these three
+    // symbolType values (a param change, a transient error), that alone
+    // shouldn't take down symbol discovery entirely — worst case, that
+    // one TradFi category silently isn't filtered this cycle rather than
+    // the whole live scan failing.
+    fetchJSON(`${base}/v5/market/instruments-info?category=linear&symbolType=stock`).catch(() => null),
+    fetchJSON(`${base}/v5/market/instruments-info?category=linear&symbolType=commodity`).catch(() => null),
+    fetchJSON(`${base}/v5/market/instruments-info?category=linear&symbolType=forex`).catch(() => null),
   ]);
+  const tradfiSymbols = new Set([
+    ...(stockInfo?.result?.list || []),
+    ...(commodityInfo?.result?.list || []),
+    ...(forexInfo?.result?.list || []),
+  ].map(s => s.symbol));
   const tradeable = new Set((info?.result?.list || [])
-    .filter(s => s.status === 'Trading' && s.quoteCoin === 'USDT' && String(s.contractType || '').includes('Perpetual'))
+    .filter(s => s.status === 'Trading' && s.quoteCoin === 'USDT' && String(s.contractType || '').includes('Perpetual') && !tradfiSymbols.has(s.symbol))
     .map(s => s.symbol));
   return (tickers?.result?.list || [])
     .filter(t => tradeable.has(t.symbol))
@@ -2347,8 +2483,17 @@ async function bitgetFuturesUniverse(){
     fetchJSON(`${BITGET_BASE}/api/v2/mix/market/contracts?productType=USDT-FUTURES`),
     fetchJSON(`${BITGET_BASE}/api/v2/mix/market/tickers?productType=USDT-FUTURES`),
   ]);
+  // isRwa flags Bitget's real-world-asset contracts (tokenized
+  // stocks/commodities, same idea as Bybit's TradFi perpetuals) — Bitget
+  // reportedly carries more of these than any other exchange (roughly
+  // 40% of its whole USDT-margined contract list per third-party
+  // research), so this matters more here than most. Defensive `!c.isRwa`
+  // rather than `c.isRwa === false`: if this field is ever renamed or
+  // absent, every contract's isRwa reads undefined and the filter is a
+  // silent no-op (nothing wrongly excluded) rather than excluding
+  // everything.
   const tradeable = new Set((contracts?.data || [])
-    .filter(c => c.symbolStatus === 'normal' && c.quoteCoin === 'USDT')
+    .filter(c => c.symbolStatus === 'normal' && c.quoteCoin === 'USDT' && !c.isRwa)
     .map(c => c.symbol));
   return (tickers?.data || [])
     .filter(t => tradeable.has(t.symbol))
@@ -2570,6 +2715,42 @@ app.post('/api/futures/position', async (req, res) => {
       return res.json({ ok:false, rejected:true, message: err.message });
     }
     return res.json({ ok:false, rejected:false, message: `Could not read ${symbol} position on ${exchange}: ${err.message}` });
+  }
+});
+
+// Manually closes an open real position on demand — the server side of
+// the app's own "Close Position" button, as distinct from the exchange-
+// side TP/SL this app always attaches at entry (see /api/futures/order):
+// this is for closing out early, before either has triggered. Each
+// closer function re-reads the position itself before acting, so this
+// closes exactly what's actually open on the exchange right now — not
+// whatever size/side the client's own (possibly stale) tracking believes
+// is open. Deliberately returns as soon as the close order is accepted;
+// it does not itself compute realized P&L — the client re-polls
+// /api/futures/position just above right after this to pick that up,
+// same route the automatic monitoring loop already uses for every other
+// kind of closure (TP, SL, or manual-on-the-exchange).
+app.post('/api/futures/close-position', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, symbol, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !symbol){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey, secretKey, and symbol are all required.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const closer = FUTURES_CLOSE_POSITION[exchange];
+  if(!closer){
+    return res.status(400).json({ ok:false, message:`No close-position support for "${exchange}" yet — only bybit, binance, gateio, mexc, and bitget are supported so far.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const result = await closer(netMode, apiKey, secretKey, symbol, passphrase);
+    return res.json({ ok:true, ...result });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not close ${symbol} position on ${exchange}: ${err.message}` });
   }
 });
 

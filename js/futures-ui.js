@@ -413,6 +413,157 @@ function buildLiveDayStateShim(equity){
   };
 }
 
+// Records a real position's closure into session history + the
+// cross-session Trade Log, and clears it from live tracking — shared by
+// runLiveCycleInner's own closure-detection poll (TP/SL/manual-on-the-
+// exchange, all indistinguishable from here) AND closeLivePosition below
+// (the in-app "Close Position" button), so both paths book the trade
+// identically and neither can drift out of sync with the other.
+function recordLiveClosure(f, symbol, tracked, closed){
+  const netUsd = closed ? closed.closedPnl : 0;
+  // grossPnl/feesUsd can still come back null for any exchange on
+  // a given trade if that specific lookup failed (rate limit,
+  // transient error) — every exchange, Bybit included, now
+  // reports a real breakdown when its history read succeeds (see
+  // getBybitExecutionFees in server.js), so this is a per-trade
+  // fallback, not a standing per-exchange gap.
+  const grossUsd = closed && closed.grossPnl != null ? closed.grossPnl : null;
+  const feesUsd = closed && closed.feesUsd != null ? closed.feesUsd : null;
+  const closedAtMs = Date.now();
+  // Only for Binance/Bybit for now, per an explicit "these two
+  // first" request — other exchanges' history rows keep durationMin
+  // as null until that's extended.
+  const durationMin = DURATION_TRACKED_EXCHANGES.includes(tracked.exchange)
+    ? Math.max(0, Math.round((closedAtMs - tracked.openedAtMs) / 60_000))
+    : null;
+  f.liveTradeHistory.unshift({
+    closedAtMs, time: new Date().toLocaleTimeString(), exchange: tracked.exchange, symbol, side: tracked.side,
+    entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
+    exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
+    leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
+    setupType: tracked.setupType, durationMin,
+  });
+  // Same trade, also written to the cross-session Trade Log (see
+  // appendPersistentTrade above) — independent of the session-scoped
+  // array just above, which resetLiveSession clears on every re-arm.
+  appendPersistentTrade({
+    closedAtMs, exchange: tracked.exchange, mode: tracked.mode, symbol, side: tracked.side,
+    entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
+    exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
+    leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
+    setupType: tracked.setupType, durationMin,
+  });
+  f.liveTrades++;
+  if(netUsd > 0) f.liveWins++; else f.liveLosses++;
+  f.liveNetPnlUsd += netUsd;
+  if(grossUsd != null) f.liveGrossPnlUsd += grossUsd;
+  if(feesUsd != null) f.liveFeesUsd += feesUsd;
+  checkAdaptiveCircuitBreaker(netUsd);
+  // 30-minute no-re-entry cooldown on THIS symbol only (requirement:
+  // closing a pair — TP, SL, a manual close on the exchange itself, or a
+  // manual close from THIS app's own button — all show up here
+  // identically as "no longer open" — shouldn't let the bot immediately
+  // re-open the same pair; every other pair stays tradeable right away).
+  // Read by evaluateNoTradeFilters (noTradeEngine.js) via
+  // buildLiveDayStateShim's cooldownUntilBySymbol below.
+  f.liveCooldownUntilBySymbol = f.liveCooldownUntilBySymbol || {};
+  f.liveCooldownUntilBySymbol[symbol] = closedAtMs + LIVE_SYMBOL_COOLDOWN_MS;
+  delete f.livePositions[symbol];
+}
+
+// Manually closes an open real position from this app — the "Close
+// Position" button next to the Open Position card (see renderLiveCloseButtons).
+// Sends a reduce-only market close via /api/futures/close-position, then
+// polls /api/futures/position (same route the automatic monitoring loop
+// uses) briefly to pick up the realized P&L breakdown once the exchange's
+// own history reflects it, and books the trade through the exact same
+// recordLiveClosure path a TP/SL close would use. A short delay/retry is
+// needed here because closing and the exchange's fill/PnL history
+// updating are not always the same instant.
+async function closeLivePosition(symbol){
+  const f = fu();
+  const tracked = f.livePositions[symbol];
+  if(!tracked) return;
+  const row = els.fuLiveCloseRow;
+  const btn = row && row.querySelector(`.fu-close-pos-btn[data-symbol="${CSS.escape(symbol)}"]`);
+  const cred = liveCred(tracked.exchange, tracked.mode);
+  if(!cred){
+    showLiveMessage(`Can't close ${symbol} — no connected/verified key for ${tracked.exchange} (${tracked.mode}).`, 'error');
+    return;
+  }
+  if(btn){ btn.disabled = true; btn.textContent = `Closing ${symbol}…`; }
+  try{
+    const closeResult = await callProxy('/api/futures/close-position', {
+      exchange: tracked.exchange, mode: tracked.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol,
+    });
+    if(!closeResult.ok){
+      showLiveMessage(closeResult.message || `Failed to close ${symbol}.`, 'error');
+      if(btn){ btn.disabled = false; btn.textContent = `Close ${symbol}`; }
+      return;
+    }
+    // Confirm it's actually gone and pick up the realized P&L, same route
+    // the monitoring loop polls — try a few times since the exchange's own
+    // position/history read can lag the close by a second or so.
+    let closedData = null, confirmedClosed = false;
+    const deadline = Date.now() + 8000;
+    while(Date.now() < deadline){
+      const posCheck = await callProxy('/api/futures/position', {
+        exchange: tracked.exchange, mode: tracked.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase,
+        symbol, openedAtMs: tracked.openedAtMs, balanceBeforeUsd: tracked.balanceBeforeUsd,
+      });
+      if(posCheck.ok && !posCheck.open){ confirmedClosed = true; closedData = posCheck.closed; break; }
+      await new Promise(r => setTimeout(r, 700));
+    }
+    if(!confirmedClosed){
+      // The close order itself was accepted (closeResult.ok) — this just
+      // means we couldn't confirm the P&L breakdown yet. Leave it tracked;
+      // the regular monitoring loop will pick up the closure and book it
+      // on its own next cycle rather than this silently losing the trade.
+      showLiveMessage(`Close order sent for ${symbol} — confirming on ${tracked.exchange}, it'll finish logging on the next cycle.`, 'success');
+      if(btn){ btn.disabled = false; btn.textContent = `Close ${symbol}`; }
+      return;
+    }
+    recordLiveClosure(f, symbol, tracked, closedData);
+    showLiveMessage(`${symbol} position closed.`, 'success');
+    renderLive();
+  }catch(err){
+    showLiveMessage(`Failed to close ${symbol}: ${err.message}`, 'error');
+    if(btn){ btn.disabled = false; btn.textContent = `Close ${symbol}`; }
+  }
+}
+
+// Renders one detail row per currently-open real position into
+// fuLiveCloseRow — entry, SL, and TP1/TP2/TP3 (whichever the position
+// actually has; the legacy single-TP path only ever fills TP1, TP2/TP3
+// show as "—") alongside its own "Close" button. Plain rows rather than
+// the fixed single fuLiveOpenPosition line above, since (in principle)
+// more than one symbol's real position can be open at once (see
+// buildLiveDayStateShim's openPositions/positions), and each needs its
+// own detail + own close target. Click handling is delegated once from
+// the row itself in initLiveTradingControls, not rebound here.
+function renderLiveCloseButtons(){
+  const f = fu();
+  const row = els.fuLiveCloseRow;
+  if(!row) return;
+  const symbols = Object.keys(f.livePositions);
+  if(symbols.length === 0){
+    row.style.display = 'none';
+    row.innerHTML = '';
+    return;
+  }
+  const dash = v => (v != null ? v : '—');
+  row.style.display = 'flex';
+  row.innerHTML = symbols.map(s => {
+    const p = f.livePositions[s];
+    return `<div class="fu-pos-detail" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;width:100%;">
+      <span style="font-size:11px;color:var(--dim);">
+        Entry ${dash(p.entry)} &middot; SL ${dash(p.stopLossPrice)} &middot; TP1 ${dash(p.tp1Price)} &middot; TP2 ${dash(p.tp2Price)} &middot; TP3 ${dash(p.tp3Price)}
+      </span>
+      <button type="button" class="primary ghost fu-close-pos-btn" data-symbol="${s}" style="font-size:11px;padding:4px 10px;" title="Close the open ${s} ${p.side || ''} position on ${p.exchange}">Close ${s}</button>
+    </div>`;
+  }).join('');
+}
+
 // Guards against overlapping runs: each cycle makes several awaited network
 // calls (position checks, balance, universe, per-symbol snapshots) and can
 // legitimately take longer than LIVE_CYCLE_MS under load or a slow
@@ -463,56 +614,7 @@ async function runLiveCycleInner(){
       const data = await callProxy('/api/futures/position', { exchange: tracked.exchange, mode: tracked.mode, apiKey: posCred.apiKey, secretKey: posCred.secretKey, passphrase: posCred.passphrase, symbol, openedAtMs: tracked.openedAtMs, balanceBeforeUsd: tracked.balanceBeforeUsd });
       if(!data.ok) continue; // transient error — leave it tracked, try again next cycle
       if(!data.open){
-        const closed = data.closed;
-        const netUsd = closed ? closed.closedPnl : 0;
-        // grossPnl/feesUsd can still come back null for any exchange on
-        // a given trade if that specific lookup failed (rate limit,
-        // transient error) — every exchange, Bybit included, now
-        // reports a real breakdown when its history read succeeds (see
-        // getBybitExecutionFees in server.js), so this is a per-trade
-        // fallback, not a standing per-exchange gap.
-        const grossUsd = closed && closed.grossPnl != null ? closed.grossPnl : null;
-        const feesUsd = closed && closed.feesUsd != null ? closed.feesUsd : null;
-        const closedAtMs = Date.now();
-        // Only for Binance/Bybit for now, per an explicit "these two
-        // first" request — other exchanges' history rows keep durationMin
-        // as null until that's extended.
-        const durationMin = DURATION_TRACKED_EXCHANGES.includes(tracked.exchange)
-          ? Math.max(0, Math.round((closedAtMs - tracked.openedAtMs) / 60_000))
-          : null;
-        f.liveTradeHistory.unshift({
-          closedAtMs, time: new Date().toLocaleTimeString(), exchange: tracked.exchange, symbol, side: tracked.side,
-          entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
-          exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
-          leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-          setupType: tracked.setupType, durationMin,
-        });
-        // Same trade, also written to the cross-session Trade Log (see
-        // appendPersistentTrade above) — independent of the session-scoped
-        // array just above, which resetLiveSession clears on every re-arm.
-        appendPersistentTrade({
-          closedAtMs, exchange: tracked.exchange, mode: tracked.mode, symbol, side: tracked.side,
-          entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
-          exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
-          leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-          setupType: tracked.setupType, durationMin,
-        });
-        f.liveTrades++;
-        if(netUsd > 0) f.liveWins++; else f.liveLosses++;
-        f.liveNetPnlUsd += netUsd;
-        if(grossUsd != null) f.liveGrossPnlUsd += grossUsd;
-        if(feesUsd != null) f.liveFeesUsd += feesUsd;
-        checkAdaptiveCircuitBreaker(netUsd);
-        // 30-minute no-re-entry cooldown on THIS symbol only (requirement:
-        // closing a pair — TP, SL, or manually on the exchange itself,
-        // all of which show up here identically as "no longer open" —
-        // shouldn't let the bot immediately re-open the same pair; every
-        // other pair stays tradeable right away). Read by
-        // evaluateNoTradeFilters (noTradeEngine.js) via
-        // buildLiveDayStateShim's cooldownUntilBySymbol below.
-        f.liveCooldownUntilBySymbol = f.liveCooldownUntilBySymbol || {};
-        f.liveCooldownUntilBySymbol[symbol] = closedAtMs + LIVE_SYMBOL_COOLDOWN_MS;
-        delete f.livePositions[symbol];
+        recordLiveClosure(f, symbol, tracked, data.closed);
       } else {
         if(els.fuLiveOpenPosition){
           els.fuLiveOpenPosition.textContent = `[${tracked.exchange}] ${symbol} ${data.position.side} ${data.position.size} @ ${data.position.avgPrice} (uPnL ${fmtUsd(data.position.unrealisedPnl)})`;
@@ -578,6 +680,7 @@ async function runLiveCycleInner(){
               });
               if(moveResult.ok){
                 tracked.slAlgoId = moveResult.slOrderId || tracked.slAlgoId;
+                tracked.stopLossPrice = moveResult.newStopPrice; // keep the displayed SL (Open Position detail row) in sync with the actual exchange-side stop
                 showLiveMessage(`${symbol}: TP2 filled — stop on the remaining position moved to fee-adjusted breakeven (${moveResult.newStopPrice}).`);
               } else {
                 tracked.breakevenMoved = false; // didn't actually take effect — allow a retry on a later poll
@@ -651,6 +754,7 @@ async function runLiveCycleInner(){
             f.livePositions[ep.symbol] = {
               exchange, mode, orderId: null, side: ep.side, qty: ep.size, entry: ep.avgPrice,
               leverage: ep.leverage, stopLossPrice: null, takeProfitPrice: null,
+              tp1Price: null, tp2Price: null, tp3Price: null,
               riskAmountUsd: 0, openedAtMs: Date.now(), balanceBeforeUsd: equity,
               setupType: 'adopted-existing', usePartialTp: false, tp2Fraction: null, tp1Fraction: null,
               breakevenStopPrice: null, slAlgoId: null, breakevenMoved: true,
@@ -845,6 +949,7 @@ async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, eq
         f.livePositions[approved.symbol] = {
           exchange, mode, orderId: null, side: ep.side, qty: ep.size, entry: ep.avgPrice,
           leverage: ep.leverage, stopLossPrice: null, takeProfitPrice: null,
+          tp1Price: null, tp2Price: null, tp3Price: null,
           riskAmountUsd: 0, openedAtMs: Date.now(), balanceBeforeUsd: equity,
           setupType: 'adopted-existing', usePartialTp: false, tp2Fraction: null, tp1Fraction: null,
           breakevenStopPrice: null, slAlgoId: null, breakevenMoved: true,
@@ -862,6 +967,14 @@ async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, eq
     f.livePositions[approved.symbol] = {
       exchange, mode, orderId: result.orderId, side, qty: result.filledQty, entry: result.avgPrice,
       leverage: result.leverage, stopLossPrice: result.stopLossPrice, takeProfitPrice: result.takeProfitPrice,
+      // TP1/TP2/TP3 prices for display (Open Position detail row) — for
+      // the partial-TP exchanges these come straight from the engine's
+      // own approved levels (same values just sent as tpLevels above);
+      // for the legacy single-TP path there's only ever one TP, shown as
+      // TP1 with TP2/TP3 left null.
+      tp1Price: usePartialTp ? approved.tp1 : result.takeProfitPrice,
+      tp2Price: usePartialTp ? approved.tp2 : null,
+      tp3Price: usePartialTp ? approved.tp3 : null,
       riskAmountUsd: approved.sizing.riskAmountUsd, openedAtMs, balanceBeforeUsd: equity,
       setupType: approved.setup,
       // Fields only meaningful when usePartialTp is true — used by
@@ -1589,6 +1702,7 @@ function renderLive(){
   if(els.fuLiveFees) els.fuLiveFees.textContent = fmtUsd(f.liveFeesUsd);
   if(els.fuLiveNetPnl) els.fuLiveNetPnl.textContent = fmtUsd(f.liveNetPnlUsd);
   if(Object.keys(f.livePositions).length === 0 && els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = 'None';
+  renderLiveCloseButtons();
   renderLiveHistory();
   renderTradeLog();
   renderStrategyRows();
@@ -1722,17 +1836,64 @@ function updateLiveModeUI(){
   }
 }
 
+// =============================================================
+// Fast price tick — a lightweight, unauthenticated interpolation between
+// the heavier 8s runLiveCycle polls (which hit the exchange's SIGNED
+// position endpoint and are the authoritative source for open/closed and
+// the real uPnL number). This tick only reads the PUBLIC market snapshot
+// (already server-cached for 15s — see getFuturesSnapshotCached in
+// server.js — so ticking every 2s here does NOT mean hitting the
+// exchange itself every 2s) for whichever symbol(s) are currently
+// tracked as open, and recomputes an approximate uPnL client-side from
+// entry/qty. It never touches signed credentials, never decides a
+// position has closed, and never overrides stopLossPrice/tp*Price — the
+// next runLiveCycle poll always overwrites this tick's numbers with the
+// exchange's own real figures, so a missed or slightly-stale tick here
+// is cosmetic, not a correctness risk.
+const FAST_TICK_MS = 2000;
+let fastTickTimer = null;
+
+async function runFastTick(){
+  const f = fu();
+  const symbols = Object.keys(f.livePositions);
+  if(symbols.length === 0) return;
+  for(const symbol of symbols){
+    const tracked = f.livePositions[symbol];
+    try{
+      const snap = await fetchLiveSnapshot(tracked.exchange, symbol);
+      const price = snap && snap.price;
+      if(price == null || !tracked.entry) continue;
+      const qty = tracked.qty || 0;
+      const uPnl = tracked.side === 'Buy' ? (price - tracked.entry) * qty : (tracked.entry - price) * qty;
+      if(els.fuLiveOpenPosition){
+        els.fuLiveOpenPosition.textContent = `[${tracked.exchange}] ${symbol} ${tracked.side} ${qty} @ ${tracked.entry} — mark ${price} (uPnL ${fmtUsd(uPnl)})`;
+      }
+    }catch(err){ /* a missed tick just leaves the last-known number showing until the next tick or the next real 8s poll — harmless */ }
+  }
+}
+
+function startFastTick(){
+  if(fastTickTimer) return; // already running — toggleLiveRunning can't double-start this
+  fastTickTimer = setInterval(runFastTick, FAST_TICK_MS);
+}
+
+function stopFastTick(){
+  if(fastTickTimer){ clearInterval(fastTickTimer); fastTickTimer = null; }
+}
+
 function toggleLiveRunning(){
   const f = fu();
   f.liveRunning = !f.liveRunning;
   if(f.liveRunning){
     runLiveCycle();
     f.liveTimer = setInterval(runLiveCycle, LIVE_CYCLE_MS);
+    startFastTick();
     if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.querySelector('.btn-label').textContent = 'Stop Live/Demo Trading';
     if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.classList.add('on');
   } else {
     clearInterval(f.liveTimer);
     f.liveTimer = null;
+    stopFastTick();
     if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.querySelector('.btn-label').textContent = 'Start Live/Demo Trading';
     if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.classList.remove('on');
   }
@@ -1800,6 +1961,17 @@ function initLiveTradingControls(){
     });
   }
   if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.addEventListener('click', toggleLiveRunning);
+  // Delegated once from the row itself, since renderLiveCloseButtons()
+  // rebuilds the buttons' innerHTML on every render (open/close/cycle) —
+  // binding individual listeners there would mean rebinding (or leaking)
+  // one per render instead of a single listener that survives it.
+  if(els.fuLiveCloseRow){
+    els.fuLiveCloseRow.addEventListener('click', (e) => {
+      const btn = e.target.closest('.fu-close-pos-btn');
+      if(!btn || btn.disabled) return;
+      closeLivePosition(btn.dataset.symbol);
+    });
+  }
   // Browsers throttle setInterval heavily in a backgrounded tab (often to
   // ~once/minute) — so a position closing (or a TP2 breakeven move) while
   // this tab is out of focus can sit un-reflected in the Real Balance card

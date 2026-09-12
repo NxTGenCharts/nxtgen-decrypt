@@ -148,6 +148,7 @@ export const els = {
   fuLiveBalance: document.getElementById('fuLiveBalance'),
   fuLiveStartingBalance: document.getElementById('fuLiveStartingBalance'),
   fuLiveOpenPosition: document.getElementById('fuLiveOpenPosition'),
+  fuLiveCloseRow: document.getElementById('fuLiveCloseRow'),
   fuLiveTrades: document.getElementById('fuLiveTrades'),
   fuLiveWinRate: document.getElementById('fuLiveWinRate'),
   fuLiveGrossPnl: document.getElementById('fuLiveGrossPnl'),
