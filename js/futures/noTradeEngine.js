@@ -46,8 +46,15 @@ export function evaluateNoTradeFilters({
   // see README-SCALP.md and the fee-vs-stop postmortem it links. Reject
   // outright rather than let net-of-fee math alone catch it (a thin
   // stop can still clear a modest net-profit floor on the win side while
-  // making every LOSS disproportionately fee-heavy).
-  if(feeToStopRatioPct != null && feeToStopRatioPct > 35) reasons.push(`Round-trip fees are ${feeToStopRatioPct.toFixed(0)}% of the stop distance (cap 35%) — too fee-heavy relative to risk`);
+  // making every LOSS disproportionately fee-heavy). Cap tightened
+  // 35% -> 25% after a real measured run (6 single-strategy 30-day/5m
+  // backtests) showed every strategy still losing money to fees even
+  // with the stop floors just raised in engine.js's buildLevels — fee $
+  // per trade is proportional to (fee% / stopDistancePct) x riskAmount
+  // (see risk.js positionSize's notional math), so this ratio isn't just
+  // a loss-side sanity check, it's a direct cap on how much of every
+  // dollar risked can be eaten by fees before a trade is even taken.
+  if(feeToStopRatioPct != null && feeToStopRatioPct > 25) reasons.push(`Round-trip fees are ${feeToStopRatioPct.toFixed(0)}% of the stop distance (cap 25%) — too fee-heavy relative to risk`);
 
   if(dayState){
     // dayState.maxDailyLossPct is a per-session, user-set override (see

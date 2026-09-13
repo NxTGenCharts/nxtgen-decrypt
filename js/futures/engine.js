@@ -82,33 +82,39 @@ function buildLevels(snap, direction, setupType){
 
   if(setupType === 'AI Scalp'){
     // Stop distance is ATR-scaled so it self-adjusts to each symbol's/
-    // moment's own volatility instead of a fixed %. The floor was
-    // previously 0.15% — against real round-trip taker fees of roughly
-    // 0.10-0.12% (Bybit/Binance/Gate.io/Bitget; see costs.js), that meant
-    // fees alone could eat 70-80%+ of the stop, which is what real
-    // Live/Demo trading exposed: a near-breakeven GROSS win rate turning
-    // sharply net-negative purely on fee drag, not a bad signal. Floor
-    // raised to 0.35% so fees are a materially smaller, survivable slice
-    // of the risk on every trade — the noTradeEngine.js fee-to-stop-ratio
-    // gate is the general-purpose backstop for this; this floor is the
-    // fix at the source.
+    // moment's own volatility instead of a fixed %. Floor raised again,
+    // 0.35% -> 0.45%, after a real measured run (6 single-strategy
+    // backtests, 30d/5m/Bybit, ~250-425 trades each) showed EVERY scalp-
+    // style setup still fee-negative even with the earlier 0.35% floor —
+    // AI Scalp alone: 388 trades, 38.1% win rate, PROFIT-POSITIVE gross
+    // (net -$5012 + fees $6562 = +$1550 gross), but fees alone (~65% of
+    // the whole starting balance across the run) erased it entirely. Fee
+    // $ scales with notional, and notional = riskAmount / stopDistancePct
+    // (see risk.js positionSize) — so fee$-per-trade is proportional to
+    // riskAmount x (feePct / stopDistancePct); widening the stop directly
+    // shrinks that ratio without changing how much is actually risked.
+    // 0.35% -> 0.45% is roughly a 22% cut to fee $ per trade, all else
+    // equal. This is a mechanical fix to a measured cost problem, not a
+    // tuned guess at improving the win rate itself — re-run the backtest
+    // to see the actual before/after, the way every other change in this
+    // file has been.
     const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
     const atrPct5 = (atrM5 / entry) * 100;
-    const distPct = clamp(atrPct5 * 1.1, 0.35, 0.9);
+    const distPct = clamp(atrPct5 * 1.1, 0.45, 1.0);
     const stopPrice = direction === 'LONG' ? entry * (1 - distPct / 100) : entry * (1 + distPct / 100);
     return { entry, stopPrice, stopDistancePct: distPct, atrPct: atrPct5 };
   }
 
   if(setupType === 'Nova Scalp'){
-    // Same tight, self-adjusting ATR-scaled stop character as AI Scalp
-    // just above (see that branch's comment on the 0.35% floor and why
-    // it exists) — a VWAP-reclaim scalp is exactly as fee-sensitive on a
-    // raw stop distance as an EMA-slope scalp is, so it gets the
-    // identical floor rather than inheriting the wider structural stop
-    // below meant for slower trend/breakout setups.
+    // Same reasoning and same-sized floor bump as AI Scalp just above
+    // (0.35% -> 0.45%) — a VWAP-reclaim scalp is exactly as exposed to
+    // the fee$-scales-with-notional problem described there, and this
+    // codebase's real measured numbers (see AI Scalp's comment) don't
+    // distinguish between the two setups on that front; both get the
+    // identical fix.
     const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
     const atrPct5 = (atrM5 / entry) * 100;
-    const distPct = clamp(atrPct5 * 1.0, 0.35, 0.85);
+    const distPct = clamp(atrPct5 * 1.0, 0.45, 0.95);
     const stopPrice = direction === 'LONG' ? entry * (1 - distPct / 100) : entry * (1 + distPct / 100);
     return { entry, stopPrice, stopDistancePct: distPct, atrPct: atrPct5 };
   }
@@ -133,15 +139,14 @@ function buildLevels(snap, direction, setupType){
   // Stop uses the tighter of (structure invalidation, a volatility-scaled
   // cap) so a single distant swing point can't blow the stop out — but
   // never tighter than 1x ATR, so it isn't sitting inside normal noise.
-  // Floor raised from 0.12% to 0.35% for the same reason as AI Scalp's
-  // own floor above (see its comment): a 0.12% stop against real
-  // round-trip futures fees of ~0.10-0.12% (costs.js) means fees alone
-  // could eat 80-100%+ of the risk on every trade, independent of signal
-  // quality — this was never actually exercised while every non-AI-Scalp
-  // setup sat inactive (see detectAllSetups in setups.js), so it never
-  // got caught in Live/Demo trading the way AI Scalp's did, but it was
-  // the same landmine waiting for whichever setup got enabled next.
-  const stopDistancePct = clamp(Math.max(atrPct * 1.0, Math.min(structuralStopPct, atrPct * 2.0)), 0.35, 1.2);
+  // Floor raised again, 0.35% -> 0.45%, same measured basis and same
+  // reasoning as AI Scalp/Nova Scalp's own floor bump just above (see
+  // that comment for the fee$-scales-with-notional math) — the same
+  // 6-run measurement showed Trend Continuation, Liquidity Sweep
+  // Reversal, and Breakout + Retest all still fee-heavy at 0.35% (fees
+  // ran 45-99% of the whole account's starting balance across each
+  // 30-day/~250-425-trade run), not just the two dedicated scalps.
+  const stopDistancePct = clamp(Math.max(atrPct * 1.0, Math.min(structuralStopPct, atrPct * 2.0)), 0.45, 1.3);
   const stopPrice = direction === 'LONG' ? entry * (1 - stopDistancePct / 100) : entry * (1 + stopDistancePct / 100);
 
   return { entry, stopPrice, stopDistancePct, atrPct };
@@ -293,13 +298,14 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   // terms, so the default 0.30% net-profit floor (sized for the
   // bigger trend/breakout targets) would reject nearly every scalp
   // signal even when it clears round-trip costs. Each still has to
-  // clear costs, just not by as much. Raised from 0.03% to 0.15% for
-  // AI Scalp after real Live/Demo trading showed 0.03% left almost no
-  // margin above real round-trip fees (~0.10-0.12%) once spread and
-  // slippage were added on top — trades were clearing the floor on
-  // paper while being fee-negative in practice.
-  const minNetProfit = primary.type === 'AI Scalp' ? (cfg.aiScalpMinNetProfitPct ?? 0.15)
-    : primary.type === 'Nova Scalp' ? (cfg.novaScalpMinNetProfitPct ?? 0.15)
+  // clear costs, just not by as much. Raised again, 0.15% -> 0.20%,
+  // after the same measured 6-run backtest showed 0.15% still letting
+  // through trades whose gross edge fees would erase in aggregate —
+  // paired with the wider stop floors above, this demands a genuinely
+  // wider margin above real costs before either scalp is approved at
+  // all, not just a wider stop on the same thin edge.
+  const minNetProfit = primary.type === 'AI Scalp' ? (cfg.aiScalpMinNetProfitPct ?? 0.20)
+    : primary.type === 'Nova Scalp' ? (cfg.novaScalpMinNetProfitPct ?? 0.20)
     : primary.type === 'Range Scalp' ? (cfg.scalpMinNetProfitPct ?? 0.04)
     : (cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT);
 
