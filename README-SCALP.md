@@ -804,3 +804,56 @@ proven improvement. It goes in the same bucket as everything else in
 this build: judge it against real Live/Demo trade history, not a claim
 made here.
 
+## Update: NxTGen Scalp rebuilt around Parabolic SAR / EMA50+EMA100 / Awesome Oscillator
+
+On direct request to trade a specific, chart-verified pattern instead of
+the EMA9-slope momentum read described above, `detectAiScalp` in
+`setups.js` (type `NxTGen Scalp`, id `aiScalp` in `STRATEGY_REGISTRY`) is
+now a different detector entirely. `js/futures/indicators.js` gained two
+new pure functions to support it: `parabolicSar()` (a standard Wilder
+SAR, returning one value per bar) and `awesomeOscillator()` (SMA5-SMA34
+of median price, with per-bar 'green'/'red' coloring — a bar is green
+when it's higher than the prior bar, red when lower, matching the
+standard convention rather than a simple positive/negative split).
+
+**The setup, read directly off two reference chart screenshots**: watch
+where the SAR dots sit relative to the EMA50/EMA100 band. SAR flipping
+from above the band to below it is a Buy; the dots were riding above
+price through a downtrend, then cross under both EMAs as the trend
+turns up. The mirror flip (below the band to above it) is a Sell. Both
+are confirmed by the Awesome Oscillator's bar color: green for Buy, red
+for Sell — hard gates, not confidence bonuses, matching how the AO
+histogram color lines up with the boxed cross in both reference charts.
+
+**One thing that isn't obvious from the charts and needed real testing
+to get right**: the SAR dots don't jump the whole EMA band in a single
+bar, and the AO's own color doesn't necessarily flip on the exact same
+bar the band-cross completes either — it's a lagging SMA5-vs-SMA34 read.
+Against a synthetic oscillating price series built to check this
+(sine-wave "trend" plus per-bar noise, not the two-phase drift used for
+an earlier, misleading first test), the AO color typically caught up to
+a completed cross something like 15-25 bars later, not on the same bar.
+A same-bar-only requirement fired essentially never in that test. The
+detector instead treats a cross as live for up to 30 bars after it
+completes (scanning back, skipping ambiguous bars where SAR sits inside
+the band, for the most recent bar clearly on the OTHER side) — confirmed
+against that same synthetic series to correctly fire LONG near troughs
+and SHORT near peaks once the recency window was wide enough for the AO
+to realistically catch up.
+
+**Confidence, not gated on**: EMA50-vs-EMA100 alignment (does the faster
+EMA already sit on the trade's side of the slower one, i.e. does the
+band itself agree the trend has turned, not just the SAR dot) and the AO
+color streak (how many consecutive bars have held the confirming color).
+A fresh SAR flip is often the leading edge of a trend change and won't
+always have the EMAs fully aligned yet, so this isn't a hard requirement
+the way the cross + AO color are.
+
+**Stress-tested** (3,510 detector calls across flat, sine-wave, and pure
+-noise synthetic series, no real-data backtest yet): zero exceptions,
+no out-of-range confidence values, signals fired at a plausible rate.
+Same standing caveat as every setup in this file — a clean mechanism and
+a passing stress test are not a measured win rate. Run it through the
+Backtest tab against real historical data before sizing anything real
+behind it.
+

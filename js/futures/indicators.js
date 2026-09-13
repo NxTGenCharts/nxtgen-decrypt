@@ -115,6 +115,92 @@ export function volumeExpansion(candles, lookback){
   return avg > 0 ? last / avg : 1;
 }
 
+// Parabolic SAR (Wilder) — returns an array aligned to `candles`, one SAR
+// value per bar (null for the first bar, which only seeds the trend).
+// Standard flip rule: SAR trails the trend, accelerating (`step` per new
+// extreme point, capped at `maxStep`) toward price; when price crosses
+// the SAR it flips trend and resets SAR to the prior extreme point. Used
+// by the "NxTGen Scalp" setup (setups.js) to read where the SAR dots sit
+// relative to the EMA50/EMA100 band, exactly like the reference charts
+// that setup was built from show the dots crossing the moving averages.
+export function parabolicSar(candles, step, maxStep){
+  step = step || 0.02; maxStep = maxStep || 0.2;
+  const n = candles.length;
+  const out = new Array(n).fill(null);
+  if(n < 2) return out;
+
+  let uptrend = candles[1].c >= candles[0].c;
+  let af = step;
+  let ep = uptrend ? candles[0].h : candles[0].l;
+  let sarVal = uptrend ? candles[0].l : candles[0].h;
+
+  for(let i = 1; i < n; i++){
+    const prevLow = candles[i - 1].l, prevHigh = candles[i - 1].h;
+    const prev2Low = i >= 2 ? candles[i - 2].l : prevLow;
+    const prev2High = i >= 2 ? candles[i - 2].h : prevHigh;
+    let next = sarVal + af * (ep - sarVal);
+
+    if(uptrend){
+      next = Math.min(next, prevLow, prev2Low);
+      if(candles[i].l < next){
+        uptrend = false;
+        next = ep;
+        ep = candles[i].l;
+        af = step;
+      } else if(candles[i].h > ep){
+        ep = candles[i].h;
+        af = Math.min(af + step, maxStep);
+      }
+    } else {
+      next = Math.max(next, prevHigh, prev2High);
+      if(candles[i].h > next){
+        uptrend = true;
+        next = ep;
+        ep = candles[i].h;
+        af = step;
+      } else if(candles[i].l < ep){
+        ep = candles[i].l;
+        af = Math.min(af + step, maxStep);
+      }
+    }
+    sarVal = next;
+    out[i] = sarVal;
+  }
+  return out;
+}
+
+// Awesome Oscillator (Bill Williams): SMA5 - SMA34 of the median price
+// (H+L)/2. Returns `{ values, colors }`, both arrays aligned to
+// `candles` (null while either SMA is still warming up). Coloring
+// follows the standard convention — 'green' when a bar is HIGHER than
+// the previous bar (rising, regardless of sign), 'red' when LOWER
+// (falling) — which is what the reference charts' AO histogram color is
+// keying off, not simply positive-vs-negative.
+export function awesomeOscillator(candles){
+  const median = candles.map(c => (c.h + c.l) / 2);
+  const smaSeries = (vals, period) => {
+    const out = new Array(vals.length).fill(null);
+    let sum = 0;
+    for(let i = 0; i < vals.length; i++){
+      sum += vals[i];
+      if(i >= period) sum -= vals[i - period];
+      if(i >= period - 1) out[i] = sum / period;
+    }
+    return out;
+  };
+  const s5 = smaSeries(median, 5);
+  const s34 = smaSeries(median, 34);
+  const values = median.map((_, i) => (s5[i] != null && s34[i] != null) ? s5[i] - s34[i] : null);
+  const colors = new Array(values.length).fill(null);
+  for(let i = 1; i < values.length; i++){
+    if(values[i] == null || values[i - 1] == null) continue;
+    if(values[i] > values[i - 1]) colors[i] = 'green';
+    else if(values[i] < values[i - 1]) colors[i] = 'red';
+    else colors[i] = colors[i - 1]; // flat bar — carry the previous color, same as most charting platforms
+  }
+  return { values, colors };
+}
+
 export function pctChange(from, to){
   return from ? ((to - from) / from) * 100 : 0;
 }

@@ -80,13 +80,13 @@ function buildLevels(snap, direction, setupType){
   const atrM15 = atr(snap.m15, 14) || entry * 0.003;
   const atrPct = (atrM15 / entry) * 100;
 
-  if(setupType === 'AI Scalp'){
+  if(setupType === 'NxTGen Scalp'){
     // Stop distance is ATR-scaled so it self-adjusts to each symbol's/
     // moment's own volatility instead of a fixed %. Floor raised again,
     // 0.35% -> 0.45%, after a real measured run (6 single-strategy
     // backtests, 30d/5m/Bybit, ~250-425 trades each) showed EVERY scalp-
     // style setup still fee-negative even with the earlier 0.35% floor —
-    // AI Scalp alone: 388 trades, 38.1% win rate, PROFIT-POSITIVE gross
+    // NxTGen Scalp alone: 388 trades, 38.1% win rate, PROFIT-POSITIVE gross
     // (net -$5012 + fees $6562 = +$1550 gross), but fees alone (~65% of
     // the whole starting balance across the run) erased it entirely. Fee
     // $ scales with notional, and notional = riskAmount / stopDistancePct
@@ -106,10 +106,10 @@ function buildLevels(snap, direction, setupType){
   }
 
   if(setupType === 'Nova Scalp'){
-    // Same reasoning and same-sized floor bump as AI Scalp just above
+    // Same reasoning and same-sized floor bump as NxTGen Scalp just above
     // (0.35% -> 0.45%) — a VWAP-reclaim scalp is exactly as exposed to
     // the fee$-scales-with-notional problem described there, and this
-    // codebase's real measured numbers (see AI Scalp's comment) don't
+    // codebase's real measured numbers (see NxTGen Scalp's comment) don't
     // distinguish between the two setups on that front; both get the
     // identical fix.
     const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
@@ -140,7 +140,7 @@ function buildLevels(snap, direction, setupType){
   // cap) so a single distant swing point can't blow the stop out — but
   // never tighter than 1x ATR, so it isn't sitting inside normal noise.
   // Floor raised again, 0.35% -> 0.45%, same measured basis and same
-  // reasoning as AI Scalp/Nova Scalp's own floor bump just above (see
+  // reasoning as NxTGen Scalp/Nova Scalp's own floor bump just above (see
   // that comment for the fee$-scales-with-notional math) — the same
   // 6-run measurement showed Trend Continuation, Liquidity Sweep
   // Reversal, and Breakout + Retest all still fee-heavy at 0.35% (fees
@@ -155,7 +155,7 @@ function buildLevels(snap, direction, setupType){
 // Attaches the fixed 1.5R / 2.5R / 3.25R partial take-profit structure
 // (buildTpLevels, costs.js) to whatever stop-distance buildLevels()
 // above already produced for this setup — same structure for every
-// setup type now (previously AI Scalp/Range Scalp were single-exit and
+// setup type now (previously NxTGen Scalp/Range Scalp were single-exit and
 // the trend/breakout setups used a per-strategy reward:risk ratio; the
 // exact TP1/TP2/TP3-at-1.5R/2.5R/3.25R structure requested replaces
 // both). entryFeePct/exitFeePct/spreadPct/slippagePct are what makes
@@ -239,7 +239,7 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   const levelsStopOnly = buildLevels(snap, direction, primary.type);
   const volExp = volumeExpansion(snap.m5, 10);
   const execution = decideExecution({ setupType: primary.type, volExpansionRatio: volExp });
-  const holdMinutes = primary.type === 'AI Scalp' ? 12 : primary.type === 'Nova Scalp' ? 12 : primary.type === 'Range Scalp' ? 20 : 90; // scalp strategies are meant to resolve fast; used for funding-cost estimation
+  const holdMinutes = primary.type === 'NxTGen Scalp' ? 12 : primary.type === 'Nova Scalp' ? 12 : primary.type === 'Range Scalp' ? 20 : 90; // scalp strategies are meant to resolve fast; used for funding-cost estimation
 
   // Fees/spread/slippage have to be known BEFORE the TP levels are
   // built (not after, like the old single-target flow) — TP1 has to
@@ -304,7 +304,7 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   // paired with the wider stop floors above, this demands a genuinely
   // wider margin above real costs before either scalp is approved at
   // all, not just a wider stop on the same thin edge.
-  const minNetProfit = primary.type === 'AI Scalp' ? (cfg.aiScalpMinNetProfitPct ?? 0.20)
+  const minNetProfit = primary.type === 'NxTGen Scalp' ? (cfg.aiScalpMinNetProfitPct ?? 0.20)
     : primary.type === 'Nova Scalp' ? (cfg.novaScalpMinNetProfitPct ?? 0.20)
     : primary.type === 'Range Scalp' ? (cfg.scalpMinNetProfitPct ?? 0.04)
     : (cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT);
@@ -447,7 +447,7 @@ export function managePositions(dayState, tradeHistory, cfg){
     const hitTP = (price) => dir === 1 ? candle.h >= price : candle.l <= price;
     const hitSL = candle.h !== undefined && (dir === 1 ? candle.l <= pos.stop : candle.h >= pos.stop);
     const ageMinutes = (mockMarket.now() - pos.openedAt) / 60_000;
-    const timeStopMinutes = pos.setup === 'AI Scalp' ? (cfg.aiScalpTimeStopMinutes || 40)
+    const timeStopMinutes = pos.setup === 'NxTGen Scalp' ? (cfg.aiScalpTimeStopMinutes || 40)
       : pos.setup === 'Nova Scalp' ? (cfg.novaScalpTimeStopMinutes || 20)
       : pos.setup === 'Range Scalp' ? (cfg.scalpTimeStopMinutes || 45)
       : (cfg.timeStopMinutes || 240);
@@ -548,7 +548,7 @@ function closeTrade(pos, exitPrice, pnl, exitReason, dayState, tradeHistory, ext
   // closed the trade), silently dropping any TP1/TP2 partial P&L from the
   // balance itself even though it WAS correctly counted in realizedNetUsd
   // above and in pos.finalNetUsd. Any trade with 2+ partial exits before
-  // its final close — which for AI Scalp is nearly every winning trade,
+  // its final close — which for NxTGen Scalp is nearly every winning trade,
   // since TP1/TP2/TP3 share the same price and fire back-to-back in one
   // candle — was crediting equity with only the last 25-50% of its actual
   // profit. That's why Current Balance could end up BELOW the starting

@@ -5,7 +5,7 @@
 // reasons[] }. The ensemble in engine.js combines whichever of
 // these fire on a given symbol/cycle.
 // =============================================================
-import { ema, atr, rsi, macdHistogram, vwap, swingLevels, volumeExpansion, closes, clamp } from './indicators.js';
+import { ema, emaSeries, atr, rsi, macdHistogram, vwap, swingLevels, volumeExpansion, closes, clamp, parabolicSar, awesomeOscillator } from './indicators.js';
 import { REGIMES } from './regime.js';
 
 const TREND_REGIMES = new Set([REGIMES.STRONG_BULL, REGIMES.WEAK_BULL, REGIMES.STRONG_BEAR, REGIMES.WEAK_BEAR]);
@@ -223,24 +223,24 @@ export function detectRangeScalp(snap, regime){
 // move back to a mean is naturally limited; trend-following setups
 // (Trend Continuation, Breakout + Retest) get a wider one since a real
 // trend can run further than a single ATR-scaled stop; the two faster,
-// more scalp-like setups (AI Scalp, Liquidity Sweep Reversal) sit at
+// more scalp-like setups (NxTGen Scalp, Liquidity Sweep Reversal) sit at
 // the middle. These are starting points, not measured optima — see the
 // honesty note on detectAllSetups below.
 export const STRATEGY_REGISTRY = [
   {
-    id: 'aiScalp', type: 'AI Scalp', detector: 'detectAiScalp', defaultRR: 2.0, defaultEnabled: true,
-    label: 'AI Scalp',
-    description: 'Trades WITH short-term momentum — EMA9 sloping in the trade direction, price confirming on the momentum side, a push candle behind it. Fast, frequent, the original strategy in this build.',
+    id: 'aiScalp', type: 'NxTGen Scalp', detector: 'detectAiScalp', defaultRR: 2.0, defaultEnabled: true,
+    label: 'NxTGen Scalp',
+    description: 'Parabolic SAR crossing the EMA50/EMA100 band — SAR flipping from above the band to below it is a Buy, the mirror flip is a Sell — confirmed by the Awesome Oscillator bar color (green for Buy, red for Sell) matching the cross.',
   },
   {
     id: 'novaScalp', type: 'Nova Scalp', detector: 'detectNovaScalp', defaultRR: 2.0, defaultEnabled: true,
     label: 'Nova Scalp',
-    description: '5m VWAP-reclaim scalp: price sits on one side of its rolling VWAP for 2+ bars, then reclaims it with a push candle and a volume expansion behind it. A genuinely different trigger from AI Scalp (VWAP cross vs. EMA slope), not a re-parameterized copy — see its own comment in setups.js for the honesty note on measuring this before sizing real risk behind it.',
+    description: '5m VWAP-reclaim scalp: price sits on one side of its rolling VWAP for 2+ bars, then reclaims it with a push candle and a volume expansion behind it. A genuinely different trigger from NxTGen Scalp (VWAP reclaim vs. PSAR/EMA-band cross), not a re-parameterized copy — see its own comment in setups.js for the honesty note on measuring this before sizing real risk behind it.',
   },
   {
     id: 'trendContinuation', type: 'Trend Continuation', detector: 'detectTrendContinuation', defaultRR: 2.5, defaultEnabled: true,
     label: 'Trend Continuation',
-    description: 'Enters on a pullback INTO an established trend (price retracing toward EMA20/VWAP on contracting volume, then momentum resuming) rather than fresh momentum — a genuinely different entry mechanism from AI Scalp.',
+    description: 'Enters on a pullback INTO an established trend (price retracing toward EMA20/VWAP on contracting volume, then momentum resuming) rather than fresh momentum — a genuinely different entry mechanism from NxTGen Scalp.',
   },
   {
     id: 'liquiditySweep', type: 'Liquidity Sweep Reversal', detector: 'detectLiquiditySweep', defaultRR: 2.0, defaultEnabled: true,
@@ -255,7 +255,7 @@ export const STRATEGY_REGISTRY = [
   {
     id: 'breakoutRetest', type: 'Breakout + Retest', detector: 'detectBreakoutRetest', defaultRR: 2.5, defaultEnabled: false,
     label: 'Breakout + Retest',
-    description: 'Consolidation, then a breakout, then a retest of that level with volume confirmation. Off by default: conceptually close to AI Scalp\'s own momentum-chasing character, so it adds less diversification than the two enabled by default.',
+    description: 'Consolidation, then a breakout, then a retest of that level with volume confirmation. Off by default: conceptually close to NxTGen Scalp\'s own momentum-chasing character, so it adds less diversification than the two enabled by default.',
   },
 ];
 
@@ -297,128 +297,139 @@ export function detectAllSetups(snap, regime, strategyConfig){
     .filter(Boolean);
 }
 
-// ---- SETUP F: AI Scalp (fast, genuine 1:1 momentum continuation) ----
-// The active strategy in this build, replacing Range Scalp. Trades WITH
-// short-term M5 momentum (EMA9 sloping in the trade direction, price
-// above/below it, a volume push behind the move) rather than fading
-// against it. That choice isn't arbitrary — an earlier version of this
-// detector faded stretched moves back toward the mean (mirroring Range
-// Scalp's logic) and measured a ~25-29% win rate in backtesting against
-// this mock market, well BELOW the ~50% a fair coin flip would get at
-// 1:1. mockMarket.js's "mood" process gives price genuine short-run
-// persistence (see its header comment), so a naive fade was
-// systematically fighting real, if mild, momentum. Trading with that
-// persistence instead is what actually gets this closer to a fair
-// game — see README-SCALP.md for the measured numbers.
+// ---- SETUP F: NxTGen Scalp (Parabolic SAR / EMA50+EMA100 cross, AO-confirmed) ----
+// Rebuilt on direct request to trade a specific, chart-verified pattern,
+// replacing the earlier EMA9-slope momentum read. That earlier version's
+// own history (deterministic-seed bug, "averaging close to breakeven"
+// once fixed — see README-SCALP.md) is a real record of what was tried
+// before this, not deleted, just no longer what this detector does.
 //
-// The honest math still applies regardless of direction: for a
-// symmetric 1:1 stop:target, P(hit TP first) on a truly fair game is
-// 50% before costs. There is no amount of confidence scoring that
-// pushes a strategy with no real edge to a high win rate without either
-// a genuine directional edge or re-skewing stop vs. target — which just
-// turns this back into Range Scalp under a different name. This
-// detector's edge comes from trading WITH mockMarket.js's "mood"
-// process (see its header comment) instead of fighting it, confirmed by
-// EMA9 slope + price + a push candle. How strong that edge actually is,
-// though, was measured wrong for a while: the mock generator used a
-// fixed seed, so every "independent backtest run" cited here early on
-// was replaying the same one price sequence, not sampling different
-// ones — see "deterministic seed bug" in README-SCALP.md. With that
-// fixed, genuinely independent runs range from clearly losing to
-// clearly profitable, averaging close to breakeven — a real, if much
-// less confident, edge instead of the specific win-rate figures
-// (69-73%, later 65-76%) this comment used to quote as settled (that
-// edge is still real relative to the earlier, opposite-direction fade
-// attempt, which measured ~25-29% — see git history). Whatever this
-// edge actually is, it is a property of THIS synthetic feed's
-// momentum, not a guarantee — it will drift with market conditions, and
-// there's no reason to expect it holds unchanged once Phase 2 swaps in
-// real exchange data. What confidence scoring can legitimately do, and
-// is tuned to do here, is reject the lowest-quality setups (no
-// confirming push candle, fighting a strong opposing HTF trend, no
-// volume behind the move) so the trades it does take carry more
-// confluence than a coin flip.
+// The setup, read directly off the two reference chart screenshots this
+// was built from: watch where the Parabolic SAR dots sit relative to the
+// EMA50/EMA100 band.
+//   - BUY: SAR flips from sitting ABOVE the band to BELOW it (the dots
+//     were riding above price through a downtrend, then cross under both
+//     EMAs as the trend turns up) — AND the latest Awesome Oscillator bar
+//     is GREEN (higher than the prior bar).
+//   - SELL: the mirror image — SAR flips from BELOW the band to ABOVE it,
+//     AND the latest AO bar is RED (lower than the prior bar).
+// Both conditions are hard gates, not confidence bonuses — a SAR/EMA
+// cross with the wrong-colored AO bar, or a right-colored AO bar with no
+// cross, is not a signal, exactly as shown in both reference charts
+// (the boxed cross lines up with the AO color flip in each one).
+//
+// EMA50-vs-EMA100 alignment (is the faster EMA already on the trade's
+// side of the slower one — i.e. does the band itself agree the trend has
+// turned, not just the SAR dot) and the AO color streak feed confidence,
+// not the gate itself, since a SAR flip is often the leading edge of a
+// trend change and won't always have the EMAs fully aligned yet.
+//
+// Same honesty standard as every other setup in this file: this is a
+// specific, well-defined technical pattern with a clear mechanism, not a
+// claim about a measured win rate — it hasn't been backtested under this
+// engine's current fee model/stop floors yet. Run it through the
+// Backtest tab (Strategies panel — shows up there via STRATEGY_REGISTRY
+// below, unchanged by this rewrite) against real historical data before
+// sizing anything real behind it.
 export function detectAiScalp(snap, regime){
   const m5 = snap.m5;
-  if(m5.length < 30) return null;
+  if(m5.length < 110) return null; // EMA100 and PSAR both need real warmup, not just enough bars to not crash
 
-  const c = closes(m5);
-  const ema9 = ema(c, 9);
-  const atr5 = atr(m5, 14);
-  if(!ema9 || !atr5) return null;
+  const psar = parabolicSar(m5);
+  const ema50 = emaSeries(closes(m5), 50);
+  const ema100 = emaSeries(closes(m5), 100);
+  const ao = awesomeOscillator(m5);
 
-  const last = m5[m5.length - 1];
-  const prevCloses = c.slice(0, -3);
-  const ema9Prev = prevCloses.length >= 9 ? ema(prevCloses, 9) : null;
-  if(ema9Prev == null) return null;
+  const i = m5.length - 1;
+  if(psar[i] == null || ao.colors[i] == null) return null;
 
-  const slopePct = ((ema9 - ema9Prev) / ema9Prev) * 100;
-  const atrPct = (atr5 / ema9) * 100;
-  if(atrPct <= 0) return null;
+  const bandHi = (idx) => Math.max(ema50[idx], ema100[idx]);
+  const bandLo = (idx) => Math.min(ema50[idx], ema100[idx]);
+  const sideAt = (idx) => {
+    if(psar[idx] == null) return null;
+    if(psar[idx] > bandHi(idx)) return 'above';
+    if(psar[idx] < bandLo(idx)) return 'below';
+    return null; // sitting inside the band — ambiguous, not a clean read either way
+  };
 
-  const slopeInAtr = Math.abs(slopePct) / atrPct; // EMA slope relative to typical volatility
-  if(slopeInAtr < 0.35) return null; // too flat to call it real short-term momentum
+  const nowSide = sideAt(i);
+  if(nowSide == null) return null; // SAR sitting inside the band right now
 
-  const dir = slopePct > 0 ? 'LONG' : 'SHORT';
-  const priceConfirms = dir === 'LONG' ? last.c > ema9 : last.c < ema9;
-  if(!priceConfirms) return null; // price has to actually be on the momentum side of its own EMA
+  // The dots don't jump the whole band in a single bar (see the
+  // reference charts, where the transition runs across several bars,
+  // and the AO doesn't necessarily flip color on the exact same bar the
+  // band-cross completes either — it's a lagging SMA5-vs-SMA34 read, so
+  // it typically catches up a handful of bars later). So "was this a
+  // recent cross" is read by scanning back for the most recent bar that
+  // was CLEARLY on the OTHER side (skipping ambiguous in-between bars),
+  // and treating the cross as live as long as that's within
+  // RECENCY_BARS — not just the single immediate-prior bar.
+  const RECENCY_BARS = 30;
+  let priorSide = null, crossAge = null;
+  for(let k = i - 1; k >= Math.max(0, i - 40); k--){
+    const s = sideAt(k);
+    if(s == null || s === nowSide) continue; // still on nowSide (or ambiguous) — keep looking further back
+    priorSide = s;
+    crossAge = i - k;
+    break;
+  }
+  if(priorSide == null || crossAge > RECENCY_BARS) return null; // no recent cross to confirm
 
-  const pushCandle = dir === 'LONG' ? last.c > last.o : last.c < last.o;
-  if(!pushCandle) return null; // want the latest candle pushing in the trade direction, not stalling
+  const crossedBelow = priorSide === 'above' && nowSide === 'below'; // SAR flipped under the band -> Buy
+  const crossedAbove = priorSide === 'below' && nowSide === 'above'; // SAR flipped over the band -> Sell
+  if(!crossedBelow && !crossedAbove) return null;
 
-  // Don't chase momentum straight into a strong OPPOSING HTF trend —
-  // that's a short-term counter-trend pop that's likely to fail fast.
-  //
-  // An earlier revision of this file tried widening this to block WEAK
-  // opposing trends too, and made RSI/volume hard requirements instead
-  // of confidence bonuses — all individually defensible on standard
-  // multi-timeframe-confluence theory. Reverted: tested against this
-  // synthetic feed (the only data available to test against), it turned
-  // profit factor from ~1.5 into ~0.8 — a LOSING strategy — across three
-  // separate runs. Shipping a change with no evidence it helps real
-  // trading and clear evidence it hurts the one thing that could be
-  // measured would be worse than leaving this as-is. See README-SCALP.md.
+  const dir = crossedBelow ? 'LONG' : 'SHORT';
+  const aoColor = ao.colors[i];
+  if(dir === 'LONG' && aoColor !== 'green') return null; // AO must confirm the cross's direction
+  if(dir === 'SHORT' && aoColor !== 'red') return null;
+
+  // Same discipline every other fast setup in this file holds to — don't
+  // take a fresh cross straight into a strong OPPOSING HTF trend. See
+  // detectAiScalp's git history / other setups' comments for what
+  // happened when this kind of gate was tested wider against this feed.
   if(dir === 'LONG' && regime.regime === REGIMES.STRONG_BEAR) return null;
   if(dir === 'SHORT' && regime.regime === REGIMES.STRONG_BULL) return null;
 
-  const rsiVal = rsi(m5, 14);
-  const rsiOk = dir === 'LONG' ? (rsiVal !== null && rsiVal > 52 && rsiVal < 78) : (rsiVal !== null && rsiVal < 48 && rsiVal > 22);
-  const volExp = volumeExpansion(m5, 10);
-  const volOk = volExp > 1.1;
+  const last = m5[i];
+  const emaTrendAligned = dir === 'LONG' ? ema50[i] > ema100[i] : ema50[i] < ema100[i];
+  const psarDistPct = Math.abs(psar[i] - (dir === 'LONG' ? bandLo(i) : bandHi(i))) / last.c * 100;
+
+  let aoStreak = 0;
+  for(let k = i; k >= 0 && ao.colors[k] === aoColor; k--) aoStreak++;
 
   const reasons = [
-    `M5 EMA9 sloping ${dir === 'LONG' ? 'up' : 'down'} (${slopeInAtr.toFixed(2)}x ATR over 3 bars)`,
-    `Price confirming on the momentum side of EMA9, pushing ${dir === 'LONG' ? 'higher' : 'lower'}`,
+    `Parabolic SAR crossed ${dir === 'LONG' ? 'below' : 'above'} the EMA50/EMA100 band`,
+    `Awesome Oscillator bar is ${aoColor} (${dir === 'LONG' ? 'rising' : 'falling'}), confirming the cross`,
   ];
-  if(rsiOk) reasons.push(`RSI ${rsiVal.toFixed(0)} in trend-continuation zone, not yet exhausted`);
-  if(volOk) reasons.push(`Volume ${volExp.toFixed(2)}x average behind the push`);
+  if(emaTrendAligned) reasons.push(`EMA50 ${dir === 'LONG' ? 'above' : 'below'} EMA100 confirms the ${dir === 'LONG' ? 'up' : 'down'}trend`);
+  if(aoStreak >= 2) reasons.push(`${aoStreak} consecutive ${aoColor} AO bars behind the signal`);
 
   let conf = 55;
-  conf += slopeInAtr > 0.7 ? 12 : 5;
-  conf += rsiOk ? 12 : 0;
-  conf += volOk ? 8 : 0;
-  conf = clamp(conf, 0, 90);
+  conf += emaTrendAligned ? 15 : 0;
+  conf += aoStreak >= 3 ? 10 : aoStreak >= 2 ? 5 : 0;
+  conf += psarDistPct > 0.15 ? 10 : 3;
+  conf = clamp(conf, 0, 92);
 
-  return { type: 'AI Scalp', direction: dir, rawConfidence: Math.round(conf), reasons, meta: { slopeInAtr, atrPct } };
+  return { type: 'NxTGen Scalp', direction: dir, rawConfidence: Math.round(conf), reasons, meta: { psarDistPct, aoStreak, emaTrendAligned } };
 }
 
 // ---- SETUP G: Nova Scalp (VWAP reclaim continuation) ----
-// A second, independently-triggered 5m scalp — same "trade WITH the
-// order flow, not against it" discipline as AI Scalp above (see that
-// detector's own note on why fading a stretched move measured badly
-// against this feed), but a genuinely different trigger mechanism:
-// instead of watching EMA9 slope, this watches for price crossing back
+// A second, independently-triggered 5m scalp — a genuinely different
+// trigger mechanism from NxTGen Scalp's PSAR/EMA-band cross above:
+// instead of watching the SAR flip sides of the EMA50/EMA100 band, this
+// watches for price crossing back
 // over its own rolling VWAP after sitting on the OTHER side for the
 // prior two bars — a "reclaim" — confirmed by a push candle in the
 // reclaim direction and a volume expansion behind it. VWAP reclaims are
 // a standard, well-documented intraday scalping trigger (institutional
 // flow frequently reacts around VWAP), which is why this is offered as
 // a second, differently-shaped 5m scalp rather than a re-parameterized
-// copy of AI Scalp — enabling both genuinely diversifies the signal
+// copy of NxTGen Scalp — enabling both genuinely diversifies the signal
 // source, it isn't the same detector twice.
 //
 // Same honesty standard this whole file holds every other setup to
-// (see AI Scalp's own comment, and detectAllSetups' note below): this
+// (see NxTGen Scalp's own comment, and detectAllSetups' note below): this
 // detector's LOGIC is sound and grounded in a real, widely-used scalping
 // technique, but that is not the same claim as a measured win rate. It
 // has not been backtested against real historical klines from within
@@ -429,7 +440,7 @@ export function detectAiScalp(snap, regime){
 // name, its presence in this registry, or a plausible-sounding
 // mechanism are none of them evidence of a particular win rate — only a
 // real backtest run against real historical data is, exactly the
-// standard AI Scalp's own history above (69-73%, then 65-76%, then
+// standard NxTGen Scalp's own history above (69-73%, then 65-76%, then
 // "averaging close to breakeven" once a measurement bug was fixed) is a
 // cautionary example of.
 export function detectNovaScalp(snap, regime){
@@ -466,7 +477,7 @@ export function detectNovaScalp(snap, regime){
   if(!pushCandle) return null; // want a genuine push through VWAP, not a weak wick close right on it
 
   // Don't chase a VWAP reclaim straight into a strong OPPOSING HTF trend
-  // — identical discipline to AI Scalp, for the identical reason (see
+  // — identical discipline to NxTGen Scalp, for the identical reason (see
   // that detector's comment on what happened when this kind of gate was
   // tested wider against the synthetic feed: turned a working strategy
   // into a losing one).

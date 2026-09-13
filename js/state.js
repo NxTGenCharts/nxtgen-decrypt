@@ -362,7 +362,7 @@ export const state = {
     mode: 'PAPER',           // PAPER only for now — LIVE requires the backend/key-security work called out in the architecture assessment
     highSelectivity: false,
     exchange: 'binance',
-    minConfidence: 70, // 60 was the floor of AI Scalp's 60-87 confidence range — filtered nothing; see setups.js. 70 requires at least one real confirmation (RSI alignment, or strong momentum + volume together).
+    minConfidence: 70, // 60 was the floor of NxTGen Scalp's 60-87 confidence range — filtered nothing; see setups.js. 70 requires at least one real confirmation (RSI alignment, or strong momentum + volume together).
     minRiskReward: 2.0, // legacy fallback only now — see js/futures/setups.js STRATEGY_REGISTRY for the real, per-strategy ratios
     // Per-strategy enable/disable and reward:risk override — populated
     // from STRATEGY_REGISTRY's defaults by initStrategySelector() in
