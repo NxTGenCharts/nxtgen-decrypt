@@ -1344,22 +1344,37 @@ async function fetchMexcFuturesKlines(symbol, interval, startMs, endMs){
 // from/to in UNIX SECONDS, one object per candle ({t,o,h,l,c,v}, all
 // but t as strings), capped at 2000 points/request. Same forward-paging
 // shape as MEXC's fetcher just above.
+const GATEIO_INTERVAL_SECONDS = { '5m': 300, '15m': 900, '30m': 1800, '1h': 3600 };
+const GATEIO_PAGE_LIMIT = 2000; // Gate.io's own documented per-request cap
+
 async function fetchGateioFuturesKlines(symbol, interval, startMs, endMs){
   const gateInterval = GATEIO_KLINE_INTERVAL[interval];
   if(!gateInterval) throw new Error(`Gate.io's futures candlestick API has no ${interval} granularity — try 5m, 15m, 30m, or 1h.`);
+  const intervalSec = GATEIO_INTERVAL_SECONDS[interval];
   const gateSymbol = toUnderscoreSymbol(symbol);
-  const toSec = Math.floor(endMs / 1000);
+  const toSecFinal = Math.floor(endMs / 1000);
   const out = [];
   let cursorFromSec = Math.floor(startMs / 1000);
   let guard = 0;
-  while(cursorFromSec < toSec && guard < 200){
+  // Unlike Binance/MEXC (which silently cap an over-wide request at
+  // their own per-page max and just hand back what fits), Gate.io's own
+  // docs warn the caller must not exceed the limit when specifying
+  // from/to/interval together — it 400s the WHOLE request instead of
+  // capping it. A 30-day range at 5m is ~8,640 candles against a 2,000
+  // cap, so passing the full range's `to` on every page (the original
+  // bug here) got every single symbol rejected outright. Each page's
+  // `to` is now bounded to at most GATEIO_PAGE_LIMIT candles past its
+  // own `from`, so no single request can ever ask for more than the
+  // documented max.
+  while(cursorFromSec < toSecFinal && guard < 500){
     guard++;
-    const url = `https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=${encodeURIComponent(gateSymbol)}&from=${cursorFromSec}&to=${toSec}&interval=${gateInterval}&limit=2000`;
+    const pageToSec = Math.min(toSecFinal, cursorFromSec + (GATEIO_PAGE_LIMIT - 1) * intervalSec);
+    const url = `https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=${encodeURIComponent(gateSymbol)}&from=${cursorFromSec}&to=${pageToSec}&interval=${gateInterval}`;
     const r = await fetch(url);
     if(!r.ok) throw new Error(`Gate.io klines HTTP ${r.status}`);
     const rows = await r.json();
-    if(!Array.isArray(rows) || !rows.length) break;
-    let lastT = cursorFromSec;
+    if(!Array.isArray(rows) || !rows.length){ cursorFromSec = pageToSec + intervalSec; continue; } // no trades in this window — skip forward rather than getting stuck
+    let lastT = cursorFromSec - intervalSec;
     for(const row of rows){
       const tSec = Number(row.t);
       const t = tSec * 1000;
@@ -1368,9 +1383,7 @@ async function fetchGateioFuturesKlines(symbol, interval, startMs, endMs){
       }
       if(tSec > lastT) lastT = tSec;
     }
-    if(lastT <= cursorFromSec) break; // stuck page — no forward progress
-    cursorFromSec = lastT + 1;
-    if(rows.length < 2000) break; // short page = caught up to toSec already
+    cursorFromSec = lastT >= cursorFromSec ? lastT + intervalSec : pageToSec + intervalSec; // always move forward, even on a stuck/empty-in-range page
   }
   const seenT = new Set();
   const dedup = out.filter(c => (seenT.has(c.t) ? false : (seenT.add(c.t), true)));
