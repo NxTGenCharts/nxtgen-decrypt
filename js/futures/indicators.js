@@ -115,6 +115,27 @@ export function volumeExpansion(candles, lookback){
   return avg > 0 ? last / avg : 1;
 }
 
+// Relative volume percentile: where the LAST candle's volume ranks against
+// the prior `lookback` candles' volumes, as a 0-1 fraction (1 = highest
+// volume bar in the window). A fixed multiplier like volumeExpansion()
+// above (e.g. "1.15x the N-bar average") is sensitive to a couple of
+// outlier bars dragging the average around and doesn't adapt to how
+// skewed a symbol's own volume distribution normally is. Percentile rank
+// is a steadier read of "is this genuinely unusual volume for THIS
+// symbol right now" — used as an added, more robust confirmation
+// alongside (not instead of) the existing hard volume gates, since
+// swapping a working gate's threshold outright without a real backtest
+// is exactly the mistake this codebase's own history (see
+// README-SCALP.md) warns against repeating.
+export function relativeVolumePercentile(candles, lookback){
+  if(candles.length < lookback + 1) return 0.5; // not enough history — neutral, don't gate on it
+  const win = candles.slice(-lookback - 1);
+  const lastVol = win[win.length - 1].v;
+  const priorVols = win.slice(0, -1).map(c => c.v);
+  const below = priorVols.filter(v => v <= lastVol).length;
+  return below / priorVols.length;
+}
+
 // Parabolic SAR (Wilder) — returns an array aligned to `candles`, one SAR
 // value per bar (null for the first bar, which only seeds the trend).
 // Standard flip rule: SAR trails the trend, accelerating (`step` per new

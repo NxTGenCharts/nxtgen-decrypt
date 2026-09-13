@@ -83,11 +83,12 @@ async function fetchSymbolKlines(exchange, symbol, interval, startMs, endMs){
   return data.candles || [];
 }
 
-// Minutes-per-bar for each selectable timeframe — used to size the
-// warmup window and the M15/H1 aggregation group sizes in backtest.js
-// (runBacktest's intervalMinutes param) relative to whichever timeframe
-// was actually fetched, instead of backtest.js silently assuming 5m.
-const TIMEFRAME_MINUTES = { '3m': 3, '5m': 5, '15m': 15, '30m': 30, '1h': 60 };
+// Minutes-per-bar for the backtest's base timeframe. LOCKED to 5m
+// everywhere (Paper, Backtest, Live/Demo all trade the same 5m candle —
+// see setups.js's Breakout+Retest/Range Reversal comments and
+// server.js's resolveSnapshotTimeframe). btTimeframe used to be a real
+// dropdown (3m/5m/15m/30m/1h); it's now fixed and disabled in the markup.
+const TIMEFRAME_MINUTES = { '5m': 5 };
 
 async function runBacktestFlow(){
   const range = computeRangeMs();
@@ -98,8 +99,8 @@ async function runBacktestFlow(){
   if(!Object.values(strategies).some(Boolean)){ showBtMessage('Enable at least one strategy to test.', 'error'); return; }
 
   const exchange = els.btExchange.value;
-  const timeframe = els.btTimeframe ? els.btTimeframe.value : '5m';
-  const intervalMinutes = TIMEFRAME_MINUTES[timeframe] || 5;
+  const timeframe = '5m'; // locked everywhere — see TIMEFRAME_MINUTES' comment
+  const intervalMinutes = TIMEFRAME_MINUTES[timeframe];
   const startingEquity = Math.max(100, parseFloat(els.btStartingBalance.value) || 10000);
   const riskPctPerTrade = Math.min(50, Math.max(0.1, parseFloat(els.btRiskPct.value) || 1));
   const leverage = Math.min(10, Math.max(1, parseInt(els.btLeverage.value, 10) || 5));

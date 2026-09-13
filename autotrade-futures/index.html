@@ -299,13 +299,9 @@
       </div>
 
       <div class="field" style="max-width:320px;margin-bottom:10px;">
-        <label for="fuLiveTimeframe" title="The candle size real trades are evaluated and TP1/TP2/TP3/SL are checked against — this is the scalp's actual execution timeframe, not just a chart setting. Regime/trend context (M15/H1) is still fetched independently at its own fixed granularity either way. Gate.io and MEXC don't offer a 3m kline — 5m is used for those two automatically if 3m is picked, with a one-time notice.">Timeframe</label>
-        <select id="fuLiveTimeframe">
-          <option value="3m">3m</option>
-          <option value="5m" selected>5m</option>
-          <option value="15m">15m</option>
-          <option value="30m">30m</option>
-          <option value="1h">1h</option>
+        <label for="fuLiveTimeframe" title="Locked to 5m — every strategy's entry decision runs on the same 5m candle across Paper, Backtest, and Live/Demo. Regime/trend context (M15/H1) is still fetched independently at its own fixed granularity either way.">Timeframe</label>
+        <select id="fuLiveTimeframe" disabled>
+          <option value="5m" selected>5m (fixed)</option>
         </select>
       </div>
 
@@ -429,13 +425,9 @@
           </select>
         </div>
         <div class="field">
-          <label for="btTimeframe" title="The candle size trades are evaluated and TP1/TP2/TP3/SL are checked against — this is the scalp's actual execution timeframe, not just a chart setting. Regime/trend context (M15/H1) is still computed independently at its own fixed granularity either way, aggregated up from whichever timeframe is picked here. MEXC and Gate.io don't offer 3m candles — pick 5m or wider if either is selected above.">Timeframe</label>
-          <select id="btTimeframe">
-            <option value="3m">3m (Binance/Bybit only)</option>
-            <option value="5m" selected>5m</option>
-            <option value="15m">15m</option>
-            <option value="30m">30m</option>
-            <option value="1h">1h</option>
+          <label for="btTimeframe" title="Locked to 5m — every strategy's entry decision runs on the same 5m candle across Paper, Backtest, and Live/Demo. Regime/trend context (M15/H1) is still computed independently at its own fixed granularity either way, aggregated up from 5m.">Timeframe</label>
+          <select id="btTimeframe" disabled>
+            <option value="5m" selected>5m (fixed)</option>
           </select>
         </div>
         <div class="field">

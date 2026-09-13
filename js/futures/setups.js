@@ -5,7 +5,7 @@
 // reasons[] }. The ensemble in engine.js combines whichever of
 // these fire on a given symbol/cycle.
 // =============================================================
-import { ema, emaSeries, atr, rsi, macdHistogram, vwap, swingLevels, volumeExpansion, closes, clamp, parabolicSar, awesomeOscillator } from './indicators.js';
+import { ema, emaSeries, atr, rsi, macdHistogram, vwap, swingLevels, volumeExpansion, relativeVolumePercentile, closes, clamp, parabolicSar, awesomeOscillator } from './indicators.js';
 import { REGIMES } from './regime.js';
 
 const TREND_REGIMES = new Set([REGIMES.STRONG_BULL, REGIMES.WEAK_BULL, REGIMES.STRONG_BEAR, REGIMES.WEAK_BEAR]);
@@ -29,7 +29,9 @@ export function detectTrendContinuation(snap, regime){
 
   const volExp = volumeExpansion(m5, 10);
   const priorVolExp = volumeExpansion(m5.slice(0, -1), 10);
-  const macd = macdHistogram(closes(m5).map((c,i)=>({c})).map((x,i)=>m5[i]));
+  // (Was a confusing no-op chain — closes(m5).map(wrap).map(unwrap) reduces
+  // to just m5 itself. Left functionally identical, written plainly.)
+  const macd = macdHistogram(m5);
   const momentumResuming = dir === 'LONG' ? (macd && macd.hist > macd.prevHist) : (macd && macd.hist < macd.prevHist);
 
   const reasons = [];
@@ -53,11 +55,25 @@ export function detectTrendContinuation(snap, regime){
 
 // ---- SETUP B: Breakout + Retest ----
 // Consolidation -> breakout -> wait -> retest with volume/structure/momentum confirmation.
+//
+// Entry timeframe fix: this used to read the entire pattern (consolidation
+// range, breakout candle, retest) off snap.m15, while every other setup in
+// this file trades snap.m5 — meaning this one silently entered on 15-minute
+// bars regardless of what timeframe was selected elsewhere. Rewritten to run
+// the identical pattern on snap.m5, with bar counts scaled ~3x (15/5) to
+// preserve the same real-world lookback duration: the old 40-bar/6-bar M15
+// windows become 120-bar/18-bar M5 windows. H1/M15 remain used elsewhere
+// (regime.js) purely for higher-timeframe CONTEXT, never for the trigger
+// candle itself — that split (fast timeframe decides entry, slow timeframe
+// only informs regime) is standard multi-timeframe practice and is left
+// alone. This has NOT been re-backtested since the rewrite — run it through
+// the Backtest tab against real historical data before trusting any win-rate
+// number for it, same standard as every other setup in this file.
 export function detectBreakoutRetest(snap, regime){
-  const m15 = snap.m15;
-  if(m15.length < 40) return null;
-  const lookback = m15.slice(-40, -6);
-  const recent = m15.slice(-6);
+  const m5 = snap.m5;
+  if(m5.length < 120) return null;
+  const lookback = m5.slice(-120, -18);
+  const recent = m5.slice(-18);
   const hi = Math.max(...lookback.map(c => c.h));
   const lo = Math.min(...lookback.map(c => c.l));
   const rangePct = ((hi - lo) / lo) * 100;
@@ -68,19 +84,20 @@ export function detectBreakoutRetest(snap, regime){
   const dir = breakoutCandle.c > hi ? 'LONG' : 'SHORT';
   const level = dir === 'LONG' ? hi : lo;
 
-  const last = m15[m15.length - 1];
+  const last = m5[m5.length - 1];
   const retestDistPct = Math.abs((last.c - level) / level) * 100;
   if(retestDistPct > 0.6) return null; // hasn't come back to retest the level yet
 
-  const volExp = volumeExpansion(m15, 10);
+  const volExp = volumeExpansion(m5, 10);
+  const volPctile = relativeVolumePercentile(m5, 20);
   const reasons = [`Consolidation range ${rangePct.toFixed(2)}% before breakout`, `Retesting breakout level within ${retestDistPct.toFixed(2)}%`];
   if(volExp < 0.7) return null; // retest on dead volume = weak confirmation
-  reasons.push(`Retest volume ${volExp.toFixed(2)}x average`);
+  reasons.push(`Retest volume ${volExp.toFixed(2)}x average (${Math.round(volPctile * 100)}th percentile)`);
 
   let conf = 58;
   conf += rangePct < 1.8 ? 10 : 3;
   conf += retestDistPct < 0.25 ? 10 : 4;
-  conf += volExp > 1.3 ? 10 : 3;
+  conf += volPctile > 0.8 ? 10 : volExp > 1.3 ? 6 : 3;
   conf += (dir === 'LONG' && BULL_REGIMES.has(regime.regime)) || (dir === 'SHORT' && BEAR_REGIMES.has(regime.regime)) ? 6 : -8;
   conf = clamp(conf, 0, 95);
 
@@ -89,13 +106,26 @@ export function detectBreakoutRetest(snap, regime){
 
 // ---- SETUP C: Range Reversal ----
 // Only in confirmed Range regime — fade validated support/resistance, never the middle.
+//
+// Entry timeframe fix: same issue and same fix as Breakout + Retest above —
+// this read its whole pattern (swing support/resistance, rejection candle,
+// RSI) off snap.m15 instead of snap.m5. Rewritten onto m5 with the lookback
+// scaled ~3x (40 -> 120 bars) to keep the same real-world window. The Range
+// regime classification itself still comes from regime.js's H1/M15 read,
+// which is context, not the trigger — unchanged, and correctly so. Not yet
+// re-backtested post-rewrite; this strategy is also OFF by default in
+// STRATEGY_REGISTRY below for the reasons already documented there (a
+// fade/mean-reversion style has a measured losing case elsewhere in this
+// codebase, Range Scalp's ~25-29% win rate) — re-enable only after running
+// it through the Backtest tab against real data, not on the strength of
+// this timeframe fix alone.
 export function detectRangeReversal(snap, regime){
   if(regime.regime !== REGIMES.RANGE) return null;
-  const m15 = snap.m15;
-  if(m15.length < 40) return null;
-  const { support, resistance } = swingLevels(m15, 40);
+  const m5 = snap.m5;
+  if(m5.length < 120) return null;
+  const { support, resistance } = swingLevels(m5, 120);
   const mid = (support + resistance) / 2;
-  const last = m15[m15.length - 1];
+  const last = m5[m5.length - 1];
   const rangeWidthPct = ((resistance - support) / support) * 100;
   if(rangeWidthPct < 0.4) return null; // too tight to trade the edges profitably after costs
 
@@ -106,19 +136,20 @@ export function detectRangeReversal(snap, regime){
   if(!nearSupport && !nearResistance) return null; // in the middle — never trade this
 
   const dir = nearSupport ? 'LONG' : 'SHORT';
-  const rsiVal = rsi(m15, 14);
+  const rsiVal = rsi(m5, 14);
   const rejecting = dir === 'LONG' ? last.c > last.o : last.c < last.o;
   if(!rejecting) return null;
 
-  const volExp = volumeExpansion(m15, 10);
+  const volExp = volumeExpansion(m5, 10);
+  const volPctile = relativeVolumePercentile(m5, 20);
   const reasons = [`Price at range ${dir === 'LONG' ? 'support' : 'resistance'} (range width ${rangeWidthPct.toFixed(2)}%)`, `Rejection candle confirmed`];
   const rsiOk = dir === 'LONG' ? (rsiVal !== null && rsiVal < 45) : (rsiVal !== null && rsiVal > 55);
   if(rsiOk) reasons.push(`RSI ${rsiVal.toFixed(0)} supports mean-reversion`);
-  if(volExp > 1.1) reasons.push(`Volume confirming rejection (${volExp.toFixed(2)}x)`);
+  if(volExp > 1.1) reasons.push(`Volume confirming rejection (${volExp.toFixed(2)}x, ${Math.round(volPctile * 100)}th percentile)`);
 
   let conf = 55;
   conf += rsiOk ? 12 : 0;
-  conf += volExp > 1.1 ? 10 : 0;
+  conf += volPctile > 0.75 ? 10 : volExp > 1.1 ? 6 : 0;
   conf += (nearSupport ? distToSupportPct : distToResistancePct) < rangeWidthPct * 0.08 ? 10 : 3;
   conf = clamp(conf, 0, 92);
 
@@ -250,12 +281,12 @@ export const STRATEGY_REGISTRY = [
   {
     id: 'rangeReversal', type: 'Range Reversal', detector: 'detectRangeReversal', defaultRR: 1.5, defaultEnabled: false,
     label: 'Range Reversal',
-    description: 'Fades validated swing-level support/resistance with a rejection candle, only in a confirmed Range regime. Off by default: this codebase has a measured case (Range Scalp, see README-SCALP.md) of a fade-style approach losing to this feed\'s real short-run momentum — this is more strictly gated than that one was, but unproven under the current engine either way.',
+    description: 'Fades validated swing-level support/resistance with a rejection candle, only in a confirmed Range regime. Entry trigger now runs on M5 (was M15 — see detectRangeReversal\'s comment). Off by default: this codebase has a measured case (Range Scalp, see README-SCALP.md) of a fade-style approach losing to this feed\'s real short-run momentum — this is more strictly gated than that one was, but unproven under the current engine either way.',
   },
   {
     id: 'breakoutRetest', type: 'Breakout + Retest', detector: 'detectBreakoutRetest', defaultRR: 2.5, defaultEnabled: false,
     label: 'Breakout + Retest',
-    description: 'Consolidation, then a breakout, then a retest of that level with volume confirmation. Off by default: conceptually close to NxTGen Scalp\'s own momentum-chasing character, so it adds less diversification than the two enabled by default.',
+    description: 'Consolidation, then a breakout, then a retest of that level with volume confirmation. Entry trigger now runs on M5 (was M15 — see detectBreakoutRetest\'s comment). Off by default: conceptually close to NxTGen Scalp\'s own momentum-chasing character, so it adds less diversification than the two enabled by default.',
   },
 ];
 

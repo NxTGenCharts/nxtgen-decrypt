@@ -954,6 +954,19 @@ function bybitCandlesFromKline(raw){
 // is requested — resolveSnapshotTimeframe below reports that fallback so
 // the caller can surface it once instead of silently trading a different
 // timeframe than what's selected.
+//
+// LOCKED TO 5m, on direct request that every strategy's entry decision
+// run on the same 5m candle everywhere (Paper, Backtest, Live/Demo) —
+// see setups.js's own comments on the Breakout+Retest/Range Reversal
+// timeframe fix for the client-side half of this. This map/function
+// keeps its full shape (rather than being deleted outright) so the
+// per-exchange interval strings stay documented and the lock can be
+// lifted deliberately later if ever wanted — but resolveSnapshotTimeframe
+// now ignores whatever timeframe argument it's called with and always
+// resolves to each exchange's own 5m string. This is the authoritative,
+// server-side lock: even if a client sent a different `interval` query
+// param directly (bypassing the UI entirely), the execution leg of every
+// snapshot this server builds is still 5m.
 const SNAPSHOT_TIMEFRAME_MAP = {
   bybit:   { '3m': '3',   '5m': '5',   '15m': '15',  '30m': '30',  '1h': '60' },
   binance: { '3m': '3m',  '5m': '5m',  '15m': '15m', '30m': '30m', '1h': '1h' },
@@ -963,8 +976,12 @@ const SNAPSHOT_TIMEFRAME_MAP = {
 };
 function resolveSnapshotTimeframe(exchange, timeframe){
   const map = SNAPSHOT_TIMEFRAME_MAP[exchange] || {};
-  const requested = timeframe && map[timeframe] ? timeframe : '5m';
-  return { native: map[requested] || map['5m'], fallback: requested !== (timeframe || '5m') };
+  // Locked: always request this exchange's own 5m string, regardless of
+  // what was asked for. `fallback` now only reports the (now-impossible-
+  // to-hit-any-other-way) case of a caller asking for something other
+  // than 5m, kept so the one-time client-side notice still fires if this
+  // ever gets called with a non-5m value again in the future.
+  return { native: map['5m'], fallback: !!timeframe && timeframe !== '5m' };
 }
 
 async function bybitBuildFuturesSnapshot(symbol, timeframe){
@@ -1397,11 +1414,16 @@ const BACKTEST_KLINE_FETCHERS = {
 };
 
 app.post('/api/backtest/klines', async (req, res) => {
-  const { exchange, symbol, interval, startMs, endMs } = req.body || {};
+  const { exchange, symbol, startMs, endMs } = req.body || {};
+  // LOCKED TO 5m for the same reason as resolveSnapshotTimeframe above —
+  // every strategy's entry decision runs on 5m everywhere, so the base
+  // timeframe backtests are run against can't drift from that either,
+  // even if a caller's request body asked for something else.
+  const interval = '5m';
   const fetcher = BACKTEST_KLINE_FETCHERS[exchange];
   if(!fetcher) return res.json({ ok: false, message: `Historical data isn't wired up for "${exchange}" yet — ${Object.keys(BACKTEST_KLINE_FETCHERS).join('/')} are supported.` });
-  if(!symbol || !interval || !startMs || !endMs || endMs <= startMs){
-    return res.json({ ok: false, message: 'symbol, interval, startMs and endMs (with endMs after startMs) are all required.' });
+  if(!symbol || !startMs || !endMs || endMs <= startMs){
+    return res.json({ ok: false, message: 'symbol, startMs and endMs (with endMs after startMs) are all required.' });
   }
   const cacheKey = `${exchange}:${symbol}:${interval}:${startMs}:${endMs}`;
   const cached = klineCache.get(cacheKey);

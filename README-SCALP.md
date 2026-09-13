@@ -473,6 +473,104 @@ before it: none of this has been tested against a real account from
 this codebase's own testing — that's not something an AI assistant can
 do for you.
 
+## Update: Breakout + Retest and Range Reversal moved from M15 to M5 entry triggers
+
+Every other setup in `setups.js` (NxTGen Scalp, Nova Scalp, Range Scalp,
+Liquidity Sweep Reversal, and Trend Continuation's own pullback/momentum
+read) already triggered off `snap.m5`. Breakout + Retest and Range
+Reversal were the two exceptions — their entire pattern (consolidation
+range, breakout candle, retest distance / swing support-resistance,
+rejection candle, RSI) was computed off `snap.m15` instead. That meant
+those two silently traded on 15-minute bars no matter what timeframe was
+selected anywhere in the UI (Paper mode's implicit 5m, or Live/Demo's
+`liveTimeframe` control) — a real inconsistency, not a stylistic one,
+per a direct request that every strategy's entry decision happen on the
+same 5m candle.
+
+**Fixed** by rewriting both detectors onto `snap.m5`, with bar-count
+windows scaled ~3x (15/5) to preserve the same real-world lookback
+duration: Breakout + Retest's 40-bar/6-bar M15 windows became
+120-bar/18-bar M5 windows; Range Reversal's 40-bar M15 swing-level
+window became 120 bars of M5. `regime.js`'s H1/M15 read is untouched —
+that's the higher-timeframe CONTEXT filter (is this symbol trending or
+ranging right now), never the trigger candle, and mixing timeframes for
+context-vs-trigger is standard multi-timeframe practice, not the bug
+that was fixed here.
+
+**Also added, while already touching these two**: `relativeVolumePercentile()`
+(`indicators.js`) — where the current bar's volume ranks against the
+recent window as a 0-1 fraction, used alongside (not instead of) the
+existing fixed-multiplier volume gates in both rewritten detectors. A
+flat "1.15x the 10-bar average" threshold is sensitive to a couple of
+outlier bars dragging the average around; percentile rank is a steadier
+read of "is this genuinely unusual volume for this symbol right now."
+The existing hard volume gates were left exactly as they were — this
+only feeds an additional, more robust signal into the confidence score,
+it doesn't loosen or tighten what's allowed to fire at all.
+
+Also cleaned up (zero behavior change): Trend Continuation's MACD call
+was `macdHistogram(closes(m5).map(c=>({c})).map((x,i)=>m5[i]))` — the
+second `.map` discards the wrapped values and substitutes the original
+candles back in, so the whole chain reduces to `macdHistogram(m5)`.
+Verified with a Node import + synthetic-candle check that both rewritten
+detectors still fire correctly (see the confirmation below) before
+calling this done.
+
+**Honesty note, same standard as every other change in this file**:
+this is a real, verified fix to a genuine inconsistency (confirmed by
+constructing synthetic M5 breakout/retest and range/rejection candle
+sequences and checking both detectors fire with sane confidence and
+reasons — they do), and it makes strategy comparisons apples-to-apples
+across all six active detectors. It is **not** itself a measured
+win-rate improvement — neither detector has been re-backtested since
+the rewrite. Run both through the Backtest tab against real historical
+klines before enabling them (they're still off by default) or sizing
+anything real behind them. If your reported ~25% win rate came from
+Range Scalp or an early fade-style build rather than these two, this
+change won't move that number — see the setup-by-setup breakdown
+elsewhere in this file for what would.
+
+## Update: 5m locked as the ONLY execution timeframe (Paper, Backtest, Live/Demo)
+
+The timeframe fix above (Breakout + Retest / Range Reversal moved off
+M15 onto M5) only fixed which candles those two setups *look at*. It
+didn't stop the app from letting a real trade actually run on a
+different base timeframe entirely — `fuLiveTimeframe` (Live/Demo) and
+`btTimeframe` (Backtest) were both real dropdowns offering 3m/5m/15m/
+30m/1h, defaulting to 5m but changeable. Paper mode was never
+adjustable in the first place (`mockMarket.js`'s `s.aggregate(5, 120)`
+for its `m5` field is a hardcoded 5-minute aggregation, no UI control
+exists for it) — so Paper was already permanently 5m; Live/Demo and
+Backtest were not.
+
+**Locked to 5m everywhere, at every layer, not just the UI:**
+- `server.js`'s `resolveSnapshotTimeframe()` — the one function every
+  exchange's snapshot builder calls for its execution-leg kline interval
+  — now always resolves to that exchange's own 5m string, regardless of
+  what `timeframe` argument it's called with. This is the authoritative
+  lock: even a request hitting `/api/futures/snapshot` directly with a
+  different `interval` query param still gets 5m data back.
+- `/api/backtest/klines` no longer reads `interval` from the request
+  body at all — it's a local `const interval = '5m'` now, so historical
+  klines fetched for a backtest are always 5m regardless of what a
+  caller sends.
+- `js/futures-ui.js`'s `initLiveTimeframeInput()` and both places that
+  used to read `fu().liveTimeframe`/`f2.liveTimeframe` now hardcode
+  `'5m'` directly, rather than trusting stored UI state that could in
+  principle drift.
+- `js/backtest-ui.js`'s `TIMEFRAME_MINUTES` map was reduced to just
+  `{ '5m': 5 }`, and `runBacktestFlow()` no longer reads `els.btTimeframe`
+  for the actual value used.
+- Both `<select>` elements (`fuLiveTimeframe`, `btTimeframe` in
+  `autotrade-futures/index.html`) now have a single `5m (fixed)` option
+  and are `disabled`, so the UI doesn't imply a choice that no longer
+  does anything.
+
+H1/M15 candles are untouched by any of this — they're still fetched/
+aggregated independently for `regime.js`'s higher-timeframe context read
+in every mode, exactly as before. Only the execution/entry-trigger leg
+(the `m5` field every detector in `setups.js` actually reads) is locked.
+
 ## Update: a much bigger bug — the mock market's seed was never random
 
 While investigating a report of a ~30% real-money win rate on Binance

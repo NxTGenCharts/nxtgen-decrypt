@@ -820,7 +820,8 @@ async function runLiveCycleInner(){
   }
   const fetchSymbols = ['BTCUSDT', ...universe.top.filter(s => s !== 'BTCUSDT')];
   const snapshots = {};
-  const timeframe = fu().liveTimeframe || '5m';
+  // Locked to 5m everywhere — see initLiveTimeframeInput's comment.
+  const timeframe = '5m';
   await Promise.all(fetchSymbols.map(async symbol => {
     try{ snapshots[symbol] = await fetchLiveSnapshot(exchange, symbol, timeframe); }catch(err){ /* skip this symbol this cycle */ }
   }));
@@ -1053,7 +1054,7 @@ async function executeLivePendingSignal(){
     strategies: f2.strategies, strategyRR: f2.strategyRR,
   };
   let snap, btcSnap;
-  const tf = f2.liveTimeframe || '5m';
+  const tf = '5m'; // locked everywhere — see initLiveTimeframeInput's comment
   try{
     snap = await fetchLiveSnapshot(p.exchange, p.symbol, tf);
     btcSnap = p.symbol === 'BTCUSDT' ? snap : await fetchLiveSnapshot(p.exchange, 'BTCUSDT', tf);
@@ -2104,21 +2105,20 @@ function initLiveMaxDailyLossInput(){
   }
 }
 
-// Which candle size real Live/Demo trades are evaluated against —
-// previously always 5m, hardcoded in every exchange's snapshot builder
-// (server.js). f.liveTimeframe feeds fetchLiveSnapshot's `interval`
-// query param on every scan cycle and manual-mode re-check; the server
-// substitutes 5m on its own for Gate.io/MEXC, which don't offer a native
-// 3m kline (see server.js's SNAPSHOT_TIMEFRAME_MAP), and that fallback
-// surfaces as a one-time chat message rather than failing silently.
+// Which candle size real Live/Demo trades are evaluated against — LOCKED
+// to 5m everywhere (Paper, Backtest, Live/Demo all trade the same 5m
+// candle now — see setups.js's Breakout+Retest/Range Reversal comments
+// and server.js's resolveSnapshotTimeframe). This used to be a real
+// dropdown (fuLiveTimeframe, 3m/5m/15m/30m/1h); it's now fixed so the
+// UI can't drift out of sync with the rest of the app. f.liveTimeframe is
+// still set (kept for any code elsewhere that reads it) but is no longer
+// user-adjustable, and the field itself is disabled in the markup.
 function initLiveTimeframeInput(){
   const f = fu();
-  if(!f.liveTimeframe) f.liveTimeframe = '5m';
+  f.liveTimeframe = '5m';
   if(els.fuLiveTimeframe){
-    els.fuLiveTimeframe.value = f.liveTimeframe;
-    els.fuLiveTimeframe.addEventListener('change', () => {
-      f.liveTimeframe = els.fuLiveTimeframe.value || '5m';
-    });
+    els.fuLiveTimeframe.value = '5m';
+    els.fuLiveTimeframe.disabled = true;
   }
 }
 
