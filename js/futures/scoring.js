@@ -33,7 +33,7 @@ function trendScore(snap, setupSignal){
 
 function structureScore(setupSignal){
   // Setups that are explicitly structure-based (breakout/retest, sweep) score higher here.
-  const base = { 'Trend Continuation': 65, 'Breakout + Retest': 82, 'Range Reversal': 70, 'Liquidity Sweep Reversal': 80 };
+  const base = { 'Trend Continuation': 65, 'Breakout + Retest': 82, 'Range Reversal': 70, 'Liquidity Sweep Reversal': 80, 'Nova Scalp': 62 };
   return base[setupSignal.type] || 55;
 }
 

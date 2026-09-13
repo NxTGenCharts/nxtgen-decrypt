@@ -99,6 +99,20 @@ function buildLevels(snap, direction, setupType){
     return { entry, stopPrice, stopDistancePct: distPct, atrPct: atrPct5 };
   }
 
+  if(setupType === 'Nova Scalp'){
+    // Same tight, self-adjusting ATR-scaled stop character as AI Scalp
+    // just above (see that branch's comment on the 0.35% floor and why
+    // it exists) — a VWAP-reclaim scalp is exactly as fee-sensitive on a
+    // raw stop distance as an EMA-slope scalp is, so it gets the
+    // identical floor rather than inheriting the wider structural stop
+    // below meant for slower trend/breakout setups.
+    const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
+    const atrPct5 = (atrM5 / entry) * 100;
+    const distPct = clamp(atrPct5 * 1.0, 0.35, 0.85);
+    const stopPrice = direction === 'LONG' ? entry * (1 - distPct / 100) : entry * (1 + distPct / 100);
+    return { entry, stopPrice, stopDistancePct: distPct, atrPct: atrPct5 };
+  }
+
   if(setupType === 'Range Scalp'){
     // Stop sits outside normal noise (wide enough that the mean-reversion
     // thesis is genuinely invalidated, not just noise) — same ATR-scaled
@@ -220,7 +234,7 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   const levelsStopOnly = buildLevels(snap, direction, primary.type);
   const volExp = volumeExpansion(snap.m5, 10);
   const execution = decideExecution({ setupType: primary.type, volExpansionRatio: volExp });
-  const holdMinutes = primary.type === 'AI Scalp' ? 12 : primary.type === 'Range Scalp' ? 20 : 90; // scalp strategies are meant to resolve fast; used for funding-cost estimation
+  const holdMinutes = primary.type === 'AI Scalp' ? 12 : primary.type === 'Nova Scalp' ? 12 : primary.type === 'Range Scalp' ? 20 : 90; // scalp strategies are meant to resolve fast; used for funding-cost estimation
 
   // Fees/spread/slippage have to be known BEFORE the TP levels are
   // built (not after, like the old single-target flow) — TP1 has to
@@ -285,6 +299,7 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   // slippage were added on top — trades were clearing the floor on
   // paper while being fee-negative in practice.
   const minNetProfit = primary.type === 'AI Scalp' ? (cfg.aiScalpMinNetProfitPct ?? 0.15)
+    : primary.type === 'Nova Scalp' ? (cfg.novaScalpMinNetProfitPct ?? 0.15)
     : primary.type === 'Range Scalp' ? (cfg.scalpMinNetProfitPct ?? 0.04)
     : (cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT);
 
@@ -427,6 +442,7 @@ export function managePositions(dayState, tradeHistory, cfg){
     const hitSL = candle.h !== undefined && (dir === 1 ? candle.l <= pos.stop : candle.h >= pos.stop);
     const ageMinutes = (mockMarket.now() - pos.openedAt) / 60_000;
     const timeStopMinutes = pos.setup === 'AI Scalp' ? (cfg.aiScalpTimeStopMinutes || 40)
+      : pos.setup === 'Nova Scalp' ? (cfg.novaScalpTimeStopMinutes || 20)
       : pos.setup === 'Range Scalp' ? (cfg.scalpTimeStopMinutes || 45)
       : (cfg.timeStopMinutes || 240);
 

@@ -233,6 +233,11 @@ export const STRATEGY_REGISTRY = [
     description: 'Trades WITH short-term momentum — EMA9 sloping in the trade direction, price confirming on the momentum side, a push candle behind it. Fast, frequent, the original strategy in this build.',
   },
   {
+    id: 'novaScalp', type: 'Nova Scalp', detector: 'detectNovaScalp', defaultRR: 2.0, defaultEnabled: true,
+    label: 'Nova Scalp',
+    description: '5m VWAP-reclaim scalp: price sits on one side of its rolling VWAP for 2+ bars, then reclaims it with a push candle and a volume expansion behind it. A genuinely different trigger from AI Scalp (VWAP cross vs. EMA slope), not a re-parameterized copy — see its own comment in setups.js for the honesty note on measuring this before sizing real risk behind it.',
+  },
+  {
     id: 'trendContinuation', type: 'Trend Continuation', detector: 'detectTrendContinuation', defaultRR: 2.5, defaultEnabled: true,
     label: 'Trend Continuation',
     description: 'Enters on a pullback INTO an established trend (price retracing toward EMA20/VWAP on contracting volume, then momentum resuming) rather than fresh momentum — a genuinely different entry mechanism from AI Scalp.',
@@ -267,6 +272,7 @@ export function detectAllSetups(snap, regime, strategyConfig){
   };
   const DETECTORS = {
     aiScalp: detectAiScalp,
+    novaScalp: detectNovaScalp,
     trendContinuation: detectTrendContinuation,
     liquiditySweep: detectLiquiditySweep,
     rangeReversal: detectRangeReversal,
@@ -394,4 +400,100 @@ export function detectAiScalp(snap, regime){
   conf = clamp(conf, 0, 90);
 
   return { type: 'AI Scalp', direction: dir, rawConfidence: Math.round(conf), reasons, meta: { slopeInAtr, atrPct } };
+}
+
+// ---- SETUP G: Nova Scalp (VWAP reclaim continuation) ----
+// A second, independently-triggered 5m scalp — same "trade WITH the
+// order flow, not against it" discipline as AI Scalp above (see that
+// detector's own note on why fading a stretched move measured badly
+// against this feed), but a genuinely different trigger mechanism:
+// instead of watching EMA9 slope, this watches for price crossing back
+// over its own rolling VWAP after sitting on the OTHER side for the
+// prior two bars — a "reclaim" — confirmed by a push candle in the
+// reclaim direction and a volume expansion behind it. VWAP reclaims are
+// a standard, well-documented intraday scalping trigger (institutional
+// flow frequently reacts around VWAP), which is why this is offered as
+// a second, differently-shaped 5m scalp rather than a re-parameterized
+// copy of AI Scalp — enabling both genuinely diversifies the signal
+// source, it isn't the same detector twice.
+//
+// Same honesty standard this whole file holds every other setup to
+// (see AI Scalp's own comment, and detectAllSetups' note below): this
+// detector's LOGIC is sound and grounded in a real, widely-used scalping
+// technique, but that is not the same claim as a measured win rate. It
+// has not been backtested against real historical klines from within
+// this codebase — do that yourself via the Backtest tab (Strategies
+// panel — this shows up there automatically, see STRATEGY_REGISTRY
+// below) against the real symbols/timeframe/exchange you actually
+// intend to trade before sizing anything real behind it. A strategy's
+// name, its presence in this registry, or a plausible-sounding
+// mechanism are none of them evidence of a particular win rate — only a
+// real backtest run against real historical data is, exactly the
+// standard AI Scalp's own history above (69-73%, then 65-76%, then
+// "averaging close to breakeven" once a measurement bug was fixed) is a
+// cautionary example of.
+export function detectNovaScalp(snap, regime){
+  const m5 = snap.m5;
+  if(m5.length < 30) return null;
+
+  const c = closes(m5);
+  const ema9 = ema(c, 9);
+  const atr5 = atr(m5, 14);
+  if(!ema9 || !atr5) return null;
+
+  // Rolling 40-bar VWAP, not session-anchored — this pipeline is
+  // exchange-agnostic and has no reliable session-open boundary to
+  // anchor to (see vwap() in indicators.js), so a rolling window is
+  // used the same way Trend Continuation's own vwap5 already does.
+  const vwapVal = vwap(m5.slice(-40));
+  if(!vwapVal) return null;
+
+  const last = m5[m5.length - 1];
+  const prev1 = m5[m5.length - 2];
+  const prev2 = m5[m5.length - 3];
+  if(!prev1 || !prev2) return null;
+
+  // Reclaim = the prior TWO bars closed on one side of VWAP, and the
+  // current bar just closed back on the other side of it.
+  const wasBelow = prev1.c < vwapVal && prev2.c < vwapVal;
+  const wasAbove = prev1.c > vwapVal && prev2.c > vwapVal;
+  const reclaimedUp = wasBelow && last.c > vwapVal;
+  const reclaimedDown = wasAbove && last.c < vwapVal;
+  if(!reclaimedUp && !reclaimedDown) return null;
+
+  const dir = reclaimedUp ? 'LONG' : 'SHORT';
+  const pushCandle = dir === 'LONG' ? last.c > last.o : last.c < last.o;
+  if(!pushCandle) return null; // want a genuine push through VWAP, not a weak wick close right on it
+
+  // Don't chase a VWAP reclaim straight into a strong OPPOSING HTF trend
+  // — identical discipline to AI Scalp, for the identical reason (see
+  // that detector's comment on what happened when this kind of gate was
+  // tested wider against the synthetic feed: turned a working strategy
+  // into a losing one).
+  if(dir === 'LONG' && regime.regime === REGIMES.STRONG_BEAR) return null;
+  if(dir === 'SHORT' && regime.regime === REGIMES.STRONG_BULL) return null;
+
+  const volExp = volumeExpansion(m5, 10);
+  if(volExp < 1.1) return null; // a reclaim with no volume behind it is exactly the low-quality case this filters out
+
+  const distFromVwapPct = Math.abs((last.c - vwapVal) / vwapVal) * 100;
+  const emaAligned = dir === 'LONG' ? last.c > ema9 : last.c < ema9;
+  const rsiVal = rsi(m5, 14);
+  const rsiOk = dir === 'LONG' ? (rsiVal !== null && rsiVal > 45 && rsiVal < 75) : (rsiVal !== null && rsiVal < 55 && rsiVal > 25);
+
+  const reasons = [
+    `Price reclaimed VWAP to the ${dir === 'LONG' ? 'upside' : 'downside'} after 2+ bars on the other side`,
+    `Volume ${volExp.toFixed(2)}x average behind the reclaim`,
+  ];
+  if(emaAligned) reasons.push('EMA9 confirms the same side as the reclaim');
+  if(rsiOk) reasons.push(`RSI ${rsiVal.toFixed(0)} supports continuation, not yet exhausted`);
+
+  let conf = 54;
+  conf += volExp > 1.5 ? 12 : 6;
+  conf += emaAligned ? 10 : 0;
+  conf += rsiOk ? 10 : 0;
+  conf += distFromVwapPct > 0.15 ? 6 : 0; // a clean break away from VWAP, not sitting right back on the line
+  conf = clamp(conf, 0, 88);
+
+  return { type: 'Nova Scalp', direction: dir, rawConfidence: Math.round(conf), reasons, meta: { distFromVwapPct } };
 }
