@@ -9,7 +9,7 @@ export const RISK_DEFAULTS = {
                                 // a losing trade (position size is derived backwards from this + the stop
                                 // distance, never a fixed dollar amount), adjustable via the "Risk per trade
                                 // (%)" field up to maxRiskPctPerTrade below.
-  maxRiskPctPerTrade: 50.0,    // user-adjustable ceiling — the "Risk per trade (%)" field accepts 1-50% of
+  maxRiskPctPerTrade: 80.0,    // user-adjustable ceiling — the "Risk per trade (%)" field accepts 1-80% of
                                 // whichever exchange's futures-account equity is selected, so the user can
                                 // size as conservatively or aggressively as they choose. positionSize() below
                                 // is unchanged either way: size is always derived from equity x riskPct and

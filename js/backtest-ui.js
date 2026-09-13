@@ -13,6 +13,7 @@ import { TRADEABLE_FUTURES_SYMBOLS } from './futures/engine.js';
 import { STRATEGY_REGISTRY } from './futures/setups.js';
 import { DEFAULT_FEE_CONFIG } from './futures/costs.js';
 import { runBacktest, summarizeTrades } from './futures/backtest.js';
+import { RISK_DEFAULTS } from './futures/risk.js';
 
 let lastResult = null; // kept for CSV/XLS/PDF export after a run
 
@@ -102,7 +103,7 @@ async function runBacktestFlow(){
   const timeframe = '5m'; // locked everywhere — see TIMEFRAME_MINUTES' comment
   const intervalMinutes = TIMEFRAME_MINUTES[timeframe];
   const startingEquity = Math.max(100, parseFloat(els.btStartingBalance.value) || 10000);
-  const riskPctPerTrade = Math.min(50, Math.max(0.1, parseFloat(els.btRiskPct.value) || 1));
+  const riskPctPerTrade = Math.min(RISK_DEFAULTS.maxRiskPctPerTrade, Math.max(0.1, parseFloat(els.btRiskPct.value) || 1));
   const leverage = Math.min(10, Math.max(1, parseInt(els.btLeverage.value, 10) || 5));
   const minConfidence = Math.min(100, Math.max(0, parseInt(els.btMinConfidence.value, 10) || 70));
   const makerPct = parseFloat(els.btMakerFee.value) || 0;

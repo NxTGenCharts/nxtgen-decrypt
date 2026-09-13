@@ -1320,41 +1320,77 @@ async function fetchBybitLinearKlines(symbol, interval, startMs, endMs){
 // MEXC contract kline: GET /api/v1/contract/kline/{symbol}, start/end in
 // UNIX SECONDS (not ms — different from Binance/Bybit above), response
 // is columnar (parallel time[]/open[]/high[]/low[]/close[]/vol[] arrays,
-// not one object per candle) capped at 2000 points/request. Paged
-// forward the same way fetchBinanceFuturesKlines is, just with a
-// seconds-based cursor.
+// not one object per candle) capped at 2000 points/request.
+//
+// Two fixes applied here, both confirmed directly against MEXC's current
+// official docs (mexc.com/api-docs/futures/market-endpoints/get-candlestick-data,
+// checked 2026-09):
+//
+// 1. Domain: this was hitting contract.mexc.com, which MEXC decommissioned
+//    for the Futures API around 2026-01-14 in favor of api.mexc.com (see
+//    the comment above mexcFuturesSignedRequest, further down this file,
+//    which already correctly uses api.mexc.com for the signed/account
+//    endpoints) — this fetcher just hadn't been updated to match. The
+//    Introduction page's own "Access URL" section now lists only
+//    https://api.mexc.com as the whole Futures API's domain.
+//
+// 2. Pagination direction: MEXC's own docs state that when ONLY `end` is
+//    given, "the 2000 data points closest to end are returned" — i.e.
+//    this endpoint is anchored to the end of the window, same as Bybit's
+//    kline endpoint (see fetchBybitLinearKlines's comment above for the
+//    full explanation of why that matters). The previous version here
+//    paged FORWARD from `start` while holding `end` fixed at the final
+//    requested end time on every single page. If MEXC's "both start and
+//    end given" behavior anchors the same way its documented "end only"
+//    behavior does (which the docs don't state outright, but is the more
+//    likely reading given the above), every page would return roughly
+//    the same ~2000 bars closest to that fixed `end`, regardless of
+//    `start` — and the loop's own stuck-page guard would then exit after
+//    just one page, silently capping every fetch at ~2000 bars (~6.9
+//    days at 5m) of the MOST RECENT history, no matter how far back
+//    `startMs` actually asked for. That matches the reported symptom
+//    exactly: a 14-day Backtest run returning the same trades as a
+//    7-day one, because both requests were silently truncated to the
+//    same ~6.9-day tail window ending at `endMs`. Paging BACKWARD from
+//    `end` instead — the same approach as fetchBybitLinearKlines —
+//    matches how the endpoint is documented to anchor and reliably
+//    walks the full requested range either way.
 async function fetchMexcFuturesKlines(symbol, interval, startMs, endMs){
   const mexcInterval = MEXC_KLINE_INTERVAL[interval];
   if(!mexcInterval) throw new Error(`MEXC's contract kline API has no ${interval} granularity — try 5m, 15m, 30m, or 1h.`);
   const mexcSymbol = toUnderscoreSymbol(symbol);
-  const endSec = Math.floor(endMs / 1000);
-  const out = [];
-  let cursorStartSec = Math.floor(startMs / 1000);
+  const startSec = Math.floor(startMs / 1000);
+  const pages = []; // oldest page unshifted to the front, so pages[0] is the oldest chunk once the loop ends
+  let cursorEndSec = Math.floor(endMs / 1000);
   let guard = 0;
-  while(cursorStartSec < endSec && guard < 200){
+  while(cursorEndSec > startSec && guard < 500){ // guard: a stuck/misbehaving page should never spin forever
     guard++;
-    const url = `https://contract.mexc.com/api/v1/contract/kline/${mexcSymbol}?interval=${mexcInterval}&start=${cursorStartSec}&end=${endSec}`;
+    const url = `https://api.mexc.com/api/v1/contract/kline/${mexcSymbol}?interval=${mexcInterval}&start=${startSec}&end=${cursorEndSec}`;
     const r = await fetch(url);
     if(!r.ok) throw new Error(`MEXC klines HTTP ${r.status}`);
     const body = await r.json();
     const d = body && body.data;
     if(!body || body.success !== true || !d || !Array.isArray(d.time) || !d.time.length) break;
-    let lastT = cursorStartSec;
-    for(let i = 0; i < d.time.length; i++){
-      const t = d.time[i] * 1000;
-      if(t >= startMs && t <= endMs){
-        out.push({ t, o: +d.open[i], h: +d.high[i], l: +d.low[i], c: +d.close[i], v: +(d.vol ? d.vol[i] : 0) });
-      }
-      if(d.time[i] > lastT) lastT = d.time[i];
-    }
-    if(lastT <= cursorStartSec) break; // stuck page — no forward progress
-    cursorStartSec = lastT + 1;
-    if(d.time.length < 2000) break; // short page = caught up to endMs already
+    const chron = d.time.map((tSec, i) => ({
+      t: tSec * 1000, o: +d.open[i], h: +d.high[i], l: +d.low[i], c: +d.close[i], v: +(d.vol ? d.vol[i] : 0),
+    })).sort((a, b) => a.t - b.t); // defensive — MEXC's docs don't state an order guarantee the way Bybit's (newest-first) do
+    pages.unshift(chron);
+    const oldestSec = Math.floor(chron[0].t / 1000);
+    if(oldestSec <= startSec) break; // this page already reached back to (or past) the requested start — done
+    if(oldestSec >= cursorEndSec) break; // stuck page (didn't move backward at all) — stop rather than loop forever
+    cursorEndSec = oldestSec - 1; // next page: everything up to just before this page's oldest bar
   }
   const seenT = new Set();
-  const dedup = out.filter(c => (seenT.has(c.t) ? false : (seenT.add(c.t), true)));
-  dedup.sort((a, b) => a.t - b.t);
-  return dedup;
+  const out = [];
+  for(const page of pages){
+    for(const c of page){
+      if(c.t < startMs || c.t > endMs || seenT.has(c.t)) continue;
+      seenT.add(c.t);
+      out.push(c);
+    }
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
 }
 
 // Gate.io futures candlesticks: GET /api/v4/futures/usdt/candlesticks,

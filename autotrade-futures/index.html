@@ -221,8 +221,8 @@
         <input id="fuMinNetProfit" type="number" min="0" max="3" step="0.05" value="0.30">
       </div>
       <div class="field">
-        <label for="fuRiskPct" title="Max % of the selected exchange's futures-account equity lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount. Adjustable 1-50%.">Risk per trade (%)</label>
-        <input id="fuRiskPct" type="number" min="1" max="50" step="0.5" value="1">
+        <label for="fuRiskPct" title="Max % of the selected exchange's futures-account equity lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount. Adjustable 1-80%.">Risk per trade (%)</label>
+        <input id="fuRiskPct" type="number" min="1" max="80" step="0.5" value="1">
       </div>
       <div class="field">
         <label for="fuLeverage">Leverage</label>
@@ -301,8 +301,8 @@
       <div class="fu-live-exch-rows" id="fuLiveExchRows"><!-- rendered by js/futures-ui.js — one row per exchange, click to select, click Live/Demo to set that exchange's network --></div>
 
       <div class="field" style="max-width:320px;margin:14px 0 10px;">
-        <label for="fuLiveRiskPct" title="Max % of the SELECTED exchange's real futures-account equity (the Real Balance figure below) lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount. Adjustable 1-50%. Same setting as the Paper Engine's 'Risk per trade' field above — changing either one updates both.">Risk per trade (%)</label>
-        <input id="fuLiveRiskPct" type="number" min="1" max="50" step="0.5" value="1">
+        <label for="fuLiveRiskPct" title="Max % of the SELECTED exchange's real futures-account equity (the Real Balance figure below) lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount. Adjustable 1-80%. Same setting as the Paper Engine's 'Risk per trade' field above — changing either one updates both.">Risk per trade (%)</label>
+        <input id="fuLiveRiskPct" type="number" min="1" max="80" step="0.5" value="1">
       </div>
 
       <div class="field" style="max-width:320px;margin-bottom:10px;">
@@ -466,7 +466,7 @@
         </div>
         <div class="field">
           <label for="btRiskPct" title="Position size is derived from equity x risk% and the stop distance, exactly like Paper/Live — never a fixed dollar amount.">Risk per trade (%)</label>
-          <input id="btRiskPct" type="number" min="0.1" max="50" step="0.5" value="1">
+          <input id="btRiskPct" type="number" min="0.1" max="80" step="0.5" value="1">
         </div>
         <div class="field">
           <label for="btLeverage">Leverage</label>
