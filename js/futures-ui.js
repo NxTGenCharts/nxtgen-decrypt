@@ -2078,10 +2078,19 @@ function initLiveDailyProfitTargetInput(){
 // tripped (see evaluateNoTradeFilters, noTradeEngine.js) — the bot stays
 // armed and keeps polling every cycle, it just gets "Daily drawdown limit
 // reached" on every signal until Reset Session or the next day. Clamped
-// 0.5-15% — deliberately a tighter ceiling than the profit target's 50%,
-// since this is a loss limit: never lets the field itself push real
-// account risk past 15% regardless of what's typed in.
-const LIVE_MAX_DAILY_LOSS_MAX_PCT = 15;
+// 0.5-50% — raised from the original 15% ceiling on explicit request, now
+// matching RISK_DEFAULTS.maxRiskPctPerTrade's own 50% ceiling instead of
+// being tighter than it. Worth being clear-eyed about what that means:
+// at Risk per Trade near its own 50% ceiling (also user-adjustable, see
+// initLiveRiskPerTradeInput/RISK_DEFAULTS.maxRiskPctPerTrade), a handful
+// of losing trades in a row could reach a 50%-set daily loss limit before
+// this gate ever stops anything, since the two settings aren't linked to
+// each other. This field controls how much loss is ALLOWED before this
+// specific stop-for-the-day gate fires — it doesn't limit position sizing
+// itself, and setting it to 50% only removes this particular backstop,
+// not any other risk control (per-trade sizing, liquidation-safety check,
+// max simultaneous positions) still in place elsewhere in this pipeline.
+const LIVE_MAX_DAILY_LOSS_MAX_PCT = 50;
 function initLiveMaxDailyLossInput(){
   const f = fu();
   if(f.liveMaxDailyLossPct == null) f.liveMaxDailyLossPct = RISK_DEFAULTS.maxDailyLossPct;
