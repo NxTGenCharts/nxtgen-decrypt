@@ -1201,11 +1201,13 @@ app.get('/api/futures/snapshot', async (req, res) => {
 // lets results be cached server-side across repeat backtests over the
 // same symbol/interval/range (common — e.g. testing different risk %
 // or strategy combinations against identical price history).
-// Only Binance and Bybit are wired up, matching this app's existing
-// "Binance/Bybit first, others best-effort/later" pattern elsewhere
-// (see triangular-arbitrage-scanner's own history for the same
-// sequencing) — MEXC/Gate.io/Bitget historical klines aren't included
-// yet.
+// MEXC and Gate.io are now wired up too (see fetchMexcFuturesKlines/
+// fetchGateioFuturesKlines below) — added specifically so the Backtest
+// tab can model their real, genuinely-lower published fee rates
+// (0%/0.02% and 0.01%/0.05% — see DEFAULT_FEE_CONFIG, costs.js) against
+// REAL history from those venues, not just Bybit/Binance's own fees
+// applied to Bybit/Binance data. Bitget still isn't wired up (no
+// historical-klines fetcher below yet).
 // =============================================================
 const klineCache = new Map(); // `${exchange}:${symbol}:${interval}:${startMs}:${endMs}` -> { fetchedAt, candles }
 const KLINE_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — candles this far in the past never change, this just bounds cache growth
@@ -1213,6 +1215,24 @@ const KLINE_CACHE_MAX_ENTRIES = 500; // simple unbounded-growth guard — oldest
 
 const BINANCE_KLINE_INTERVAL = { '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h' };
 const BYBIT_KLINE_INTERVAL = { '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60' };
+// MEXC contract kline has no 3-minute granularity at all (Min1/Min5/
+// Min15/Min30/Min60/Hour4/Hour8/Day1/Week1/Month1 — see
+// https://www.mexc.com/api-docs/futures/market-endpoints/get-candlestick-data).
+// Gate.io's futures candlesticks endpoint doesn't offer 3m either
+// (10s/1m/5m/15m/30m/1h/4h/8h/1d/7d/30d). Both fetchers below throw a
+// clear error rather than silently falling back to a different
+// granularity if 3m is requested against either.
+const MEXC_KLINE_INTERVAL = { '5m': 'Min5', '15m': 'Min15', '30m': 'Min30', '1h': 'Min60' };
+const GATEIO_KLINE_INTERVAL = { '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h' };
+
+// TRADEABLE_FUTURES_SYMBOLS (engine.js) are always plain "XRPUSDT"-style
+// strings (no separator) — Binance/Bybit want it exactly that way, but
+// MEXC and Gate.io both name USDT-margined contracts with an underscore
+// ("XRP_USDT"). This is the one place that conversion happens; nothing
+// else in the pipeline needs to know either format exists.
+function toUnderscoreSymbol(symbol){
+  return symbol.endsWith('USDT') ? `${symbol.slice(0, -4)}_USDT` : symbol;
+}
 
 async function fetchBinanceFuturesKlines(symbol, interval, startMs, endMs){
   const out = [];
@@ -1280,12 +1300,93 @@ async function fetchBybitLinearKlines(symbol, interval, startMs, endMs){
   return out;
 }
 
-const BACKTEST_KLINE_FETCHERS = { binance: fetchBinanceFuturesKlines, bybit: fetchBybitLinearKlines };
+// MEXC contract kline: GET /api/v1/contract/kline/{symbol}, start/end in
+// UNIX SECONDS (not ms — different from Binance/Bybit above), response
+// is columnar (parallel time[]/open[]/high[]/low[]/close[]/vol[] arrays,
+// not one object per candle) capped at 2000 points/request. Paged
+// forward the same way fetchBinanceFuturesKlines is, just with a
+// seconds-based cursor.
+async function fetchMexcFuturesKlines(symbol, interval, startMs, endMs){
+  const mexcInterval = MEXC_KLINE_INTERVAL[interval];
+  if(!mexcInterval) throw new Error(`MEXC's contract kline API has no ${interval} granularity — try 5m, 15m, 30m, or 1h.`);
+  const mexcSymbol = toUnderscoreSymbol(symbol);
+  const endSec = Math.floor(endMs / 1000);
+  const out = [];
+  let cursorStartSec = Math.floor(startMs / 1000);
+  let guard = 0;
+  while(cursorStartSec < endSec && guard < 200){
+    guard++;
+    const url = `https://contract.mexc.com/api/v1/contract/kline/${mexcSymbol}?interval=${mexcInterval}&start=${cursorStartSec}&end=${endSec}`;
+    const r = await fetch(url);
+    if(!r.ok) throw new Error(`MEXC klines HTTP ${r.status}`);
+    const body = await r.json();
+    const d = body && body.data;
+    if(!body || body.success !== true || !d || !Array.isArray(d.time) || !d.time.length) break;
+    let lastT = cursorStartSec;
+    for(let i = 0; i < d.time.length; i++){
+      const t = d.time[i] * 1000;
+      if(t >= startMs && t <= endMs){
+        out.push({ t, o: +d.open[i], h: +d.high[i], l: +d.low[i], c: +d.close[i], v: +(d.vol ? d.vol[i] : 0) });
+      }
+      if(d.time[i] > lastT) lastT = d.time[i];
+    }
+    if(lastT <= cursorStartSec) break; // stuck page — no forward progress
+    cursorStartSec = lastT + 1;
+    if(d.time.length < 2000) break; // short page = caught up to endMs already
+  }
+  const seenT = new Set();
+  const dedup = out.filter(c => (seenT.has(c.t) ? false : (seenT.add(c.t), true)));
+  dedup.sort((a, b) => a.t - b.t);
+  return dedup;
+}
+
+// Gate.io futures candlesticks: GET /api/v4/futures/usdt/candlesticks,
+// from/to in UNIX SECONDS, one object per candle ({t,o,h,l,c,v}, all
+// but t as strings), capped at 2000 points/request. Same forward-paging
+// shape as MEXC's fetcher just above.
+async function fetchGateioFuturesKlines(symbol, interval, startMs, endMs){
+  const gateInterval = GATEIO_KLINE_INTERVAL[interval];
+  if(!gateInterval) throw new Error(`Gate.io's futures candlestick API has no ${interval} granularity — try 5m, 15m, 30m, or 1h.`);
+  const gateSymbol = toUnderscoreSymbol(symbol);
+  const toSec = Math.floor(endMs / 1000);
+  const out = [];
+  let cursorFromSec = Math.floor(startMs / 1000);
+  let guard = 0;
+  while(cursorFromSec < toSec && guard < 200){
+    guard++;
+    const url = `https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=${encodeURIComponent(gateSymbol)}&from=${cursorFromSec}&to=${toSec}&interval=${gateInterval}&limit=2000`;
+    const r = await fetch(url);
+    if(!r.ok) throw new Error(`Gate.io klines HTTP ${r.status}`);
+    const rows = await r.json();
+    if(!Array.isArray(rows) || !rows.length) break;
+    let lastT = cursorFromSec;
+    for(const row of rows){
+      const tSec = Number(row.t);
+      const t = tSec * 1000;
+      if(t >= startMs && t <= endMs){
+        out.push({ t, o: +row.o, h: +row.h, l: +row.l, c: +row.c, v: +(row.v ?? 0) });
+      }
+      if(tSec > lastT) lastT = tSec;
+    }
+    if(lastT <= cursorFromSec) break; // stuck page — no forward progress
+    cursorFromSec = lastT + 1;
+    if(rows.length < 2000) break; // short page = caught up to toSec already
+  }
+  const seenT = new Set();
+  const dedup = out.filter(c => (seenT.has(c.t) ? false : (seenT.add(c.t), true)));
+  dedup.sort((a, b) => a.t - b.t);
+  return dedup;
+}
+
+const BACKTEST_KLINE_FETCHERS = {
+  binance: fetchBinanceFuturesKlines, bybit: fetchBybitLinearKlines,
+  mexc: fetchMexcFuturesKlines, gateio: fetchGateioFuturesKlines,
+};
 
 app.post('/api/backtest/klines', async (req, res) => {
   const { exchange, symbol, interval, startMs, endMs } = req.body || {};
   const fetcher = BACKTEST_KLINE_FETCHERS[exchange];
-  if(!fetcher) return res.json({ ok: false, message: `Historical data isn't wired up for "${exchange}" yet — Binance and Bybit are supported.` });
+  if(!fetcher) return res.json({ ok: false, message: `Historical data isn't wired up for "${exchange}" yet — ${Object.keys(BACKTEST_KLINE_FETCHERS).join('/')} are supported.` });
   if(!symbol || !interval || !startMs || !endMs || endMs <= startMs){
     return res.json({ ok: false, message: 'symbol, interval, startMs and endMs (with endMs after startMs) are all required.' });
   }

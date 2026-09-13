@@ -416,17 +416,22 @@
     </div>
 
     <div class="ov-block" id="btBlock">
-      <div class="ov-block-title">Backtest <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">REAL HISTORICAL DATA — BINANCE / BYBIT</span></div>
+      <div class="ov-block-title">Backtest <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">REAL HISTORICAL DATA — BINANCE / BYBIT / MEXC / GATE.IO</span></div>
 
       <div class="controls">
         <div class="field">
           <label for="btExchange">Exchange (historical data source)</label>
-          <select id="btExchange"><option value="binance">Binance Futures</option><option value="bybit">Bybit Derivatives</option></select>
+          <select id="btExchange">
+            <option value="binance">Binance Futures</option>
+            <option value="bybit">Bybit Derivatives</option>
+            <option value="mexc">MEXC Futures</option>
+            <option value="gateio">Gate.io Futures</option>
+          </select>
         </div>
         <div class="field">
-          <label for="btTimeframe" title="The candle size trades are evaluated and TP1/TP2/TP3/SL are checked against — this is the scalp's actual execution timeframe, not just a chart setting. Regime/trend context (M15/H1) is still computed independently at its own fixed granularity either way, aggregated up from whichever timeframe is picked here.">Timeframe</label>
+          <label for="btTimeframe" title="The candle size trades are evaluated and TP1/TP2/TP3/SL are checked against — this is the scalp's actual execution timeframe, not just a chart setting. Regime/trend context (M15/H1) is still computed independently at its own fixed granularity either way, aggregated up from whichever timeframe is picked here. MEXC and Gate.io don't offer 3m candles — pick 5m or wider if either is selected above.">Timeframe</label>
           <select id="btTimeframe">
-            <option value="3m">3m</option>
+            <option value="3m">3m (Binance/Bybit only)</option>
             <option value="5m" selected>5m</option>
             <option value="15m">15m</option>
             <option value="30m">30m</option>
