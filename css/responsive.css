@@ -8,7 +8,17 @@
 
 /* -------------------- <= 1200px: small desktop -------------------- */
 @media (max-width:1200px){
-  .ov-grid{ grid-template-columns:repeat(3, 1fr); }
+  /* !important is required here (and everywhere else this file touches
+     .ov-grid / .fu-row / .fu-hrow) because several stat-card grids and
+     every trade-table row on the Autotrade & Futures page carry an inline
+     style="grid-template-columns:…" attribute (set per-instance in the
+     HTML/JS since each grid has a different column count/ratio). Inline
+     styles always outrank an external stylesheet's class selector — media
+     query or not — so without !important these breakpoints are silently
+     ignored on mobile and the fixed desktop column count overflows the
+     viewport. This is the root cause of the "stats cards cut off" and
+     "data grid clipping" issues from the mobile screenshots. */
+  .ov-grid{ grid-template-columns:repeat(3, 1fr) !important; }
 }
 
 /* -------------------- <= 1024px: tablet -------------------- */
@@ -19,6 +29,13 @@
   .xrow.head{ display:none; }
   .xrow > .xwindow, .xrow > .xliquidity{ grid-column:2 / -1; }
   .xdetail{ grid-template-columns:1fr; }
+}
+
+/* -------------------- <= 600px: mobile -------------------- */
+@media (max-width:600px){
+  /* Matches the requested mobile grid spec: 2-up stat cards (falls back to
+     1-up below for individual wide/highlight cards that need the room). */
+  .ov-grid{ grid-template-columns:repeat(2, 1fr) !important; }
 }
 
 /* -------------------- <= 900px: tablet portrait -------------------- */
@@ -37,7 +54,7 @@
     margin-bottom:16px;
   }
   .logo-img{ height:36px; }
-  .product-name{ font-size:15px; }
+  /* .product-name font-size is a clamp() in main.css — scales on its own */
   .status-cluster{
     flex-direction:row;
     flex-wrap:wrap;
@@ -58,6 +75,13 @@
   .controls .field:has(#cliMode){ grid-column:1 / -1; }
   .btn-row{ flex-direction:column; }
   .btn-row button.primary{ width:100%; }
+  /* Primary CTAs that live outside a .btn-row (e.g. "Start Paper Engine" in
+     the AI Futures Engine header, "Reset Session" in its own .field) —
+     stack them full-width too so every action button behaves consistently
+     on mobile, matching the export/execute buttons above. */
+  .ov-head{ flex-direction:column; align-items:stretch; }
+  .ov-head button.primary{ width:100%; }
+  .controls .field button.primary{ width:100%; }
   .stats-row{
     display:grid;
     grid-template-columns:repeat(2, 1fr);
@@ -65,7 +89,7 @@
   }
 
   /* --- overview grid: 2-up cards --- */
-  .ov-grid{ grid-template-columns:repeat(2, 1fr); }
+  .ov-grid{ grid-template-columns:repeat(2, 1fr) !important; }
 
   /* --- triangular opportunity card: rank+profit share a row, loop below --- */
   .row{
@@ -114,7 +138,11 @@
   .controls .field:has(#cliMode){ grid-column:1; }
   .stats-row{ grid-template-columns:repeat(2, 1fr); }
 
-  .ov-grid{ grid-template-columns:repeat(2, 1fr); }
+  .ov-grid{ grid-template-columns:repeat(2, 1fr) !important; }
+  /* A highlighted/"wide" card that genuinely needs the full row on very
+     small phones can opt in with data-wide="true" in the HTML — no other
+     markup changes required. */
+  .ov-grid > [data-wide="true"]{ grid-column:1 / -1 !important; }
 
   .rank-wrap{ display:flex; }
   .result{ text-align:right; }
@@ -143,6 +171,13 @@
   .xrow{ grid-template-columns:1fr 1fr; padding:14px; gap:8px 12px; }
   .xasset{ font-size:15px; }
   .xprofit{ font-size:17px; }
+
+  /* Inline warning/info pills embedded inside field labels (e.g. "places
+     real orders — reversible only by trading back", "forces unprofitable
+     trades") are long enough to overflow a 320-375px viewport if forced
+     onto one line — let them wrap here only; short status pills (HIGH,
+     MEDIUM, exchange badges) stay nowrap since they're never this long. */
+  .pill{ white-space:normal; }
 }
 
 /* -------------------- Autotrade & Balances: responsive -------------------- */

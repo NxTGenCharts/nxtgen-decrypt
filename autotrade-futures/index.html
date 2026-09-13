@@ -270,22 +270,29 @@
 
     <div class="ov-block" style="margin-top:18px;">
       <div class="ov-block-title">Live Opportunity Scanner</div>
-      <div class="fu-row fu-head">
-        <div>Symbol</div><div>Exch</div><div>Dir</div><div>Setup</div><div>Conf</div><div>Entry</div><div>Stop</div><div>TP1</div>
-        <div>Exp. Gross</div><div>Exp. Net</div><div>R:R</div><div>Liq.</div><div>Regime</div><div>Status</div>
+      <!-- .table-scroll: lets this 14-column row scroll horizontally on
+           narrow viewports instead of squeezing unreadable or overflowing
+           the page — see css/futures.css. -->
+      <div class="table-scroll">
+        <div class="fu-row fu-head">
+          <div>Symbol</div><div>Exch</div><div>Dir</div><div>Setup</div><div>Conf</div><div>Entry</div><div>Stop</div><div>TP1</div>
+          <div>Exp. Gross</div><div>Exp. Net</div><div>R:R</div><div>Liq.</div><div>Regime</div><div>Status</div>
+        </div>
+        <div id="fuScannerRows"><div class="fu-empty">No scan run yet — click Start Paper Engine.</div></div>
       </div>
-      <div id="fuScannerRows"><div class="fu-empty">No scan run yet — click Start Paper Engine.</div></div>
       <div class="ov-block-body" style="margin-top:10px;font-size:12px;color:var(--dim);">Click any row to see the AI's reasoning below.</div>
       <pre id="fuExplain" class="fu-explain">Click a row above to see why it was approved or rejected.</pre>
     </div>
 
     <div class="ov-block" style="margin-top:18px;">
       <div class="ov-block-title">Trade History (this session)</div>
-      <div class="fu-hrow fu-head">
-        <div>Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div>
-        <div>Gross</div><div>Fees</div><div>Net</div><div>Conf</div><div>Strategy</div><div>Exit Reason</div><div>Duration</div>
+      <div class="table-scroll">
+        <div class="fu-hrow fu-head">
+          <div>Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div>
+          <div>Gross</div><div>Fees</div><div>Net</div><div>Conf</div><div>Strategy</div><div>Exit Reason</div><div>Duration</div>
+        </div>
+        <div id="fuHistoryRows"><div class="fu-empty">No closed trades yet this session.</div></div>
       </div>
-      <div id="fuHistoryRows"><div class="fu-empty">No closed trades yet this session.</div></div>
     </div>
 
     <div class="ov-block" style="margin-top:18px;border-color:var(--amber-dim);">
@@ -370,10 +377,12 @@
 
       <div class="ov-block" style="margin-top:14px;">
         <div class="ov-block-title" style="font-size:13px;">Live/Demo Trade History <span style="font-weight:400;color:var(--dim);">(this session)</span></div>
-        <div class="fu-hrow fu-head" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr 1.4fr;">
-          <div>Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div><div>Order ID</div>
+        <div class="table-scroll">
+          <div class="fu-hrow fu-head" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr 1.4fr;">
+            <div>Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div><div>Order ID</div>
+          </div>
+          <div id="fuLiveHistoryRows"><div class="fu-empty">No live/demo trades yet this session.</div></div>
         </div>
-        <div id="fuLiveHistoryRows"><div class="fu-empty">No live/demo trades yet this session.</div></div>
       </div>
 
       <div class="ov-block" style="margin-top:14px;">
@@ -403,11 +412,13 @@
           <button type="button" class="primary ghost" id="fuLogExportPdfBtn" title="Export the checked rows, or every row in the current date range if none are checked">Export PDF</button>
           <span id="fuLogSelectedCount" style="font-size:11px;color:var(--dim);"></span>
         </div>
-        <div class="fu-hrow fu-head" style="grid-template-columns:28px 1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr;">
-          <div><input type="checkbox" id="fuLogSelectAll" title="Select all rows in the current range"></div>
-          <div>Date/Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div>
+        <div class="table-scroll">
+          <div class="fu-hrow fu-head" style="grid-template-columns:28px 1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr;">
+            <div><input type="checkbox" id="fuLogSelectAll" title="Select all rows in the current range"></div>
+            <div>Date/Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div>
+          </div>
+          <div id="fuLogRows"><div class="fu-empty">No trades recorded in this browser yet.</div></div>
         </div>
-        <div id="fuLogRows"><div class="fu-empty">No trades recorded in this browser yet.</div></div>
       </div>
     </div>
 
@@ -538,10 +549,12 @@
           <button type="button" class="primary ghost" id="btExportXlsBtn">Export XLS</button>
           <button type="button" class="primary ghost" id="btExportPdfBtn">Export PDF</button>
         </div>
-        <div class="fu-hrow fu-head" style="grid-template-columns:1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr .9fr;">
-          <div>Date/Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div><div>Exit Reason</div>
+        <div class="table-scroll">
+          <div class="fu-hrow fu-head" style="grid-template-columns:1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr .9fr;">
+            <div>Date/Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div><div>Exit Reason</div>
+          </div>
+          <div id="btTradeRows"></div>
         </div>
-        <div id="btTradeRows"></div>
       </div>
     </div>
 

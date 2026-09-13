@@ -68,20 +68,31 @@
   color: var(--ink);
 }
 
-@media (max-width: 900px) {
-  #panelFutures .fu-row,
-  #panelFutures .fu-hrow {
-    grid-template-columns: 1fr;
-    gap: 2px;
-  }
-  #panelFutures .fu-row.fu-head,
-  #panelFutures .fu-hrow.fu-head {
-    display: none;
-  }
-  #panelFutures .fu-row > div::before,
-  #panelFutures .fu-hrow > div::before {
-    content: attr(data-label);
-  }
+/* -------------------------------------------------------------
+   Mobile: dense trade tables (Live Opportunity Scanner, Trade
+   History, Trade Log, Backtest Trades — 12-14 columns each)
+   scroll horizontally instead of squeezing every column unreadably
+   thin or collapsing to one column per cell (the latter needs a
+   data-label attribute on every cell for the ::before content to
+   show anything, which nothing in js/futures-ui.js sets, so that
+   approach silently rendered blank labels). Each header+rows pair
+   in the HTML is wrapped in a .table-scroll container — see
+   autotrade-futures/index.html — which this rule targets.
+   min-width on the row itself is what forces the scrollbar to
+   appear rather than the columns collapsing to illegibly thin. ---- */
+.table-scroll{
+  overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+  /* prevents the scroll container itself from ever pushing the page wider */
+  max-width:100%;
+}
+#panelFutures .table-scroll .fu-row,
+#panelFutures .table-scroll .fu-hrow{
+  min-width:760px; /* below this the fr-based columns become unreadable; scroll instead */
+}
+#panelFutures .table-scroll .fu-row.fu-head,
+#panelFutures .table-scroll .fu-hrow.fu-head{
+  position:sticky; top:0; z-index:1; background:var(--bg);
 }
 
 /* Live/Demo Trading — per-exchange selection rows (mirrors Autotrade's
@@ -104,3 +115,23 @@
 }
 #panelFutures .fu-live-exch-label{ font-weight:600; color:var(--ink); }
 #panelFutures .fu-live-exch-note{ font-size:11px; color:var(--dim); }
+
+@media (max-width:640px){
+  /* Desktop markup order is: radio, label, mode-toggle (Live/Demo buttons),
+     note — grid columns 24px / 150px(fixed) / auto / 1fr. The fixed 150px
+     label column alone is nearly half an iPhone SE's viewport, so below
+     640px collapse to: radio + label + mode-toggle on row one, the
+     verified-status note wrapping full-width beneath. */
+  #panelFutures .fu-live-exch-row{
+    grid-template-columns:24px 1fr auto;
+    grid-template-areas:
+      "radio label mode"
+      "note  note  note";
+    row-gap:6px;
+    padding:12px 14px;
+  }
+  #panelFutures .fu-live-exch-radio{ grid-area:radio; }
+  #panelFutures .fu-live-exch-label{ grid-area:label; }
+  #panelFutures .fu-live-exch-row > :nth-child(3){ grid-area:mode; }
+  #panelFutures .fu-live-exch-note{ grid-area:note; text-align:left !important; white-space:normal; }
+}

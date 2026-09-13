@@ -44,9 +44,17 @@
 
 /* -------------------- 2. Reset -------------------- */
 *{ box-sizing:border-box; }
-html{ -webkit-text-size-adjust:100%; }
+html{
+  -webkit-text-size-adjust:100%;
+  /* Belt-and-braces alongside body's overflow-x:hidden below — some mobile
+     browsers (older iOS Safari in particular) only fully respect this rule
+     when it's set on both html AND body, so it's duplicated deliberately. */
+  max-width:100%;
+  overflow-x:hidden;
+}
 body{
   margin:0;
+  max-width:100%;
   background:
     radial-gradient(1200px 520px at 12% -12%, var(--bg-glow-1) 0%, transparent 58%),
     radial-gradient(1000px 520px at 102% -6%, var(--bg-glow-2) 0%, transparent 55%),
@@ -98,7 +106,7 @@ h1,h2,h3{ font-family:var(--disp); margin:0; letter-spacing:.005em; }
 .logo-img{ height:44px; width:auto; display:block; border-radius:var(--r-sm); flex-shrink:0; }
 .brand-copy{ display:flex; flex-direction:column; gap:4px; min-width:0; }
 .brand-row{ display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
-.product-name{ font-family:var(--disp); font-weight:700; font-size:16px; letter-spacing:.01em; color:var(--ink); }
+.product-name{ font-family:var(--disp); font-weight:700; font-size:clamp(14px, 4vw, 16px); letter-spacing:.01em; color:var(--ink); }
 .sub{ color:var(--dim); font-size:11.5px; }
 
 .status-cluster{ display:flex; flex-direction:column; align-items:flex-end; gap:9px; flex-shrink:0; }
