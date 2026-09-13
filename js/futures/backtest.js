@@ -100,13 +100,52 @@ function buildSnapshotAt(symbol, baseCandles, uptoIndex, metaOverrides, interval
   };
 }
 
-function newDayState(startingEquity){
+function newDayState(startingEquity, maxDailyLossPct, dailyProfitTargetPct){
   return {
     equity: startingEquity, startingEquity, peakEquity: startingEquity, maxDrawdownPct: 0,
     realizedNetUsd: 0, realizedGrossUsd: 0, feesUsd: 0, fundingUsd: 0,
     trades: 0, wins: 0, losses: 0, consecutiveLosses: 0, lastLossAt: 0,
     dailyPnlPct: 0, openPositions: 0, openRiskPct: 0, positions: [], cooldownUntilBySymbol: {},
+    // Anchor for the "daily" loss/profit gate (see rolloverDayIfNeeded
+    // below) — starts equal to startingEquity, then gets reset to
+    // whatever equity actually is at the start of each new calendar day,
+    // exactly the way a real Live/Demo session's OWN dailyPnlPct resets
+    // whenever a human clicks Reset Session for a new day. Without this,
+    // a multi-day/multi-week backtest has no equivalent of that manual
+    // reset ever happening, and evaluateNoTradeFilters' "daily" loss/
+    // profit gate (RISK_DEFAULTS.maxDailyLossPct/dailyProfitTargetPct —
+    // 2%/10% — this module doesn't currently expose per-backtest
+    // overrides for either) would otherwise measure against the ENTIRE
+    // backtest's starting balance for its whole multi-week duration —
+    // i.e. one bad early day silently and permanently locking out
+    // every remaining day of a 30/60/90-day test, which is not what
+    // "daily" means and is not how this gate behaves anywhere else in
+    // this codebase.
+    dayAnchorEquity: startingEquity, currentDayKey: null,
+    // Read directly off dayState by evaluateNoTradeFilters (noTradeEngine.js)
+    // — per-backtest overrides now (see btMaxDailyLossPct/btDailyProfitTargetPct,
+    // backtest-ui.js), falling back to the fixed RISK_DEFAULTS used
+    // everywhere else when a caller doesn't pass one.
+    maxDailyLossPct: maxDailyLossPct != null ? maxDailyLossPct : RISK_DEFAULTS.maxDailyLossPct,
+    dailyProfitTargetPct: dailyProfitTargetPct != null ? dailyProfitTargetPct : RISK_DEFAULTS.dailyProfitTargetPct,
   };
+}
+
+// Rolls dayState's "daily" loss/profit tracking over to a fresh
+// calendar-day anchor whenever the walk-forward clock crosses a UTC day
+// boundary — see newDayState's comment on dayAnchorEquity for why this
+// exists at all. UTC is used only as a fixed, unambiguous boundary (this
+// pipeline has no per-exchange "trading day" concept to anchor to
+// instead, same reasoning as buildSnapshotAt's rolling-window VWAP
+// elsewhere in this codebase) — not a claim that any particular exchange
+// resets daily limits at UTC midnight specifically.
+function rolloverDayIfNeeded(dayState, nowMs){
+  const dayKey = Math.floor(nowMs / 86_400_000);
+  if(dayState.currentDayKey === dayKey) return;
+  dayState.currentDayKey = dayKey;
+  dayState.dayAnchorEquity = dayState.equity;
+  dayState.dailyPnlPct = 0; // reset immediately, not just on this new day's first closed trade — otherwise the new day's very first evaluation would still see yesterday's stale (possibly gate-tripping) figure
+  dayState.consecutiveLosses = 0; // a fresh day, same as a human manually re-arming Live/Demo for a new session would reset this
 }
 
 function recomputeOpenRisk(dayState){
@@ -150,7 +189,7 @@ function closeBacktestTrade(pos, exitPrice, pnl, exitReason, dayState, closedTra
   else { dayState.losses++; dayState.consecutiveLosses++; dayState.lastLossAt = nowMs; }
 
   dayState.equity += finalNetUsd;
-  dayState.dailyPnlPct = ((dayState.equity - dayState.startingEquity) / dayState.startingEquity) * 100;
+  dayState.dailyPnlPct = ((dayState.equity - dayState.dayAnchorEquity) / dayState.dayAnchorEquity) * 100;
   dayState.peakEquity = Math.max(dayState.peakEquity, dayState.equity);
   dayState.maxDrawdownPct = Math.max(dayState.maxDrawdownPct, ((dayState.peakEquity - dayState.equity) / dayState.peakEquity) * 100);
 
@@ -249,7 +288,7 @@ function timeStopMinutesFor(setupType){
 // onProgress(fraction 0..1) is called periodically if provided —
 // backtests over months of 5m data across several symbols are tens of
 // thousands of bars and can take a few seconds.
-export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquity, metaOverrides, onProgress, intervalMinutes }){
+export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquity, metaOverrides, onProgress, intervalMinutes, maxDailyLossPct, dailyProfitTargetPct }){
   const barIntervalMinutes = intervalMinutes || 5; // defaults to the original 5m assumption if a caller doesn't pass one
   const testSymbols = (symbols || Object.keys(candlesBySymbol)).filter(s => candlesBySymbol[s] && candlesBySymbol[s].length);
   if(!testSymbols.length) throw new Error('No historical candles to backtest against.');
@@ -271,7 +310,7 @@ export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquit
   for(const sym of testSymbols) for(const c of candlesBySymbol[sym]) timelineSet.add(c.t);
   const timeline = Array.from(timelineSet).sort((a, b) => a - b);
 
-  const dayState = newDayState(startingEquity);
+  const dayState = newDayState(startingEquity, maxDailyLossPct, dailyProfitTargetPct);
   const closedTrades = [];
   const equityCurve = [];
   const btcCandles = candlesBySymbol.BTCUSDT || null;
@@ -282,6 +321,7 @@ export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquit
   for(let ti = 0; ti < timeline.length; ti++){
     const nowMs = timeline[ti];
 
+    rolloverDayIfNeeded(dayState, nowMs);
     managePositionsAtBar(dayState, closedTrades, candlesBySymbol, idxBySymbol, nowMs, timeStopMinutesFor);
 
     if(dayState.consecutiveLosses >= RISK_DEFAULTS.maxConsecutiveLosses){

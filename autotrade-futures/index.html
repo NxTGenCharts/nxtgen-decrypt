@@ -484,6 +484,14 @@
           <label for="btFundingPct" title="Estimated, not fetched — per-8h funding rate, %. 0 is a neutral default.">Est. funding rate (%/8h)</label>
           <input id="btFundingPct" type="number" min="-1" max="1" step="0.001" value="0">
         </div>
+        <div class="field">
+          <label for="btMaxDailyLossPct" title="Once real loss for a CALENDAR DAY within the tested range reaches this % of that day's own starting equity, no new entries are simulated for the rest of that day — then it resets fresh the next day, same as Live/Demo's own daily loss limit resets on Reset Session. Adjustable 0.5-50%.">Max daily loss (%)</label>
+          <input id="btMaxDailyLossPct" type="number" min="0.5" max="50" step="0.5" value="2">
+        </div>
+        <div class="field">
+          <label for="btDailyProfitTargetPct" title="Symmetric to Max daily loss above — once a day within the tested range banks this much profit, no new entries are simulated for the rest of that day. Adjustable 1-50%.">Daily profit target (%)</label>
+          <input id="btDailyProfitTargetPct" type="number" min="1" max="50" step="1" value="10">
+        </div>
       </div>
 
       <div class="field" style="margin-bottom:14px;">

@@ -108,6 +108,8 @@ async function runBacktestFlow(){
   const takerPct = parseFloat(els.btTakerFee.value) || 0;
   const spreadPct = Math.max(0, parseFloat(els.btSpreadPct.value) || 0);
   const fundingRatePct = parseFloat(els.btFundingPct.value) || 0;
+  const maxDailyLossPct = Math.min(50, Math.max(0.5, parseFloat(els.btMaxDailyLossPct && els.btMaxDailyLossPct.value) || 2));
+  const dailyProfitTargetPct = Math.min(50, Math.max(1, parseFloat(els.btDailyProfitTargetPct && els.btDailyProfitTargetPct.value) || 10));
 
   els.btRunBtn.disabled = true;
   els.btResults.style.display = 'none';
@@ -161,6 +163,7 @@ async function runBacktestFlow(){
   try{
     const result = await runBacktest({
       candlesBySymbol, symbols: usableSymbols, cfg, startingEquity, intervalMinutes,
+      maxDailyLossPct, dailyProfitTargetPct,
       metaOverrides: { spreadPct, fundingRatePct },
       onProgress: (frac) => { els.btProgress.textContent = `Simulating… ${Math.round(frac * 100)}%`; },
     });

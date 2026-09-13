@@ -190,6 +190,8 @@ export const els = {
   btTakerFee: document.getElementById('btTakerFee'),
   btSpreadPct: document.getElementById('btSpreadPct'),
   btFundingPct: document.getElementById('btFundingPct'),
+  btMaxDailyLossPct: document.getElementById('btMaxDailyLossPct'),
+  btDailyProfitTargetPct: document.getElementById('btDailyProfitTargetPct'),
   btSymbolChecks: document.getElementById('btSymbolChecks'),
   btSymbolsAllBtn: document.getElementById('btSymbolsAllBtn'),
   btSymbolsNoneBtn: document.getElementById('btSymbolsNoneBtn'),
