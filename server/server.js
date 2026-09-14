@@ -1251,21 +1251,56 @@ function toUnderscoreSymbol(symbol){
   return symbol.endsWith('USDT') ? `${symbol.slice(0, -4)}_USDT` : symbol;
 }
 
+// Binance's own current docs state: "Between startTime and endTime, the
+// most recent limit data from endTime will be returned" whenever the
+// requested window spans more bars than `limit` — i.e. this endpoint
+// anchors to the END of the window, the same as Bybit's kline endpoint
+// (see fetchBybitLinearKlines's comment below for the full explanation).
+// That's a real behavior to design around, not the older "ascending from
+// startTime" assumption this fetcher used to rely on. The previous
+// forward-cursor version here (cursor = startMs, moving forward each
+// page while endTime stayed fixed at the final requested end) hit
+// exactly the same failure mode already documented for Bybit and MEXC
+// below: the first page would return the ~1500 bars closest to endMs
+// regardless of startMs, the loop's cursor would then jump forward
+// almost to endMs, and the loop would exit after essentially one page —
+// silently capping every fetch at ~1500 bars (~5.2 days at 5m) of the
+// MOST RECENT history no matter how far back startMs actually asked
+// for. This is what made a 14-day Backtest run return the same trades
+// as a 7-day one for Binance specifically (Bybit and MEXC had the same
+// bug, fixed elsewhere in this file). Paging BACKWARD from endMs instead
+// — same approach used for Bybit/MEXC — matches how Binance is
+// documented to anchor and reliably walks the full requested range.
 async function fetchBinanceFuturesKlines(symbol, interval, startMs, endMs){
-  const out = [];
-  let cursor = startMs;
-  while(cursor < endMs){
-    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${BINANCE_KLINE_INTERVAL[interval]}&startTime=${cursor}&endTime=${endMs}&limit=1500`;
+  const pages = []; // oldest page unshifted to the front, so pages[0] is the oldest chunk once the loop ends
+  let cursorEnd = endMs;
+  let guard = 0;
+  while(cursorEnd > startMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
+    guard++;
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${BINANCE_KLINE_INTERVAL[interval]}&startTime=${startMs}&endTime=${cursorEnd}&limit=1500`;
     const r = await fetch(url);
     if(!r.ok) throw new Error(`Binance klines HTTP ${r.status}`);
     const rows = await r.json();
     if(!Array.isArray(rows) || !rows.length) break;
-    for(const row of rows) out.push({ t: row[0], o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] });
-    const lastT = rows[rows.length - 1][0];
-    if(lastT <= cursor) break; // guards against a stuck page ever looping forever
-    cursor = lastT + 1;
-    if(rows.length < 1500) break; // short page = caught up to endMs already
+    const chron = rows
+      .map(row => ({ t: row[0], o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] }))
+      .sort((a, b) => a.t - b.t); // Binance's docs say ascending already — sorted defensively, same as the other fetchers below
+    pages.unshift(chron);
+    const oldestT = chron[0].t;
+    if(oldestT <= startMs) break; // this page already reached back to (or past) the requested start — done
+    if(oldestT >= cursorEnd) break; // stuck page (didn't move backward at all) — stop rather than loop forever
+    cursorEnd = oldestT - 1; // next page: everything up to just before this page's oldest bar
   }
+  const seenT = new Set();
+  const out = [];
+  for(const page of pages){
+    for(const c of page){
+      if(c.t < startMs || c.t > endMs || seenT.has(c.t)) continue;
+      seenT.add(c.t);
+      out.push(c);
+    }
+  }
+  out.sort((a, b) => a.t - b.t);
   return out;
 }
 
