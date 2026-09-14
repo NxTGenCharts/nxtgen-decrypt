@@ -165,6 +165,10 @@ function openBacktestPosition(row, dayState, nowMs){
     qty, notionalUsd: row.sizing ? row.sizing.notionalUsd : 0,
     leverage: row.leverage, execution: row.execution,
     entryFeePct: row.costsBreakdown.entryFeePct, exitFeePct: row.costsBreakdown.exitFeePct,
+    // See engine.js's openPosition for why this exists — same maker/
+    // taker split, just mirrored here since backtest.js keeps its own
+    // position object rather than importing engine.js's openPosition.
+    tpExitFeePct: row.makerFeePct != null ? row.makerFeePct : row.costsBreakdown.exitFeePct,
     fundingRatePct: row.costsBreakdown.fundingCostPct > 0 ? row.costsBreakdown.fundingCostPct : 0,
     confidence: row.confidence, setup: row.setup, reasons: row.reasons, regime: row.regime,
     openedAt: nowMs, remainingFraction: 1, partialsTaken: [], accrued: null,
@@ -219,7 +223,7 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
     const timeStopMinutes = timeStopMinutesFor(pos.setup);
 
     if(hitSL){
-      const pnl = netPnlForFraction(pos, pos.stop, pos.remainingFraction, dayState);
+      const pnl = netPnlForFraction(pos, pos.stop, pos.remainingFraction, dayState, false);
       closeBacktestTrade(pos, pos.stop, pnl, 'STOP_LOSS', dayState, closedTrades, nowMs);
       dayState.cooldownUntilBySymbol[pos.symbol] = nowMs + 30 * 60_000;
       continue;
@@ -228,7 +232,7 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
     const tp1Fraction = pos.tpFractions.tp1, tp2Fraction = pos.tpFractions.tp2;
 
     if(!pos.partialsTaken.includes('tp1') && hitTP(pos.tp1)){
-      const pnl = netPnlForFraction(pos, pos.tp1, tp1Fraction, dayState);
+      const pnl = netPnlForFraction(pos, pos.tp1, tp1Fraction, dayState, true);
       pos.remainingFraction -= tp1Fraction;
       pos.partialsTaken.push('tp1');
       dayState.realizedNetUsd += pnl.netUsd; dayState.realizedGrossUsd += pnl.grossUsd;
@@ -239,7 +243,7 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
     }
 
     if(pos.remainingFraction > 0 && !pos.partialsTaken.includes('tp2') && hitTP(pos.tp2)){
-      const pnl = netPnlForFraction(pos, pos.tp2, tp2Fraction, dayState);
+      const pnl = netPnlForFraction(pos, pos.tp2, tp2Fraction, dayState, true);
       pos.remainingFraction -= tp2Fraction;
       pos.partialsTaken.push('tp2');
       if(pos.breakevenStopPrice != null) pos.stop = pos.breakevenStopPrice;
@@ -250,14 +254,14 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
     }
 
     if(pos.remainingFraction > 0 && hitTP(pos.tp3)){
-      const pnl = netPnlForFraction(pos, pos.tp3, pos.remainingFraction, dayState);
+      const pnl = netPnlForFraction(pos, pos.tp3, pos.remainingFraction, dayState, true);
       closeBacktestTrade(pos, pos.tp3, pnl, 'TP3', dayState, closedTrades, nowMs);
       dayState.cooldownUntilBySymbol[pos.symbol] = nowMs + 30 * 60_000;
       continue;
     }
 
     if(pos.remainingFraction > 0 && ageMinutes > timeStopMinutes){
-      const pnl = netPnlForFraction(pos, candle.c, pos.remainingFraction, dayState);
+      const pnl = netPnlForFraction(pos, candle.c, pos.remainingFraction, dayState, false);
       closeBacktestTrade(pos, candle.c, pnl, 'TIME_STOP', dayState, closedTrades, nowMs);
       dayState.cooldownUntilBySymbol[pos.symbol] = nowMs + 30 * 60_000;
       continue;
@@ -370,7 +374,10 @@ export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquit
   for(const pos of dayState.positions.slice()){
     const arr = candlesBySymbol[pos.symbol];
     const lastCandle = arr[arr.length - 1];
-    const pnl = netPnlForFraction(pos, lastCandle.c, pos.remainingFraction, dayState);
+    // Not a real strategy-driven exit — a synthetic mark-to-market close
+    // at whatever price the data ran out at, so taker (isMakerExit=false)
+    // is the honest assumption here, same as SL/time-stop.
+    const pnl = netPnlForFraction(pos, lastCandle.c, pos.remainingFraction, dayState, false);
     closeBacktestTrade(pos, lastCandle.c, pnl, 'OPEN_AT_END', dayState, closedTrades, lastCandle.t);
   }
   dayState.positions = [];

@@ -350,6 +350,14 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
     liquidityScore: snap.meta.liquidityScore, regime: regime.regime,
     status: gate.allowed ? 'APPROVED' : 'REJECTED', rejectReasons: gate.reasons,
     execution, sizing, leverage, liqPrice: liqSafety.liqPrice,
+    // TP hits are resting limit orders (maker); SL/time-stop exits need
+    // guaranteed immediate execution (taker) — see netPnlForFraction's
+    // comment for why the two are charged different fee rates once a
+    // position is actually open. estFeesPct/costsBreakdown above stay
+    // the conservative all-taker estimate used for pre-trade sizing and
+    // the approval gate (unchanged) — this is only consulted afterward,
+    // for the fee actually applied to a TP-closed slice.
+    makerFeePct: feeLookup.makerPct,
     reasons: primary.reasons, costsBreakdown: costs,
   };
   row.explanation = buildExplanation({
@@ -394,6 +402,11 @@ export function openPosition(row, dayState){
     qty, notionalUsd: row.sizing ? row.sizing.notionalUsd : 0,
     leverage: row.leverage, execution: row.execution,
     entryFeePct: row.costsBreakdown.entryFeePct, exitFeePct: row.costsBreakdown.exitFeePct,
+    // The cheaper maker rate charged specifically when a TP level (not
+    // SL/time-stop) is what closes the slice — see netPnlForFraction.
+    // Falls back to the conservative taker estimate if a row somehow
+    // doesn't carry it, so this can never be worse than the old behavior.
+    tpExitFeePct: row.makerFeePct != null ? row.makerFeePct : row.costsBreakdown.exitFeePct,
     fundingRatePct: row.costsBreakdown.fundingCostPct > 0 ? row.costsBreakdown.fundingCostPct : 0,
     confidence: row.confidence, setup: row.setup, reasons: row.reasons, regime: row.regime,
     openedAt: mockMarket.now(), remainingFraction: 1, partialsTaken: [], status: 'OPEN',
@@ -424,14 +437,29 @@ export function recomputeOpenRisk(dayState){
   dayState.openRiskPct = dayState.positions.reduce((a, p) => a + (p.riskAmountUsd || 0), 0) / Math.max(1, dayState.equity) * 100;
 }
 
-export function netPnlForFraction(position, exitPrice, fraction, dayState){
+// isMakerExit: true when THIS slice closed via a TP level (a resting
+// limit order — filled passively, at the maker rate), false for SL/
+// time-stop/forced-close exits (need guaranteed execution regardless of
+// price — a taker fill). Real exchanges charge meaningfully less for
+// maker fills (e.g. Binance: 0.02% maker vs 0.05% taker — more than
+// half), and TP hits are the majority of a healthy strategy's exits, so
+// charging every exit at the taker rate (the old behavior — simpler,
+// but a real overstatement) measurably inflated simulated/backtested
+// fees relative to what real trading would actually pay. The
+// conservative all-taker assumption is kept for pre-trade sizing and
+// the approval gate (position.exitFeePct, costs.js, noTradeEngine.js's
+// fee-to-stop-ratio cap) — deciding whether a setup clears real costs
+// should stay worst-case. This only changes the fee actually realized
+// once a position is open, and only for the slice that closed via TP.
+export function netPnlForFraction(position, exitPrice, fraction, dayState, isMakerExit){
   const grossPct = ((exitPrice - position.entry) / position.entry) * 100 * (position.direction === 'LONG' ? 1 : -1);
-  const costPct = position.entryFeePct + position.exitFeePct + position.fundingRatePct;
+  const exitFeePct = (isMakerExit && position.tpExitFeePct != null) ? position.tpExitFeePct : position.exitFeePct;
+  const costPct = position.entryFeePct + exitFeePct + position.fundingRatePct;
   const netPct = grossPct - costPct;
   const notionalSlice = position.notionalUsd * fraction;
   return {
     grossUsd: (grossPct / 100) * notionalSlice,
-    feesUsd: ((position.entryFeePct + position.exitFeePct) / 100) * notionalSlice,
+    feesUsd: ((position.entryFeePct + exitFeePct) / 100) * notionalSlice,
     fundingUsd: (position.fundingRatePct / 100) * notionalSlice,
     netUsd: (netPct / 100) * notionalSlice,
     grossPct, netPct,
@@ -456,7 +484,7 @@ export function managePositions(dayState, tradeHistory, cfg){
     const events = [];
 
     if(hitSL){
-      const pnl = netPnlForFraction(pos, pos.stop, pos.remainingFraction, dayState);
+      const pnl = netPnlForFraction(pos, pos.stop, pos.remainingFraction, dayState, false);
       closeTrade(pos, pos.stop, pnl, 'STOP_LOSS', dayState, tradeHistory);
       setSymbolCooldown(dayState, pos.symbol);
       continue;
@@ -466,7 +494,7 @@ export function managePositions(dayState, tradeHistory, cfg){
     const tp2Fraction = pos.tpFractions ? pos.tpFractions.tp2 : 0.30;
 
     if(!pos.partialsTaken.includes('tp1') && hitTP(pos.tp1)){
-      const pnl = netPnlForFraction(pos, pos.tp1, tp1Fraction, dayState);
+      const pnl = netPnlForFraction(pos, pos.tp1, tp1Fraction, dayState, true);
       pos.remainingFraction -= tp1Fraction;
       pos.partialsTaken.push('tp1');
       // Requirement #4/#5: SL stays exactly where it was — TP1 does NOT
@@ -488,7 +516,7 @@ export function managePositions(dayState, tradeHistory, cfg){
     }
 
     if(pos.remainingFraction > 0 && !pos.partialsTaken.includes('tp2') && hitTP(pos.tp2)){
-      const pnl = netPnlForFraction(pos, pos.tp2, tp2Fraction, dayState);
+      const pnl = netPnlForFraction(pos, pos.tp2, tp2Fraction, dayState, true);
       pos.remainingFraction -= tp2Fraction;
       pos.partialsTaken.push('tp2');
       // Requirement #6/#7: ONLY now, after TP2 fully closes, does the
@@ -505,14 +533,14 @@ export function managePositions(dayState, tradeHistory, cfg){
     }
 
     if(pos.remainingFraction > 0 && hitTP(pos.tp3)){
-      const pnl = netPnlForFraction(pos, pos.tp3, pos.remainingFraction, dayState);
+      const pnl = netPnlForFraction(pos, pos.tp3, pos.remainingFraction, dayState, true);
       closeTrade(pos, pos.tp3, pnl, 'TP3', dayState, tradeHistory, events);
       setSymbolCooldown(dayState, pos.symbol);
       continue;
     }
 
     if(pos.remainingFraction > 0 && ageMinutes > timeStopMinutes){
-      const pnl = netPnlForFraction(pos, snap.price, pos.remainingFraction, dayState);
+      const pnl = netPnlForFraction(pos, snap.price, pos.remainingFraction, dayState, false);
       closeTrade(pos, snap.price, pnl, 'TIME_STOP', dayState, tradeHistory, events);
       setSymbolCooldown(dayState, pos.symbol);
       continue;
