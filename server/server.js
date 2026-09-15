@@ -897,6 +897,182 @@ async function getAllBybitPositions(mode, apiKey, secretKey){
 // closed-pnl — IS listed in Bybit's own Demo Trading API availability
 // table ("Get Trade History | /v5/execution/list"), so this works in
 // both Live and Demo.
+// =============================================================
+// Bybit hedge-mode grid order placement — NxTGen Grid's Live/Demo path.
+// Deliberately SEPARATE functions from placeBybitFuturesOrder/
+// closeBybitFuturesPosition/getBybitPosition above (used by the other
+// six strategies), for one specific safety reason: this switches the
+// SYMBOL to Bybit's hedge/"BothSide" position mode, so it can hold a
+// LONG and a SHORT position on the same symbol at once — which the six
+// strategies' code assumes is never the case (positionIdx:0, one-way).
+//
+// This is safe to do per-symbol rather than needing user sign-off first
+// (unlike the Binance section below) because Bybit's position mode is
+// scoped to category+symbol, not the whole account — and Grid only ever
+// trades GRID_SYMBOLS (BTC/ETH/SOL/BNB/XRP/DOGE), which engine.js's
+// EXCLUDED_FUTURES_SYMBOLS already keeps the other six strategies OFF
+// of entirely (see grid.js's GRID_SYMBOLS comment). So switching one of
+// these symbols to hedge mode can never affect an order the six
+// strategies place, on Bybit or otherwise — the two symbol sets never
+// overlap by construction.
+//
+// positionIdx convention used throughout this section: 1 = hedge-mode
+// LONG slot, 2 = hedge-mode SHORT slot (0 stays reserved for one-way,
+// which these functions never use).
+// =============================================================
+async function bybitGridEnsureHedgeMode(mode, apiKey, secretKey, symbol){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  try{
+    await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/switch-mode', {
+      category: 'linear', symbol, mode: 3, // 3 = BothSide (hedge)
+    });
+  }catch(err){
+    // Same "already set" tolerance as bybitSetLeverage above — Bybit
+    // returns a distinct retCode/message when the symbol is already in
+    // the requested mode, which isn't a failure.
+    if(!/not modified|same as current/i.test(err.message)){
+      throw new VerifyRejected(`Could not switch ${symbol} to hedge mode on Bybit: ${err.message}. NxTGen Grid needs hedge mode to hold both a long and short leg on the same symbol — if this symbol currently has an OPEN position or resting orders from a previous one-way session, Bybit will refuse the switch until those are closed/cancelled first.`);
+    }
+  }
+}
+
+// Places one resting entry LIMIT order for a single grid level — NOT a
+// market order, because the whole fee-aware profit model (grid.js's
+// netCycleProfit) assumes maker fills on both sides of a cycle, same as
+// the backtest. side/positionIdx: LONG -> Buy/1, SHORT -> Sell/2.
+async function placeBybitGridLevelOrder(mode, apiKey, secretKey, { symbol, direction, price, qty, leverage, orderLinkTag }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  if(roundedQty <= 0 || roundedQty < filters.minOrderQty){
+    throw new VerifyRejected(`Grid level size ${qty} ${symbol} rounds down to ${roundedQty}, below the exchange minimum (${filters.minOrderQty}) — level skipped, not sent.`);
+  }
+  const roundedPrice = Math.round(price / filters.tickSize) * filters.tickSize;
+  const clampedLeverage = Math.min(leverage, filters.maxLeverage);
+  await bybitSetLeverage(mode, apiKey, secretKey, symbol, clampedLeverage);
+  const side = direction === 'LONG' ? 'Buy' : 'Sell';
+  const positionIdx = direction === 'LONG' ? 1 : 2;
+  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+    category: 'linear', symbol, side, orderType: 'Limit', qty: roundedQty.toString(),
+    price: roundedPrice.toString(), timeInForce: 'GTC', positionIdx,
+    orderLinkId: `nxgrid-lvl-${orderLinkTag || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  });
+  const orderId = created.result?.orderId;
+  if(!orderId) throw new VerifyRejected('Bybit accepted the grid level order but returned no orderId.');
+  return { orderId, price: roundedPrice, qty: roundedQty, leverage: clampedLeverage };
+}
+
+// Places the reduce-only closing LIMIT order for a leg that just filled
+// — rests at that leg's target (the next grid level), same maker-fill
+// assumption as the entry. Called right after placeBybitGridLevelOrder's
+// order is detected as filled (see getBybitGridOpenOrders below).
+async function placeBybitGridCloseOrder(mode, apiKey, secretKey, { symbol, direction, price, qty, orderLinkTag }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  const roundedPrice = Math.round(price / filters.tickSize) * filters.tickSize;
+  const exitSide = direction === 'LONG' ? 'Sell' : 'Buy'; // closes the LONG or SHORT slot, doesn't flip it
+  const positionIdx = direction === 'LONG' ? 1 : 2;
+  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+    category: 'linear', symbol, side: exitSide, orderType: 'Limit', qty: roundedQty.toString(),
+    price: roundedPrice.toString(), timeInForce: 'GTC', reduceOnly: true, positionIdx,
+    orderLinkId: `nxgrid-cls-${orderLinkTag || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  });
+  const orderId = created.result?.orderId;
+  if(!orderId) throw new VerifyRejected('Bybit accepted the grid close order but returned no orderId.');
+  return { orderId, price: roundedPrice, qty: roundedQty };
+}
+
+// Attaches (or refreshes) a protective stop on one hedge-mode side slot
+// at the grid's own outer boundary — see the header note on grid.js's
+// live wiring for why this exists even though the backtested strategy
+// itself doesn't model a per-leg stop: this app's whole safety design
+// (see the file-level comment on placeBybitFuturesOrder above) is that
+// a real position must never depend on a browser tab staying open and
+// polling to stay protected. Re-calling this with the same price is a
+// safe no-op; call it again whenever the grid recalculates its bounds.
+async function setBybitGridSideStop(mode, apiKey, secretKey, { symbol, direction, stopPrice }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const roundedStop = Math.round(stopPrice / filters.tickSize) * filters.tickSize;
+  const positionIdx = direction === 'LONG' ? 1 : 2;
+  await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/trading-stop', {
+    category: 'linear', symbol, tpslMode: 'Full', slOrderType: 'Market',
+    stopLoss: roundedStop.toString(), positionIdx,
+  });
+  return { stopPrice: roundedStop };
+}
+
+async function cancelBybitOrder(mode, apiKey, secretKey, { symbol, orderId }){
+  await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'POST', '/v5/order/cancel', {
+    category: 'linear', symbol, orderId,
+  }).catch(err => {
+    // Already filled or already cancelled — not a failure worth
+    // surfacing; the caller's own reconciliation (position/open-orders
+    // read right after) is what actually determines state, this is
+    // best-effort tidiness.
+    if(!/order not exists|too late to cancel/i.test(err.message)) throw err;
+  });
+}
+
+async function cancelAllBybitGridOrders(mode, apiKey, secretKey, symbol){
+  await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'POST', '/v5/order/cancel-all', {
+    category: 'linear', symbol,
+  }).catch(() => {});
+}
+
+// Lists currently-open (unfilled/partially-filled) orders for the
+// symbol — this is how the client detects a grid level's LIMIT order
+// having filled: an orderId it placed and is tracking is no longer in
+// this list. Bybit's /v5/order/realtime with just category+symbol (no
+// orderId) returns the open-orders book for that symbol.
+async function getBybitGridOpenOrders(mode, apiKey, secretKey, symbol){
+  const data = await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'GET', '/v5/order/realtime', `category=linear&symbol=${symbol}`);
+  const list = data.result?.list || [];
+  return list.map(o => ({ orderId: o.orderId, side: o.side, price: parseFloat(o.price), qty: parseFloat(o.qty), status: o.orderStatus, positionIdx: o.positionIdx }));
+}
+
+// Reads BOTH hedge-mode position slots for the symbol — in BothSide
+// mode Bybit returns one row per positionIdx (1=Long, 2=Short) even
+// when one side is flat (size:"0"), unlike one-way mode's single row.
+async function getBybitGridPositions(mode, apiKey, secretKey, symbol){
+  const data = await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'GET', '/v5/position/list', `category=linear&symbol=${symbol}`);
+  const list = data.result?.list || [];
+  const long = list.find(p => p.positionIdx === 1);
+  const short = list.find(p => p.positionIdx === 2);
+  return {
+    long: long && parseFloat(long.size || '0') > 0 ? { size: parseFloat(long.size), avgPrice: parseFloat(long.avgPrice || '0'), liqPrice: long.liqPrice ? parseFloat(long.liqPrice) : null, unrealisedPnl: parseFloat(long.unrealisedPnl || '0') } : null,
+    short: short && parseFloat(short.size || '0') > 0 ? { size: parseFloat(short.size), avgPrice: parseFloat(short.avgPrice || '0'), liqPrice: short.liqPrice ? parseFloat(short.liqPrice) : null, unrealisedPnl: parseFloat(short.unrealisedPnl || '0') } : null,
+  };
+}
+
+// Breakout/emergency/manual flatten — cancels every resting grid order
+// on the symbol, then market-closes whichever side(s) actually hold
+// size. Best-effort on the cancel (a leg mid-fill when this runs is not
+// an error state, just something the immediately-following position
+// read will pick up and this will still close).
+async function flattenBybitGrid(mode, apiKey, secretKey, symbol){
+  await cancelAllBybitGridOrders(mode, apiKey, secretKey, symbol);
+  const positions = await getBybitGridPositions(mode, apiKey, secretKey, symbol);
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const closed = [];
+  for(const [direction, pos] of [['LONG', positions.long], ['SHORT', positions.short]]){
+    if(!pos) continue;
+    const qty = floorToStep(pos.size, filters.qtyStep);
+    if(qty <= 0) continue;
+    const exitSide = direction === 'LONG' ? 'Sell' : 'Buy';
+    const positionIdx = direction === 'LONG' ? 1 : 2;
+    const result = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+      category: 'linear', symbol, side: exitSide, orderType: 'Market', qty: qty.toString(),
+      reduceOnly: true, positionIdx, timeInForce: 'IOC',
+      orderLinkId: `nxgrid-flat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    }).catch(err => { throw new VerifyRejected(`Cancelled resting grid orders but FAILED to flatten the ${direction} side (size ${qty}) on Bybit: ${err.message}. Check ${symbol} on Bybit directly.`); });
+    closed.push({ direction, qty, orderId: result.result?.orderId || null });
+  }
+  return { closed };
+}
+
 async function getBybitExecutionFees(mode, apiKey, secretKey, symbol, openedAtMs){
   const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
   const startTime = String(openedAtMs || (Date.now() - 24 * 60 * 60 * 1000));
@@ -2275,6 +2451,27 @@ async function binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, levera
   await binanceFuturesSignedRequest('POST', '/fapi/v1/leverage', { symbol, leverage: String(Math.round(leverage)) }, apiKey, secretKey, mode);
 }
 
+// Cached read of the account's hedge-mode flag (binanceGridCheckHedgeMode,
+// defined in the Grid section further down this file) — needed here too
+// because once a person switches their Binance account to hedge mode
+// (to use NxTGen Grid — see that section's header comment on why this
+// app never does that switch itself), EVERY order on the account must
+// include `positionSide`, including these six-strategy functions' own
+// orders on whatever OTHER symbols they're trading on the same account.
+// Cached for a few minutes since this rarely changes and every one of
+// these functions would otherwise cost an extra signed call per order.
+const binanceHedgeModeCache = new Map(); // `${mode}:${apiKey}` -> { value, checkedAt }
+const BINANCE_HEDGE_MODE_CACHE_TTL_MS = 5 * 60 * 1000;
+async function getCachedBinanceHedgeMode(mode, apiKey, secretKey){
+  const key = `${mode}:${apiKey}`;
+  const cached = binanceHedgeModeCache.get(key);
+  if(cached && Date.now() - cached.checkedAt < BINANCE_HEDGE_MODE_CACHE_TTL_MS) return cached.value;
+  const value = await binanceGridCheckHedgeMode(mode, apiKey, secretKey).catch(() => false); // fail closed to one-way assumption — matches what every account defaults to
+  binanceHedgeModeCache.set(key, { value, checkedAt: Date.now() });
+  return value;
+}
+
+
 // TP/SL shape (partial take-profit structure — TP1 30% / TP2 30% /
 // TP3 40%, see tpLevels below): the SL is one STOP_MARKET conditional
 // order with closePosition:true (unchanged from before — closePosition
@@ -2308,11 +2505,14 @@ async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side,
   const roundQty = q => floorToStep(q, filters.qtyStep);
   const stopLossPrice = roundPrice(rawStopLossPrice);
   const exitSide = side === 'BUY' ? 'SELL' : 'BUY'; // TP/SL close the position, so they trade the opposite direction from entry
+  const hedgeOn = await getCachedBinanceHedgeMode(mode, apiKey, secretKey);
+  const positionSide = side === 'BUY' ? 'LONG' : 'SHORT'; // only meaningful/sent when hedgeOn
 
   await binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage);
 
   let order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
     symbol, side, type: 'MARKET', quantity: qty.toString(), newOrderRespType: 'RESULT',
+    ...(hedgeOn ? { positionSide } : {}),
   }, apiKey, secretKey, mode);
   // MARKET orders should return the filled result synchronously with
   // newOrderRespType:RESULT — but if avgPrice ever comes back empty/zero
@@ -2341,6 +2541,7 @@ async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side,
     const slResp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
       algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'STOP_MARKET',
       triggerPrice: stopLossPrice.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+      ...(hedgeOn ? { positionSide } : {}),
     }, apiKey, secretKey, mode);
     slAlgoId = slResp.algoId ?? slResp.orderId ?? null;
 
@@ -2352,6 +2553,7 @@ async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side,
       const body = {
         algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'TAKE_PROFIT_MARKET',
         triggerPrice: legPrice.toString(), workingType: 'MARK_PRICE',
+        ...(hedgeOn ? { positionSide } : {}),
       };
       if(isLast){
         body.closePosition = 'true';
@@ -2359,7 +2561,10 @@ async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side,
         const legQty = roundQty(qty * legs[i].fraction);
         allocatedQty += legQty;
         body.quantity = legQty.toString();
-        body.reduceOnly = 'true';
+        // reduceOnly is REJECTED outright by Binance once the account is
+        // in hedge mode (side+positionSide alone conveys "this reduces
+        // the position" there) — only send it in one-way mode.
+        if(!hedgeOn) body.reduceOnly = 'true';
       }
       const tpResp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', body, apiKey, secretKey, mode);
       tpOrderIds.push(tpResp.algoId ?? tpResp.orderId ?? null);
@@ -2386,6 +2591,8 @@ async function moveBinanceStopToBreakeven(mode, apiKey, secretKey, { symbol, sid
   const filters = await binanceFuturesSymbolFilters(base, symbol);
   const roundPrice = p => Number(p.toFixed(filters.pricePrecision));
   const exitSide = side === 'BUY' ? 'SELL' : 'BUY';
+  const hedgeOn = await getCachedBinanceHedgeMode(mode, apiKey, secretKey);
+  const positionSide = side === 'BUY' ? 'LONG' : 'SHORT';
 
   if(slOrderId){
     await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: slOrderId }, apiKey, secretKey, mode).catch(() => {});
@@ -2394,13 +2601,21 @@ async function moveBinanceStopToBreakeven(mode, apiKey, secretKey, { symbol, sid
   const newStop = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
     algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'STOP_MARKET',
     triggerPrice: stopLossPrice.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+    ...(hedgeOn ? { positionSide } : {}),
   }, apiKey, secretKey, mode);
   return { newStopPrice: stopLossPrice, slOrderId: newStop.algoId ?? newStop.orderId ?? null };
 }
 
 async function getBinanceFuturesPosition(mode, apiKey, secretKey, symbol){
   const list = await binanceFuturesSignedRequest('GET', '/fapi/v3/positionRisk', { symbol }, apiKey, secretKey, mode);
-  const pos = Array.isArray(list) ? list.find(p => p.symbol === symbol) : null;
+  // In hedge mode Binance returns one row per positionSide (LONG/SHORT)
+  // for this symbol, most with positionAmt 0 — pick whichever row is
+  // actually non-zero rather than always the first, so this still works
+  // correctly for the six strategies (which only ever hold one direction
+  // at a time themselves) on an account that has hedge mode on for
+  // NxTGen Grid's sake. In one-way mode there's just the single BOTH row.
+  const rows = Array.isArray(list) ? list.filter(p => p.symbol === symbol) : [];
+  const pos = rows.find(p => Math.abs(parseFloat(p.positionAmt)) > 0) || rows[0];
   const amt = pos ? parseFloat(pos.positionAmt) : 0;
   if(!pos || amt === 0) return null;
   return {
@@ -2424,8 +2639,11 @@ async function closeBinanceFuturesPosition(mode, apiKey, secretKey, symbol){
   const pos = await getBinanceFuturesPosition(mode, apiKey, secretKey, symbol);
   if(!pos) throw new VerifyRejected(`No open ${symbol} position found on Binance — nothing to close.`);
   const exitSide = pos.side === 'Buy' ? 'SELL' : 'BUY';
+  const hedgeOn = await getCachedBinanceHedgeMode(mode, apiKey, secretKey);
+  const positionSide = pos.side === 'Buy' ? 'LONG' : 'SHORT';
   const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
-    symbol, side: exitSide, type: 'MARKET', quantity: pos.size.toString(), reduceOnly: 'true', newOrderRespType: 'RESULT',
+    symbol, side: exitSide, type: 'MARKET', quantity: pos.size.toString(), newOrderRespType: 'RESULT',
+    ...(hedgeOn ? { positionSide } : { reduceOnly: 'true' }), // reduceOnly is rejected outright once hedgeOn — positionSide alone conveys the close there
   }, apiKey, secretKey, mode);
   return { orderId: order && order.orderId };
 }
@@ -2451,6 +2669,151 @@ async function getBinanceFuturesRealizedResult(mode, apiKey, secretKey, symbol, 
   const closedPnl = grossPnl + feesUsd + fundingUsd;
   return { closedPnl, grossPnl, feesUsd, fundingUsd, entries: relevant.length };
 }
+
+// =============================================================
+// Binance hedge-mode grid order placement — NxTGen Grid's Live/Demo
+// path on Binance. Unlike the Bybit section above, Binance's
+// dualSidePosition (hedge mode) flag is ACCOUNT-WIDE, not per-symbol —
+// switching it affects every symbol, including whatever the other six
+// strategies might be trading on the SAME Binance account. So this
+// section deliberately does NOT flip that setting itself. Instead:
+// binanceGridCheckHedgeMode only READS the current flag and returns a
+// clear yes/no + instructions; the person switches it themselves, once,
+// knowingly, in Binance's own UI or via their own API call — an
+// explicit action on their account, not something this app decides for
+// them. Once it's confirmed on, every function below correctly adds
+// the required `positionSide` (LONG/SHORT) to each order — which is
+// also exactly what the SIX-STRATEGY functions above (placeBinance-
+// FuturesOrder, closeBinanceFuturesPosition, moveBinanceStopToBreakeven)
+// still need once hedge mode is on for the account, since Binance
+// requires positionSide on every order once dualSidePosition:true,
+// full stop otherwise — see the trailing patch to those three
+// functions further down this section.
+// =============================================================
+async function binanceGridCheckHedgeMode(mode, apiKey, secretKey){
+  const data = await binanceFuturesSignedRequest('GET', '/fapi/v1/positionSide/dual', {}, apiKey, secretKey, mode);
+  return !!data.dualSidePosition;
+}
+
+// In hedge mode: `side` (BUY/SELL) is the trade direction, `positionSide`
+// (LONG/SHORT) says which position slot it affects — they're
+// independent. Opening/adding to LONG: BUY+LONG. Closing/reducing LONG:
+// SELL+LONG. Opening/adding to SHORT: SELL+SHORT. Closing/reducing
+// SHORT: BUY+SHORT. reduceOnly is NOT sent in hedge mode — Binance
+// rejects it outright ("Parameter 'reduceonly' sent when not required");
+// the side+positionSide combination alone tells Binance whether an
+// order opens or reduces a position.
+function binanceHedgeOrderParams(direction, isClosing){
+  const positionSide = direction === 'LONG' ? 'LONG' : 'SHORT';
+  let side;
+  if(direction === 'LONG') side = isClosing ? 'SELL' : 'BUY';
+  else side = isClosing ? 'BUY' : 'SELL';
+  return { side, positionSide };
+}
+
+async function placeBinanceGridLevelOrder(mode, apiKey, secretKey, { symbol, direction, price, qty, leverage, orderLinkTag }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  if(roundedQty <= 0 || roundedQty < filters.minQty){
+    throw new VerifyRejected(`Grid level size ${qty} ${symbol} rounds down to ${roundedQty}, below the exchange minimum (${filters.minQty}) — level skipped, not sent.`);
+  }
+  const roundedPrice = Number(price.toFixed(filters.pricePrecision));
+  await binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage);
+  const { side, positionSide } = binanceHedgeOrderParams(direction, false);
+  const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+    symbol, side, positionSide, type: 'LIMIT', timeInForce: 'GTC',
+    quantity: roundedQty.toString(), price: roundedPrice.toString(),
+    newClientOrderId: `nxgrid-lvl-${orderLinkTag || Date.now()}-${Math.random().toString(36).slice(2, 6)}`.slice(0, 36),
+  }, apiKey, secretKey, mode);
+  return { orderId: order.orderId, price: roundedPrice, qty: roundedQty, leverage };
+}
+
+async function placeBinanceGridCloseOrder(mode, apiKey, secretKey, { symbol, direction, price, qty, orderLinkTag }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  const roundedPrice = Number(price.toFixed(filters.pricePrecision));
+  const { side, positionSide } = binanceHedgeOrderParams(direction, true);
+  const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+    symbol, side, positionSide, type: 'LIMIT', timeInForce: 'GTC',
+    quantity: roundedQty.toString(), price: roundedPrice.toString(),
+    newClientOrderId: `nxgrid-cls-${orderLinkTag || Date.now()}-${Math.random().toString(36).slice(2, 6)}`.slice(0, 36),
+  }, apiKey, secretKey, mode);
+  return { orderId: order.orderId, price: roundedPrice, qty: roundedQty };
+}
+
+// Protective stop on one hedge-mode side, at the grid's outer boundary —
+// same rationale as setBybitGridSideStop above (a real position must
+// stay protected even if the browser tab closes). Uses the same
+// /fapi/v1/algoOrder STOP_MARKET path the six-strategy code already
+// uses (see the file-level comment on placeBinanceFuturesOrder for why
+// the plain order endpoint can't take conditional orders anymore).
+// closePosition:true + positionSide targets exactly that side's current
+// size, whatever it is — no qty needed, safe to re-call after every
+// level fill/close on that side.
+async function setBinanceGridSideStop(mode, apiKey, secretKey, { symbol, direction, stopPrice, existingAlgoId }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const roundedStop = Number(stopPrice.toFixed(filters.pricePrecision));
+  if(existingAlgoId){
+    await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: existingAlgoId }, apiKey, secretKey, mode).catch(() => {});
+  }
+  const { side } = binanceHedgeOrderParams(direction, true); // the CLOSING side, since a stop always trades opposite the held position
+  const resp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+    algoType: 'CONDITIONAL', symbol, side, positionSide: direction, type: 'STOP_MARKET',
+    triggerPrice: roundedStop.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+  }, apiKey, secretKey, mode);
+  return { stopPrice: roundedStop, algoId: resp.algoId ?? resp.orderId ?? null };
+}
+
+async function cancelBinanceOrder(mode, apiKey, secretKey, { symbol, orderId }){
+  await binanceFuturesSignedRequest('DELETE', '/fapi/v1/order', { symbol, orderId }, apiKey, secretKey, mode).catch(err => {
+    if(!/unknown order|order does not exist/i.test(err.message)) throw err;
+  });
+}
+
+async function getBinanceGridOpenOrders(mode, apiKey, secretKey, symbol){
+  const list = await binanceFuturesSignedRequest('GET', '/fapi/v1/openOrders', { symbol }, apiKey, secretKey, mode);
+  return (Array.isArray(list) ? list : []).map(o => ({ orderId: o.orderId, side: o.side, positionSide: o.positionSide, price: parseFloat(o.price), qty: parseFloat(o.origQty), status: o.status }));
+}
+
+// Reads both hedge-mode position slots. /fapi/v3/positionRisk returns
+// one row per positionSide (LONG/SHORT) in hedge mode, vs one BOTH row
+// in one-way mode — filtering on positionSide here is what makes this
+// safe to call regardless of which mode the account is actually in
+// (returns both null if one-way, since neither LONG nor SHORT rows
+// would exist that way — a genuinely one-way account has no business
+// calling this in the first place, per binanceGridCheckHedgeMode above).
+async function getBinanceGridPositions(mode, apiKey, secretKey, symbol){
+  const list = await binanceFuturesSignedRequest('GET', '/fapi/v3/positionRisk', { symbol }, apiKey, secretKey, mode);
+  const rows = Array.isArray(list) ? list.filter(p => p.symbol === symbol) : [];
+  const long = rows.find(p => p.positionSide === 'LONG' && Math.abs(parseFloat(p.positionAmt)) > 0);
+  const short = rows.find(p => p.positionSide === 'SHORT' && Math.abs(parseFloat(p.positionAmt)) > 0);
+  return {
+    long: long ? { size: Math.abs(parseFloat(long.positionAmt)), avgPrice: parseFloat(long.entryPrice), liqPrice: long.liquidationPrice ? parseFloat(long.liquidationPrice) : null, unrealisedPnl: parseFloat(long.unRealizedProfit) } : null,
+    short: short ? { size: Math.abs(parseFloat(short.positionAmt)), avgPrice: parseFloat(short.entryPrice), liqPrice: short.liquidationPrice ? parseFloat(short.liquidationPrice) : null, unrealisedPnl: parseFloat(short.unRealizedProfit) } : null,
+  };
+}
+
+async function flattenBinanceGrid(mode, apiKey, secretKey, symbol){
+  const openOrders = await getBinanceGridOpenOrders(mode, apiKey, secretKey, symbol);
+  for(const o of openOrders){
+    await cancelBinanceOrder(mode, apiKey, secretKey, { symbol, orderId: o.orderId });
+  }
+  const positions = await getBinanceGridPositions(mode, apiKey, secretKey, symbol);
+  const closed = [];
+  for(const [direction, pos] of [['LONG', positions.long], ['SHORT', positions.short]]){
+    if(!pos || pos.size <= 0) continue;
+    const { side, positionSide } = binanceHedgeOrderParams(direction, true);
+    const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+      symbol, side, positionSide, type: 'MARKET', quantity: pos.size.toString(), newOrderRespType: 'RESULT',
+    }, apiKey, secretKey, mode).catch(err => { throw new VerifyRejected(`Cancelled resting grid orders but FAILED to flatten the ${direction} side (size ${pos.size}) on Binance: ${err.message}. Check ${symbol} on Binance directly.`); });
+    closed.push({ direction, qty: pos.size, orderId: order.orderId });
+  }
+  return { closed };
+}
+
 
 
 app.post('/api/order', async (req, res) => {
@@ -2962,8 +3325,105 @@ app.post('/api/futures/close-position', async (req, res) => {
 });
 
 // =============================================================
-// Market data — Bitget/Binance/Bybit/MEXC/Gate.io tickers, fetched
-// server-side and merged into one response.
+// NxTGen Grid — Live/Demo order endpoints (Bybit + Binance only; see
+// grid.js's GRID_SYMBOLS and the header comments on the bybit*Grid*/
+// binance*Grid* functions above for why only these two, and why Bybit
+// auto-switches hedge mode per-symbol while Binance only checks and
+// asks the person to switch it themselves). Every route below mirrors
+// the shape/safety conventions of the six-strategy routes above
+// (VerifyRejected -> rejected:true, otherwise a plain ok:false message)
+// so the client's existing error-handling patterns apply unchanged.
+// =============================================================
+const GRID_HEDGE_MODE_ENSURE = {
+  bybit: async (mode, apiKey, secretKey, symbol) => { await bybitGridEnsureHedgeMode(mode, apiKey, secretKey, symbol); return { hedgeModeReady: true }; },
+  binance: async (mode, apiKey, secretKey) => {
+    const on = await binanceGridCheckHedgeMode(mode, apiKey, secretKey);
+    if(!on){
+      return { hedgeModeReady: false, message: 'This Binance account is in one-way position mode. NxTGen Grid needs Hedge Mode (holds a long AND short position on the same symbol at once) — switch it on once, yourself, in Binance\'s app under Futures settings > Position Mode, or via POST /fapi/v1/positionSide/dual. This app will not switch it for you since it is an account-wide setting affecting every symbol you trade on Binance, not just Grid\'s.' };
+    }
+    return { hedgeModeReady: true };
+  },
+};
+app.post('/api/futures/grid/ensure-mode', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, symbol, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !symbol){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey, secretKey, and symbol are all required.' });
+  }
+  const ensure = GRID_HEDGE_MODE_ENSURE[exchange];
+  if(!ensure) return res.status(400).json({ ok:false, message:`NxTGen Grid Live/Demo only supports bybit and binance right now — "${exchange}" isn't wired up.` });
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const result = await ensure(netMode, apiKey, secretKey, symbol, passphrase);
+    return res.json({ ok:true, ...result });
+  }catch(err){
+    if(err instanceof VerifyRejected) return res.json({ ok:false, rejected:true, message: err.message });
+    return res.json({ ok:false, rejected:false, message: `Could not confirm hedge mode for ${symbol} on ${exchange}: ${err.message}` });
+  }
+});
+
+const GRID_PLACE_LEVEL = { bybit: placeBybitGridLevelOrder, binance: placeBinanceGridLevelOrder };
+const GRID_PLACE_CLOSE = { bybit: placeBybitGridCloseOrder, binance: placeBinanceGridCloseOrder };
+const GRID_SET_SIDE_STOP = { bybit: setBybitGridSideStop, binance: setBinanceGridSideStop };
+const GRID_CANCEL_ORDER = { bybit: cancelBybitOrder, binance: cancelBinanceOrder };
+const GRID_OPEN_ORDERS = { bybit: getBybitGridOpenOrders, binance: getBinanceGridOpenOrders };
+const GRID_POSITIONS = { bybit: getBybitGridPositions, binance: getBinanceGridPositions };
+const GRID_FLATTEN = { bybit: flattenBybitGrid, binance: flattenBinanceGrid };
+
+function gridRoute(path, table, argsFromBody){
+  app.post(path, async (req, res) => {
+    const { exchange, mode, apiKey, secretKey } = req.body || {};
+    if(!exchange || !apiKey || !secretKey){
+      return res.status(400).json({ ok:false, message:'exchange, apiKey, and secretKey are all required.' });
+    }
+    const fn = table[exchange];
+    if(!fn) return res.status(400).json({ ok:false, message:`NxTGen Grid Live/Demo only supports bybit and binance right now — "${exchange}" isn't wired up.` });
+    const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+    try{
+      const result = await fn(netMode, apiKey, secretKey, argsFromBody(req.body));
+      return res.json({ ok:true, ...result });
+    }catch(err){
+      if(err instanceof VerifyRejected) return res.json({ ok:false, rejected:true, message: err.message });
+      return res.json({ ok:false, rejected:false, message: `Grid order call to ${exchange} failed: ${err.message}` });
+    }
+  });
+}
+gridRoute('/api/futures/grid/place-level', GRID_PLACE_LEVEL, b => ({ symbol: b.symbol, direction: b.direction, price: parseFloat(b.price), qty: parseFloat(b.qty), leverage: parseFloat(b.leverage), orderLinkTag: b.orderLinkTag }));
+gridRoute('/api/futures/grid/place-close', GRID_PLACE_CLOSE, b => ({ symbol: b.symbol, direction: b.direction, price: parseFloat(b.price), qty: parseFloat(b.qty), orderLinkTag: b.orderLinkTag }));
+gridRoute('/api/futures/grid/set-side-stop', GRID_SET_SIDE_STOP, b => ({ symbol: b.symbol, direction: b.direction, stopPrice: parseFloat(b.stopPrice), existingAlgoId: b.existingAlgoId }));
+gridRoute('/api/futures/grid/cancel', GRID_CANCEL_ORDER, b => ({ symbol: b.symbol, orderId: b.orderId }));
+
+// These three take just (mode, apiKey, secretKey, symbol) — a plain
+// string, not an options object — so they're wired directly rather
+// than through gridRoute's argsFromBody(...) object shape above.
+function gridSimpleRoute(path, table){
+  app.post(path, async (req, res) => {
+    const { exchange, mode, apiKey, secretKey, symbol } = req.body || {};
+    if(!exchange || !apiKey || !secretKey || !symbol){
+      return res.status(400).json({ ok:false, message:'exchange, apiKey, secretKey, and symbol are all required.' });
+    }
+    const fn = table[exchange];
+    if(!fn) return res.status(400).json({ ok:false, message:`NxTGen Grid Live/Demo only supports bybit and binance right now — "${exchange}" isn't wired up.` });
+    const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+    try{
+      const result = await fn(netMode, apiKey, secretKey, symbol);
+      // getBybitGridOpenOrders/getBinanceGridOpenOrders return a plain
+      // array (not {orders:[...]}) — spreading an array into a JSON
+      // object gives numeric-key garbage, so wrap arrays under `list`
+      // instead; getBybitGridPositions/getBinanceGridPositions/
+      // flattenBybitGrid/flattenBinanceGrid already return plain
+      // objects and spread correctly as before.
+      return res.json(Array.isArray(result) ? { ok:true, list: result } : { ok:true, ...result });
+    }catch(err){
+      if(err instanceof VerifyRejected) return res.json({ ok:false, rejected:true, message: err.message });
+      return res.json({ ok:false, rejected:false, message: `Grid call to ${exchange} failed: ${err.message}` });
+    }
+  });
+}
+gridSimpleRoute('/api/futures/grid/orders', GRID_OPEN_ORDERS);
+gridSimpleRoute('/api/futures/grid/positions', GRID_POSITIONS);
+gridSimpleRoute('/api/futures/grid/flatten', GRID_FLATTEN);
+
+
 //
 // Why this exists: the front-end used to call each exchange's public
 // REST API directly from the browser, one after another. Two problems

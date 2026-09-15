@@ -26,7 +26,7 @@ import { RISK_DEFAULTS } from './futures/risk.js';
 import { DEFAULT_WEIGHTS } from './futures/scoring.js';
 import { computeBtcShock } from './futures/indicators.js';
 import { STRATEGY_REGISTRY } from './futures/setups.js';
-import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGridSymbol, closeAllGridSessions } from './futures/grid.js';
+import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGridSymbol, closeAllGridSessions, buildGridPlan, detectGridBreakout, netCycleProfit } from './futures/grid.js';
 import { classifyRegime } from './futures/regime.js';
 import { getAiConfirmation } from './ai-signal.js';
 
@@ -200,6 +200,235 @@ function runGridPaperTick(nowMs){
       appendGridPaperTrades(trades);
     }
   }
+}
+
+// =============================================================
+// NxTGen Grid — Live/Demo (Bybit/Binance only). Deliberately scoped to
+// ONE symbol at a time for this first live-wired version — not a
+// limitation I hit by accident, a decision: each cycle here makes
+// several sequential signed API calls per symbol (snapshot, open
+// orders, positions, and however many level/close orders need placing
+// that cycle), and running all six GRID_SYMBOLS live at once would
+// multiply that by 6 on every 8s tick, which is a lot of exchange rate-
+// limit exposure to take on before this exact mechanism has been
+// watched run safely in Demo. Pick which symbol to run from the
+// dropdown in the Grid panel; add more once this one's been proven out.
+//
+// State machine per deployment (f.gridLiveState): a plan (from
+// buildGridPlan, the SAME function the backtest and Paper tick use) plus
+// one entry per grid level, each either PENDING_ENTRY (a resting entry
+// limit order out, not yet filled), PENDING_CLOSE (that level filled,
+// its closing limit order is now resting at the next level up/down), or
+// idle (freed after a close, waiting to be re-armed next cycle). Fill
+// detection is inferred by an order's id dropping out of the exchange's
+// own open-orders list — there is no push/websocket fill feed here,
+// only polling once per LIVE_CYCLE_MS, so a level can sit filled for up
+// to that long before its closing order goes out. That lag is a real,
+// accepted trade-off of a browser-tab-polling design, same as every
+// other Live/Demo strategy in this file — not specific to Grid.
+//
+// SAFETY: every side (LONG slot / SHORT slot) that holds any size gets
+// an exchange-side stop-loss at the grid's own outer boundary
+// (setBybitGridSideStop/setBinanceGridSideStop, server.js) the moment it
+// goes non-flat — this is NOT part of the backtested strategy (which
+// only closes via breakout detection running in this same JS loop) and
+// is a deliberate addition for real money: if the tab closes, the
+// network drops, or this loop simply stops running, filled legs are
+// still protected by the exchange itself, not by nothing. See grid.js's
+// header note on why runGridBacktest/stepGridSymbol don't model this —
+// it doesn't affect what backtest numbers mean, it's purely a live-
+// safety net layered on top of the real order flow only.
+// =============================================================
+const GRID_LIVE_EXCHANGES = ['bybit', 'binance'];
+
+function gridLiveLog(msg, kind){
+  const host = els.fuGridPanel && els.fuGridPanel.querySelector('#fuGridLiveStatus');
+  if(host){ host.textContent = msg; host.style.color = kind === 'error' ? 'var(--red)' : ''; }
+}
+
+function rollGridLiveDay(f, nowMs, equity){
+  const key = Math.floor(nowMs / 86_400_000);
+  if(f.gridLiveCurrentDayKey === key) return;
+  f.gridLiveCurrentDayKey = key;
+  f.gridLiveDayAnchorEquity = equity;
+  f.gridLiveDailyHalted = false;
+}
+
+let gridLiveCycleInFlight = false;
+async function runGridLiveCycle(){
+  if(gridLiveCycleInFlight) return;
+  gridLiveCycleInFlight = true;
+  try{ await runGridLiveCycleInner(); }
+  catch(err){ gridLiveLog(`Grid Live cycle error: ${err.message}`, 'error'); }
+  finally{ gridLiveCycleInFlight = false; }
+}
+
+async function runGridLiveCycleInner(){
+  const f = fu();
+  const exchange = f.liveExchange;
+  if(!GRID_LIVE_EXCHANGES.includes(exchange)){
+    gridLiveLog(`NxTGen Grid Live/Demo only supports Bybit or Binance — switch the exchange selector above to one of those.`, 'error');
+    return;
+  }
+  const mode = f.liveModeByExchange[exchange] || 'live';
+  const cred = liveCred(exchange, mode);
+  if(!cred){ gridLiveLog(`No verified ${exchange} ${mode} credential — connect it in Autotrade & Balances first.`, 'error'); return; }
+  const symbol = f.gridLiveSymbol;
+  const gridCfg = loadGridConfig();
+
+  const snap = await fetchLiveSnapshot(exchange, symbol, '5m').catch(err => { gridLiveLog(`Snapshot fetch failed for ${symbol}: ${err.message}`, 'error'); return null; });
+  if(!snap) return;
+  const regime = classifyRegime(snap.h1, snap.m15);
+  const nowMs = Date.now();
+  // Sizing a NEW deployment uses the REAL account balance (not the Paper
+  // "Simulation balance" field, which has nothing to do with a real
+  // account) — queried fresh right before deploying, same balance
+  // endpoint the six-strategy Live/Demo code already uses. Once a grid
+  // is already active, its own plan.allocationUsd (fixed at deployment
+  // time) is what sizing derives from — re-querying balance mid-
+  // deployment would let a leg's size drift from what the rest of the
+  // grid was planned against.
+  let equityForSizing = f.gridLiveState ? f.gridLiveState.plan.allocationUsd / (loadGridConfig().maxGridAllocationPct / 100) : null;
+  rollGridLiveDay(f, nowMs, equityForSizing || 0);
+
+  const proxyArgs = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol };
+
+  // --- No active deployment: try to start one ---
+  if(!f.gridLiveState){
+    if(f.gridLiveDailyHalted){ gridLiveLog(`Daily loss/profit limit reached — not opening a new grid until tomorrow.`, null); return; }
+    if(equityForSizing == null){
+      const balResp = await callProxy('/api/futures/balance', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+      if(!balResp.ok || balResp.balance == null){ gridLiveLog(`Could not read ${exchange} account balance: ${balResp.message || 'no balance returned'}`, 'error'); return; }
+      equityForSizing = balResp.balance;
+      rollGridLiveDay(f, nowMs, equityForSizing);
+    }
+    const plan = buildGridPlan(symbol, snap, regime, gridCfg, equityForSizing);
+    if(!plan){ gridLiveLog(`${symbol}: market not currently suitable for a grid (regime ${regime.regime}) — waiting.`, null); return; }
+
+    const modeCheck = await callProxy('/api/futures/grid/ensure-mode', proxyArgs);
+    if(!modeCheck.ok || (modeCheck.hedgeModeReady === false)){
+      gridLiveLog(modeCheck.message || `Could not confirm hedge mode for ${symbol} on ${exchange}.`, 'error');
+      return;
+    }
+
+    gridLiveLog(`${symbol}: deploying grid (score ${plan.gridScore}/100, ${plan.levelCount} levels, ${plan.direction})…`, null);
+    const levels = [];
+    for(let li = 0; li < plan.levels.length; li++){
+      const levelPrice = plan.levels[li];
+      const isLowerHalf = levelPrice <= plan.mid;
+      const wantLong = (plan.direction === 'LONG' || plan.direction === 'NEUTRAL') && isLowerHalf;
+      const wantShort = (plan.direction === 'SHORT' || plan.direction === 'NEUTRAL') && !isLowerHalf;
+      if(!wantLong && !wantShort) continue;
+      const direction = wantLong ? 'LONG' : 'SHORT';
+      const perLevelUsd = plan.allocationUsd / plan.levelCount;
+      const qty = (perLevelUsd * plan.leverage) / levelPrice;
+      const placed = await callProxy('/api/futures/grid/place-level', {
+        ...proxyArgs, direction, price: levelPrice, qty, leverage: plan.leverage, orderLinkTag: `${li}`,
+      }).catch(err => ({ ok:false, message: err.message }));
+      if(!placed.ok){ gridLiveLog(`Level ${li} (${levelPrice.toFixed(6)}) skipped: ${placed.message}`, null); continue; }
+      levels.push({ levelIndex: li, price: levelPrice, direction, status: 'PENDING_ENTRY', entryOrderId: placed.orderId, targetIndex: wantLong ? li + 1 : li - 1 });
+    }
+    if(levels.length === 0){ gridLiveLog(`${symbol}: no grid levels could be placed — see messages above. Not marking a grid active.`, 'error'); return; }
+
+    f.gridLiveState = { id: `GRID-${symbol.replace('USDT', '')}-${nowMs}`, plan, levels, longStopSet: false, shortStopSet: false, realizedUsd: 0, openedAt: nowMs };
+    gridLiveLog(`${symbol}: grid ACTIVE — ${levels.length}/${plan.levelCount} levels resting.`, null);
+    renderGridDashboard();
+    return; // one deployment step per cycle — manage it starting next cycle
+  }
+
+  // --- Active deployment: manage it ---
+  const gs = f.gridLiveState;
+  const bo = detectGridBreakout(snap, gs.plan, gridCfg);
+  if(bo.breakout){
+    gridLiveLog(`${symbol}: BREAKOUT detected (${bo.reasons[0] || ''}) — flattening grid.`, 'error');
+    const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+    if(!flat.ok) gridLiveLog(`Flatten call failed: ${flat.message} — check ${symbol} on ${exchange} directly.`, 'error');
+    f.gridLiveState = null;
+    renderGridDashboard();
+    return;
+  }
+
+  const openOrdersResp = await callProxy('/api/futures/grid/orders', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  if(!openOrdersResp.ok){ gridLiveLog(`Could not read open orders for ${symbol}: ${openOrdersResp.message}`, 'error'); return; }
+  const openIds = new Set(openOrdersResp.list.map(o => String(o.orderId)));
+
+  for(const level of gs.levels){
+    if(level.status === 'PENDING_ENTRY' && level.entryOrderId != null && !openIds.has(String(level.entryOrderId))){
+      // Entry filled — rest the closing order at the target level.
+      const targetPrice = gs.plan.levels[level.targetIndex];
+      if(targetPrice == null){ level.status = 'FILLED_NO_TARGET'; continue; } // edge of grid — nothing to close into; left as-is until breakout/flatten
+      const perLevelUsd = gs.plan.allocationUsd / gs.plan.levelCount;
+      const qty = (perLevelUsd * gs.plan.leverage) / level.price;
+      const closed = await callProxy('/api/futures/grid/place-close', {
+        ...proxyArgs, direction: level.direction, price: targetPrice, qty, orderLinkTag: `${level.levelIndex}`,
+      }).catch(err => ({ ok:false, message: err.message }));
+      if(!closed.ok){ gridLiveLog(`Level ${level.levelIndex} filled but its close order failed: ${closed.message} — check ${symbol} directly.`, 'error'); continue; }
+      level.status = 'PENDING_CLOSE'; level.closeOrderId = closed.orderId; level.entryPrice = level.price; level.targetPrice = targetPrice; level.openedAt = nowMs;
+
+      // First time this side goes non-flat, attach its protective stop
+      // at the grid's own outer boundary (see the header safety note).
+      const stopField = level.direction === 'LONG' ? 'longStopSet' : 'shortStopSet';
+      if(!gs[stopField]){
+        const stopPrice = level.direction === 'LONG' ? gs.plan.lower : gs.plan.upper;
+        const stopResult = await callProxy('/api/futures/grid/set-side-stop', { ...proxyArgs, direction: level.direction, stopPrice }).catch(err => ({ ok:false, message: err.message }));
+        if(stopResult.ok) gs[stopField] = true;
+        else gridLiveLog(`Could not attach protective stop on the ${level.direction} side of ${symbol}: ${stopResult.message} — that side has NO exchange-side protection yet.`, 'error');
+      }
+    } else if(level.status === 'PENDING_CLOSE' && level.closeOrderId != null && !openIds.has(String(level.closeOrderId))){
+      // Close filled — this grid cycle is complete. Log it with grid.js's
+      // OWN fee-aware accounting (netCycleProfit) so live and backtest
+      // numbers mean the same thing, then re-arm this level.
+      const perLevelUsd = gs.plan.allocationUsd / gs.plan.levelCount;
+      const qty = (perLevelUsd * gs.plan.leverage) / level.entryPrice;
+      const pnl = netCycleProfit({
+        entryPrice: level.entryPrice, exitPrice: level.targetPrice, qty, direction: level.direction, exchange,
+        holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct,
+      });
+      gs.realizedUsd += pnl.netUsd;
+      const gridTradeRecord = {
+        closedAtMs: nowMs, openedAtMs: level.openedAt, exchange, mode, symbol, side: level.direction, direction: level.direction,
+        entry: level.entryPrice, exit: level.targetPrice, qty, leverage: gs.plan.leverage,
+        grossUsd: pnl.grossUsd, feesUsd: pnl.feesUsd, fundingUsd: pnl.fundingUsd, slippageUsd: pnl.slippageUsd, netUsd: pnl.netUsd,
+        confidence: gs.plan.gridScore, setupType: 'NxTGen Grid', exitReason: 'GRID_CYCLE_TP', durationMin: Math.round((nowMs - level.openedAt) / 60_000),
+        gridId: gs.id, gridLevel: level.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
+      };
+      f.gridLiveTradeHistory = [gridTradeRecord, ...f.gridLiveTradeHistory].slice(0, 500);
+      // This is a REAL closed trade — belongs in the same cross-session
+      // Trade Log (top of page) the six strategies' real Live/Demo
+      // closes write to (appendPersistentTrade), not just Grid's own
+      // dashboard. setupType:'NxTGen Grid' is what lets that Trade Log
+      // (and its own per-strategy breakdowns) tell these apart from the
+      // other six's rows.
+      appendPersistentTrade(gridTradeRecord);
+
+      const rePlaced = await callProxy('/api/futures/grid/place-level', {
+        ...proxyArgs, direction: level.direction, price: level.price, qty, leverage: gs.plan.leverage, orderLinkTag: `${level.levelIndex}-r`,
+      }).catch(err => ({ ok:false, message: err.message }));
+      if(rePlaced.ok){
+        level.status = 'PENDING_ENTRY'; level.entryOrderId = rePlaced.orderId; level.closeOrderId = null;
+      } else {
+        level.status = 'IDLE'; level.entryOrderId = null; level.closeOrderId = null;
+        gridLiveLog(`Cycle closed on level ${level.levelIndex} but couldn't re-arm it: ${rePlaced.message}`, 'error');
+      }
+    }
+  }
+
+  // Grid's own max-loss circuit breaker and account daily-loss gate —
+  // same thresholds stepGridSymbol enforces for Paper/backtest.
+  const gridFloorUsd = -gs.plan.allocationUsd * (gridCfg.maxGridLossPct / 100);
+  const dailyPnlPct = f.gridLiveDayAnchorEquity ? ((equityForSizing + gs.realizedUsd - f.gridLiveDayAnchorEquity) / f.gridLiveDayAnchorEquity) * 100 : 0;
+  const halfWidth = (gs.plan.upper - gs.plan.lower) / 2;
+  const driftedOut = snap.price > gs.plan.upper + halfWidth * (gridCfg.recalcDriftPct / 100) || snap.price < gs.plan.lower - halfWidth * (gridCfg.recalcDriftPct / 100);
+  const shouldFlatten = gs.realizedUsd < gridFloorUsd || dailyPnlPct <= -gridCfg.maxDailyLossPct || driftedOut;
+  if(shouldFlatten){
+    const reason = gs.realizedUsd < gridFloorUsd ? 'grid max-loss reached' : dailyPnlPct <= -gridCfg.maxDailyLossPct ? 'daily loss limit reached' : 'price drifted out of range';
+    gridLiveLog(`${symbol}: flattening grid (${reason}).`, 'error');
+    const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+    if(!flat.ok) gridLiveLog(`Flatten call failed: ${flat.message} — check ${symbol} on ${exchange} directly.`, 'error');
+    if(dailyPnlPct <= -gridCfg.maxDailyLossPct) f.gridLiveDailyHalted = true;
+    f.gridLiveState = null;
+  }
+  renderGridDashboard();
 }
 
 function runCycle(){
@@ -1710,13 +1939,15 @@ const GRID_TOGGLES = [
 function renderGridPanel(){
   if(!els.fuGridPanel) return;
   const cfg = loadGridConfig();
+  const f = fu();
+  const liveExchangeOk = GRID_LIVE_EXCHANGES.includes(f.liveExchange);
   els.fuGridPanel.innerHTML = `
     <div class="ov-block" style="margin-top:10px;padding:12px;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
         <div>
           <strong>${GRID_STRATEGY.label}</strong>
-          <span style="font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:6px;">Paper only — no Live/Demo order execution yet</span>
-          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Toggle "Enabled (Paper)" below to run it live in Paper mode against ${GRID_SYMBOLS.join(', ')}, or check it as the 7th strategy in the Backtest section for real-historical-data testing. Live/Demo order placement against Binance/Bybit Futures is not implemented (see the file header note in grid.js) — nothing here ever touches a real account.</div>
+          <span style="font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:6px;">Paper + Live/Demo (Bybit/Binance) supported</span>
+          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Toggle "Enabled (Paper)" below to run it against the synthetic feed, check it as the 7th strategy in Backtest for real-historical-data testing, or arm Live/Demo below to trade one real symbol on Bybit or Binance. <strong>Live/Demo is untested against real exchanges — start in Demo and watch it closely before ever arming Live.</strong></div>
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:12px;">
@@ -1740,6 +1971,23 @@ function renderGridPanel(){
         `).join('')}
       </div>
       <div id="fuGridDashboard" style="margin-top:14px;"></div>
+
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line);">
+        <strong style="font-size:12.5px;">Live / Demo (Bybit or Binance only)</strong>
+        <div style="font-size:11.5px;color:var(--dim);margin:4px 0 8px;">
+          Uses whichever exchange/network is selected above in the Live/Demo controls — currently <strong>${f.liveExchange}${liveExchangeOk ? '' : ' (not supported for Grid — switch to Bybit or Binance)'}</strong>. Runs ONE symbol at a time (see the runGridLiveCycle comment in futures-ui.js for why).
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <select id="fuGridLiveSymbol" style="min-width:120px;" ${!liveExchangeOk ? 'disabled' : ''}>
+            ${GRID_SYMBOLS.map(s => `<option value="${s}" ${f.gridLiveSymbol === s ? 'selected' : ''}>${s}</option>`).join('')}
+          </select>
+          <button type="button" id="fuGridLiveArmBtn" class="primary ghost" style="font-size:12px;padding:5px 12px;" ${!liveExchangeOk ? 'disabled' : ''}>${f.gridLiveArmed ? 'Armed' : 'Arm'}</button>
+          <button type="button" id="fuGridLiveStartBtn" class="primary" style="font-size:12px;padding:5px 12px;" ${!f.gridLiveArmed ? 'disabled' : ''}>${f.gridLiveRunning ? 'Running…' : 'Start'}</button>
+          <button type="button" id="fuGridLiveStopBtn" class="primary ghost" style="font-size:12px;padding:5px 12px;" ${!f.gridLiveRunning ? 'disabled' : ''}>Stop</button>
+          <button type="button" id="fuGridLiveFlattenBtn" class="primary ghost" style="font-size:12px;padding:5px 12px;">Flatten Now</button>
+        </div>
+        <div id="fuGridLiveStatus" style="font-size:11.5px;color:var(--dim);margin-top:8px;"></div>
+      </div>
     </div>
   `;
   renderGridDashboard();
@@ -1757,8 +2005,46 @@ function renderGridDashboard(){
   if(!host) return;
   const cfg = loadGridConfig();
   const f = fu();
+
+  // --- Live/Demo block (separate capital/session from Paper below —
+  // renders whenever there's ANYTHING to show for it, regardless of
+  // whether Paper's "Enabled" toggle is on, since Live is armed/started
+  // independently via its own controls further down the panel). ---
+  const liveHistory = f.gridLiveTradeHistory || [];
+  let liveBlock = '';
+  if(f.gridLiveRunning || f.gridLiveState || liveHistory.length){
+    const gs = f.gridLiveState;
+    const liveWins = liveHistory.filter(t => t.netUsd > 0).length;
+    const liveNet = liveHistory.reduce((a, t) => a + t.netUsd, 0);
+    const liveFees = liveHistory.reduce((a, t) => a + t.feesUsd, 0);
+    const liveFunding = liveHistory.reduce((a, t) => a + (t.fundingUsd || 0), 0);
+    const liveWinRate = liveHistory.length ? (liveWins / liveHistory.length) * 100 : 0;
+    const filled = gs ? gs.levels.filter(l => l.status === 'PENDING_CLOSE').length : 0;
+    const resting = gs ? gs.levels.filter(l => l.status === 'PENDING_ENTRY').length : 0;
+    liveBlock = `
+      <div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:12px;">
+        <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px;">LIVE/DEMO — ${f.gridLiveSymbol} on ${f.liveExchange} (${f.liveModeByExchange[f.liveExchange] || 'live'}) ${f.gridLiveRunning ? '· running' : '· stopped'}</div>
+        <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;margin-bottom:6px;">
+          <div><span style="color:var(--dim);">Status</span> <strong>${gs ? 'ACTIVE' : 'No grid'}</strong></div>
+          ${gs ? `<div><span style="color:var(--dim);">Grid Score</span> <strong>${gs.plan.gridScore}/100</strong></div>` : ''}
+          ${gs ? `<div><span style="color:var(--dim);">Direction</span> <strong>${gs.plan.direction}</strong></div>` : ''}
+          ${gs ? `<div><span style="color:var(--dim);">Upper/Lower</span> <strong>${gs.plan.upper.toFixed(4)} / ${gs.plan.lower.toFixed(4)}</strong></div>` : ''}
+          ${gs ? `<div><span style="color:var(--dim);">Resting/Filled</span> <strong>${resting}/${filled}</strong></div>` : ''}
+          ${gs ? `<div><span style="color:var(--dim);">Grid P&L</span> <strong>${fmtUsd(gs.realizedUsd)}</strong></div>` : ''}
+        </div>
+        <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;">
+          <div><span style="color:var(--dim);">Net P&L</span> <strong>${fmtUsd(liveNet)}</strong></div>
+          <div><span style="color:var(--dim);">Win Rate</span> <strong>${liveHistory.length ? liveWinRate.toFixed(1) + '%' : '—'}</strong></div>
+          <div><span style="color:var(--dim);">Cycles</span> <strong>${liveHistory.length}</strong></div>
+          <div><span style="color:var(--dim);">Fees</span> <strong>-$${liveFees.toFixed(2)}</strong></div>
+          <div><span style="color:var(--dim);">Funding</span> <strong>-$${liveFunding.toFixed(2)}</strong></div>
+        </div>
+      </div>
+    `;
+  }
+
   if(!cfg.enabled){
-    host.innerHTML = `<div style="font-size:12px;color:var(--dim);padding:8px 0;">Grid Paper trading is OFF. Turn on "Enabled (Paper)" above to start it — it runs alongside the six-strategy Paper engine, not instead of it.</div>`;
+    host.innerHTML = liveBlock + `<div style="font-size:12px;color:var(--dim);padding:8px 0;">Grid Paper trading is OFF. Turn on "Enabled (Paper)" above to start it — it runs alongside the six-strategy Paper engine, not instead of it.</div>`;
     return;
   }
   const session = f.gridSession;
@@ -1783,7 +2069,8 @@ function renderGridDashboard(){
     </tr>`;
   }).join('');
 
-  host.innerHTML = `
+  host.innerHTML = liveBlock + `
+    <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px;">PAPER — synthetic feed, all ${GRID_SYMBOLS.length} symbols</div>
     <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;margin-bottom:8px;">
       <div><span style="color:var(--dim);">Status</span> <strong>ACTIVE</strong></div>
       <div><span style="color:var(--dim);">Grid Equity</span> <strong>${equity != null ? '$' + equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}</strong></div>
@@ -1816,8 +2103,64 @@ function initGridPanel(){
     } else if(e.target.classList.contains('grid-cfg-toggle')){
       cfg[e.target.dataset.key] = e.target.checked;
       saveGridConfig(cfg);
+    } else if(e.target.id === 'fuGridLiveSymbol'){
+      fu().gridLiveSymbol = e.target.value;
     }
   });
+  els.fuGridPanel.addEventListener('click', (e) => {
+    const f = fu();
+    if(e.target.id === 'fuGridLiveArmBtn'){
+      f.gridLiveArmed = !f.gridLiveArmed;
+      if(!f.gridLiveArmed && f.gridLiveRunning) stopGridLive();
+      renderGridPanel();
+    } else if(e.target.id === 'fuGridLiveStartBtn'){
+      startGridLive();
+    } else if(e.target.id === 'fuGridLiveStopBtn'){
+      stopGridLive();
+    } else if(e.target.id === 'fuGridLiveFlattenBtn'){
+      flattenGridLiveNow();
+    }
+  });
+}
+
+function startGridLive(){
+  const f = fu();
+  if(!f.gridLiveArmed || f.gridLiveRunning) return;
+  if(!GRID_LIVE_EXCHANGES.includes(f.liveExchange)){
+    gridLiveLog('Switch the Live/Demo exchange selector to Bybit or Binance first.', 'error');
+    return;
+  }
+  f.gridLiveRunning = true;
+  gridLiveLog(`Starting NxTGen Grid Live/Demo on ${f.gridLiveSymbol}…`, null);
+  runGridLiveCycle();
+  f.gridLiveTimer = setInterval(runGridLiveCycle, LIVE_CYCLE_MS);
+  renderGridPanel();
+}
+
+function stopGridLive(){
+  const f = fu();
+  if(f.gridLiveTimer){ clearInterval(f.gridLiveTimer); f.gridLiveTimer = null; }
+  f.gridLiveRunning = false;
+  gridLiveLog('Stopped. Any resting grid orders/open positions on the exchange are UNCHANGED — use "Flatten Now" to close them, or manage on the exchange directly.', null);
+  renderGridPanel();
+}
+
+async function flattenGridLiveNow(){
+  const f = fu();
+  const exchange = f.liveExchange;
+  if(!GRID_LIVE_EXCHANGES.includes(exchange)){ gridLiveLog('Switch to Bybit or Binance to flatten.', 'error'); return; }
+  const mode = f.liveModeByExchange[exchange] || 'live';
+  const cred = liveCred(exchange, mode);
+  if(!cred){ gridLiveLog(`No verified ${exchange} ${mode} credential.`, 'error'); return; }
+  gridLiveLog(`Flattening ${f.gridLiveSymbol} on ${exchange}…`, null);
+  const result = await callProxy('/api/futures/grid/flatten', { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: f.gridLiveSymbol }).catch(err => ({ ok:false, message: err.message }));
+  if(result.ok){
+    f.gridLiveState = null;
+    gridLiveLog(`${f.gridLiveSymbol} flattened.`, null);
+    renderGridDashboard();
+  } else {
+    gridLiveLog(`Flatten failed: ${result.message}`, 'error');
+  }
 }
 
 function initTradeLog(){

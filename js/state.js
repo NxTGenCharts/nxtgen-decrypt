@@ -385,6 +385,19 @@ export const state = {
     // futures-ui.js's runGridPaperTick on first tick after being enabled.
     gridSession: null,
     gridTradeHistory: [],
+    // NxTGen Grid — Live/Demo (Bybit/Binance only, single symbol at a
+    // time — see js/futures-ui.js's runGridLiveCycle header comment for
+    // why single-symbol is the deliberate starting scope). Entirely its
+    // own arm/run state, separate from liveArmed/liveRunning below,
+    // since it drives a completely different order-management model
+    // (resting multi-level limit orders, not one market entry + bracket).
+    gridLiveSymbol: 'BTCUSDT',
+    gridLiveArmed: false,
+    gridLiveRunning: false,
+    gridLiveTimer: null,
+    gridLiveState: null,      // the single active deployment for gridLiveSymbol, or null — see runGridLiveCycle
+    gridLiveTradeHistory: [],
+    gridLiveDayAnchorEquity: null, gridLiveDailyHalted: false, gridLiveCurrentDayKey: null,
     lastRows: [],
     lastRegimeSummary: null,
     lastExplainIndex: null,
