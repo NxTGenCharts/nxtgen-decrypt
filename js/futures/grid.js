@@ -23,6 +23,7 @@ import { atr, adx, bollingerBands, vwap, swingLevels, volumeExpansion, closes } 
 import { classifyRegime, REGIMES } from './regime.js';
 import { DEFAULT_FEE_CONFIG } from './costs.js';
 import { estimateLiquidationPrice } from './risk.js';
+import { TRADEABLE_FUTURES_SYMBOLS } from './engine.js';
 
 // -------------------------------------------------------------
 // Registry entry — deliberately NOT part of STRATEGY_REGISTRY (see
@@ -39,12 +40,17 @@ export const GRID_STRATEGY = {
   description: 'Adaptive futures grid: trades a dynamically-sized range of limit levels only in confirmed range-bound conditions, sized and fee-gated per level, with breakout/liquidation/daily-loss protection. Not a fixed-percent grid, and not always in the market — see the Grid Score gate.',
 };
 
-// Liquid majors a grid strategy specifically WANTS (unlike the other
-// six, which exclude these as too "clean"/low-edge for momentum scalps
-// — see engine.js's EXCLUDED_FUTURES_SYMBOLS). Grid trading wants the
-// deepest order books and tightest spreads it can get, which is exactly
-// the majors the scalp strategies avoid.
-export const GRID_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT'];
+// Previously a hardcoded set of liquid majors (BTC/ETH/SOL/BNB/XRP/
+// DOGE) on the theory that a grid specifically wants the deepest order
+// books, unlike the other six strategies which exclude those majors as
+// too "clean"/low-edge for momentum scalps (engine.js's
+// EXCLUDED_FUTURES_SYMBOLS). In practice that meant most of Grid's pair
+// choices (5 of 6) were exactly the pairs the rest of the app
+// deliberately avoids trading. Grid now shares the same watchlist as
+// the regular six-strategy engine — TRADEABLE_FUTURES_SYMBOLS, i.e.
+// FUTURES_SYMBOLS minus EXCLUDED_FUTURES_SYMBOLS — so those majors stay
+// excluded everywhere, not just in the other six.
+export const GRID_SYMBOLS = TRADEABLE_FUTURES_SYMBOLS;
 
 export const GRID_DEFAULTS = {
   mode: 'AUTO',              // AUTO | LONG | SHORT | NEUTRAL

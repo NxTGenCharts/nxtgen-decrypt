@@ -14,7 +14,7 @@ import { STRATEGY_REGISTRY } from './futures/setups.js';
 import { DEFAULT_FEE_CONFIG } from './futures/costs.js';
 import { runBacktest, summarizeTrades } from './futures/backtest.js';
 import { RISK_DEFAULTS } from './futures/risk.js';
-import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, runGridBacktest, summarizeGridTrades } from './futures/grid.js';
+import { GRID_STRATEGY, GRID_DEFAULTS, runGridBacktest, summarizeGridTrades } from './futures/grid.js';
 
 let lastResult = null; // kept for CSV/XLS/PDF export after a run
 
@@ -30,21 +30,18 @@ function populateSymbolChecks(){
   // (BTCUSDT/ETHUSDT/SOLUSDT/BNBUSDT/etc — see engine.js's
   // EXCLUDED_FUTURES_SYMBOLS) because the six single-entry strategies
   // trade momentum/reversal patterns those cleaner-moving majors don't
-  // suit as well. NxTGen Grid is the opposite: it specifically WANTS
-  // those deep, liquid majors (see grid.js's GRID_SYMBOLS comment) — so
-  // they're added back into this checklist here, unchecked by default
-  // (so existing default behavior for the six strategies is unchanged),
-  // purely so a Grid backtest run has something to select. The six
-  // detectors still skip these symbols automatically either way
-  // (runBacktest's own EXCLUDED_FUTURES_SYMBOLS guard, unchanged).
-  const allSymbols = Array.from(new Set([...TRADEABLE_FUTURES_SYMBOLS, ...GRID_SYMBOLS]));
+  // suit as well. NxTGen Grid now shares this exact same watchlist
+  // (grid.js's GRID_SYMBOLS === TRADEABLE_FUTURES_SYMBOLS) rather than
+  // its own majors-only list, so those excluded majors stay excluded
+  // here too — no separate union/asterisk needed any more.
+  const allSymbols = TRADEABLE_FUTURES_SYMBOLS;
   // A reasonable default selection (not literally every symbol) so a
   // first run finishes in a sensible time — Select All/None below make
   // widening or narrowing it a one-click choice.
   const defaultOn = new Set(TRADEABLE_FUTURES_SYMBOLS.slice(0, 10));
   els.btSymbolChecks.innerHTML = allSymbols.map(sym => `
-    <label style="display:flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;" title="${GRID_SYMBOLS.includes(sym) ? 'Major/liquid pair — used by NxTGen Grid, excluded from the other six strategies' : ''}">
-      <input type="checkbox" class="bt-symbol-check" value="${sym}" ${defaultOn.has(sym) ? 'checked' : ''}>${sym}${GRID_SYMBOLS.includes(sym) ? ' *' : ''}
+    <label style="display:flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;">
+      <input type="checkbox" class="bt-symbol-check" value="${sym}" ${defaultOn.has(sym) ? 'checked' : ''}>${sym}
     </label>
   `).join('');
 }

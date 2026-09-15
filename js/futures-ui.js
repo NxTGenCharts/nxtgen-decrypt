@@ -208,10 +208,11 @@ function runGridPaperTick(nowMs){
 // limitation I hit by accident, a decision: each cycle here makes
 // several sequential signed API calls per symbol (snapshot, open
 // orders, positions, and however many level/close orders need placing
-// that cycle), and running all six GRID_SYMBOLS live at once would
-// multiply that by 6 on every 8s tick, which is a lot of exchange rate-
-// limit exposure to take on before this exact mechanism has been
-// watched run safely in Demo. Pick which symbol to run from the
+// that cycle), and running all of GRID_SYMBOLS live at once would
+// multiply that by however many symbols are in the watchlist on every
+// 8s tick, which is a lot of exchange rate-limit exposure to take on
+// before this exact mechanism has been watched run safely in Demo. Pick
+// which symbol to run from the
 // dropdown in the Grid panel; add more once this one's been proven out.
 //
 // State machine per deployment (f.gridLiveState): a plan (from
@@ -1844,7 +1845,14 @@ function renderStrategyRows(){
   // Shown next to "Strategies" in the collapsed <summary> row (see
   // index.html/css/components.css) so collapsing the section to save
   // space doesn't hide which/how many strategies are actually live.
-  if(els.fuStrategiesBadge) els.fuStrategiesBadge.textContent = `${enabledCount}/${STRATEGY_REGISTRY.length} enabled`;
+  // NxTGen Grid (grid.js's GRID_STRATEGY) is a 7th strategy kept in its
+  // own config/panel (different engine — see grid.js's header comment),
+  // but it's still one of the strategies a user can turn on, so it
+  // counts toward this total too instead of silently sitting outside it.
+  const gridEnabledForBadge = loadGridConfig().enabled;
+  const totalStrategyCount = STRATEGY_REGISTRY.length + 1;
+  const totalEnabledCount = enabledCount + (gridEnabledForBadge ? 1 : 0);
+  if(els.fuStrategiesBadge) els.fuStrategiesBadge.textContent = `${totalEnabledCount}/${totalStrategyCount} enabled`;
 }
 
 const STRATEGIES_OPEN_KEY = 'nxtgen_futures_strategies_open_v1';
@@ -2103,6 +2111,11 @@ function initGridPanel(){
     } else if(e.target.classList.contains('grid-cfg-toggle')){
       cfg[e.target.dataset.key] = e.target.checked;
       saveGridConfig(cfg);
+      // Reflect Paper "Enabled" immediately (dashboard + Strategies
+      // badge count) instead of waiting for the next Paper cycle tick,
+      // which is what previously made the checkbox feel unresponsive.
+      renderGridDashboard();
+      renderStrategyRows();
     } else if(e.target.id === 'fuGridLiveSymbol'){
       fu().gridLiveSymbol = e.target.value;
     }
