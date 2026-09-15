@@ -71,21 +71,30 @@ export const GRID_DEFAULTS = {
   breakoutSensitivityAtr: 1.2,  // candle close beyond boundary by this many ATRs, confirmed
   breakoutVolumeMult: 1.4,      // + volume expansion at least this much, to filter false breakouts
   recalcDriftPct: 35,           // % of grid half-width the price must drift beyond boundary (without a confirmed breakout) before recalculating
-  // Per-level hard stop, as a multiple of that level's own spacingPct.
-  // Previously a level's only loss-defining exits were grid-wide events
-  // (breakout confirmation, drift recalculation, the grid's own 8%
-  // drawdown floor) which can — and in practice did — let one leg travel
-  // several grid levels against it before anything closed it, while a
-  // winning leg only ever earns one level's worth of spacing. That
-  // asymmetry (many small wins, occasional multi-level loss) is what
-  // produced the ~$0.28 avg win / $1.17 avg loss, profit-factor-under-1
-  // result the user reported from paper/backtest — a grid built this way
-  // needs an unrealistically high win rate just to break even, no matter
-  // how good the entries are. 0.65 targets an average win:loss near
-  // 1:1.5 (spacingPct / (spacingPct*0.65) ≈ 1.54) once the two exits are
-  // roughly the same size; tune down toward 1.0 for a tighter ~1:1.
-  legStopLossMultiple: 0.65,
-  minLegStopLossPct: 0.15,      // floor so a very tight grid's stop isn't inside normal noise/fee drag
+  // Per-level hard stop. FIRST VERSION of this (legStopLossMultiple,
+  // a fraction of the level's own spacingPct) fixed the RR problem —
+  // avg win/loss came back ~1:1 in the user's real Backtest re-run —
+  // but tanked the win rate to 33.8% (506/772 legs stopped out) and net
+  // P&L was still negative. Root cause: spacingPct is calibrated for
+  // fee-clearing profit capture (roughly 0.55x ATR, see rawSpacingPct
+  // above), NOT for how far price normally wobbles before a mean-
+  // reversion leg actually completes — a stop at 0.65x THAT (≈0.36x
+  // ATR, well under one typical 5m candle's own range) sits inside
+  // ordinary noise, so most legs got stopped before ever reverting.
+  // Re-based on ATR(5m) instead — a measure of actual local
+  // noise/volatility, on the same timeframe/indicator detectGridBreakout
+  // already uses for its own distance check — so the stop scales with
+  // what the market is really doing near this level, independent of how
+  // tight the profit spacing was set. 1.3x ATR(5m) is a starting point,
+  // not a validated number — I have no network access to Bybit's API in
+  // this environment to re-run the real backtest myself and check where
+  // it actually lands. Re-run your Backtest after this change: if win
+  // rate is still low, legs are still getting stopped before completing
+  // — raise legStopLossAtrMult (UI: "Grid Stop-Loss (x ATR)"); if win
+  // rate looks strong, try lowering it to tighten losses further and
+  // see whether the ratio still holds up.
+  legStopLossAtrMult: 1.3,
+  minLegStopLossPct: 0.15,      // floor so a very low-ATR moment's stop isn't degenerately tight
   fundingFilterOn: true,
   liquidityFilterOn: true,
   minVolume24hUsd: 15_000_000,
@@ -261,7 +270,14 @@ export function buildGridPlan(symbol, snap, regime, cfg, accountEquity){
 
   const leverage = Math.min(c.maxLeverage, 5);
   const allocationUsd = accountEquity * (c.maxGridAllocationPct / 100);
-  const legStopLossPct = Math.max(spacingPct * c.legStopLossMultiple, c.minLegStopLossPct);
+  // Stop distance now tracks real local noise (ATR on the SAME 5m
+  // timeframe stepGridSymbol/detectGridBreakout check bars against),
+  // not a fraction of spacingPct — see the GRID_DEFAULTS comment on
+  // legStopLossAtrMult for why the earlier spacing-fraction version
+  // stopped out most legs before they could revert.
+  const atrM5 = atr(snap.m5, 14) || s.atrM15 || 0;
+  const atrM5Pct = mid ? (atrM5 / mid) * 100 : 0;
+  const legStopLossPct = Math.max(atrM5Pct * c.legStopLossAtrMult, c.minLegStopLossPct);
 
   return {
     symbol, direction, upper, lower, levels, spacingPct, levelCount,

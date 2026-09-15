@@ -240,7 +240,7 @@ function runGridPaperTick(nowMs){
 // price (avgEntry ± plan.legStopLossPct, clamped so it never sits looser
 // than the grid's own outer boundary) instead of being set once at the
 // far boundary and left there — see grid.js's legStopLossPct/
-// legStopLossMultiple (the same value Backtest/Paper's stepGridSymbol
+// legStopLossAtrMult (the same value Backtest/Paper's stepGridSymbol
 // uses to close a losing leg early) for why: leaving the exchange-side
 // stop only at the boundary let a real position ride several grid
 // levels of adverse movement before the exchange itself would ever cut
@@ -2092,13 +2092,15 @@ const GRID_FIELDS = [
   { key: 'breakoutSensitivityAtr', label: 'ATR Multiplier (breakout)', type: 'number', step: 0.1, min: 0.5, max: 4 },
   { key: 'breakoutVolumeMult', label: 'Breakout Sensitivity (vol x)', type: 'number', step: 0.1, min: 1, max: 4 },
   { key: 'maxGridLevels', label: 'Max Open Grid Positions', type: 'number', min: 5, max: 50 },
-  // Per-level hard stop as a fraction of that level's own spacing. Lower
-  // = tighter stop = better win:loss ratio but more legs stopped out
-  // before price reverts (lower win rate). 0.65 targets roughly 1:1.5;
-  // 1.0 targets roughly 1:1; below ~0.4 starts risking whipsaw against
-  // ordinary noise. This is the main lever for the RR/profit-factor
-  // problem reported from paper/backtest results.
-  { key: 'legStopLossMultiple', label: 'Grid Stop-Loss (x spacing)', type: 'number', step: 0.05, min: 0.3, max: 2 },
+  // Per-level hard stop, as a multiple of local ATR(5m) — see grid.js's
+  // GRID_DEFAULTS comment on legStopLossAtrMult for the reasoning and
+  // the 33.8%-win-rate real-backtest result that drove this from a
+  // spacing-fraction stop to an ATR-based one. Higher = more room for a
+  // leg to complete its round trip (better win rate, worse RR when it
+  // does lose); lower = tighter loss cap (better RR, more legs stopped
+  // before reverting). This is the main lever for tuning the win-rate/
+  // RR tradeoff — retune from your own real Backtest results.
+  { key: 'legStopLossAtrMult', label: 'Grid Stop-Loss (x ATR)', type: 'number', step: 0.1, min: 0.4, max: 3 },
 ];
 const GRID_TOGGLES = [
   { key: 'emergencyExitOn', label: 'Emergency Exit' },
