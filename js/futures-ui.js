@@ -235,16 +235,25 @@ function runGridPaperTick(nowMs){
 // other Live/Demo strategy in this file — not specific to Grid.
 //
 // SAFETY: every side (LONG slot / SHORT slot) that holds any size gets
-// an exchange-side stop-loss at the grid's own outer boundary
-// (setBybitGridSideStop/setBinanceGridSideStop, server.js) the moment it
-// goes non-flat — this is NOT part of the backtested strategy (which
-// only closes via breakout detection running in this same JS loop) and
-// is a deliberate addition for real money: if the tab closes, the
-// network drops, or this loop simply stops running, filled legs are
-// still protected by the exchange itself, not by nothing. See grid.js's
-// header note on why runGridBacktest/stepGridSymbol don't model this —
-// it doesn't affect what backtest numbers mean, it's purely a live-
-// safety net layered on top of the real order flow only.
+// an exchange-side stop-loss the moment it goes non-flat, and that stop
+// is now RE-AMENDED every cycle to track that side's own average entry
+// price (avgEntry ± plan.legStopLossPct, clamped so it never sits looser
+// than the grid's own outer boundary) instead of being set once at the
+// far boundary and left there — see grid.js's legStopLossPct/
+// legStopLossMultiple (the same value Backtest/Paper's stepGridSymbol
+// uses to close a losing leg early) for why: leaving the exchange-side
+// stop only at the boundary let a real position ride several grid
+// levels of adverse movement before the exchange itself would ever cut
+// it, the same asymmetry that produced the poor win:loss ratio reported
+// from Backtest/Paper. A real hedge-mode position is one aggregate
+// per-side position, not individually addressable legs, so this can't
+// be a literal "close just this one filled level's stop" the way the
+// simulator can — instead the STOP PRICE itself tracks the side's own
+// average entry every cycle, which caps that side's total loss to
+// roughly the same legStopLossPct distance regardless of how many
+// levels are currently filled into it. This is purely a live-safety
+// layer on top of the real order flow — it doesn't change what
+// Backtest/Paper numbers mean.
 // =============================================================
 const GRID_LIVE_EXCHANGES = ['bybit', 'binance'];
 // Symbols probed per idle cycle when auto-scanning the watchlist for a
@@ -374,7 +383,7 @@ async function scanForGridLiveDeployment(f, exchange, mode, cred, gridCfg, nowMs
     }
     if(levels.length === 0){ gridLiveLog(`${symbol}: no grid levels could be placed — see messages above. Trying the next candidate.`, 'error'); continue; }
 
-    f.gridLiveState = { id: `GRID-${symbol.replace('USDT', '')}-${nowMs}`, plan, levels, longStopSet: false, shortStopSet: false, realizedUsd: 0, openedAt: nowMs };
+    f.gridLiveState = { id: `GRID-${symbol.replace('USDT', '')}-${nowMs}`, plan, levels, longStopPrice: null, shortStopPrice: null, longStopAlgoId: null, shortStopAlgoId: null, realizedUsd: 0, openedAt: nowMs };
     f.gridLiveSymbol = symbol; // keep the manual/last-picked symbol field in sync with whatever the scan actually deployed
     gridLiveLog(`${symbol}: grid ACTIVE — ${levels.length}/${plan.levelCount} levels resting.`, null);
     renderGridDashboard();
@@ -436,16 +445,6 @@ async function manageActiveGridLiveDeployment(f, exchange, mode, cred, gridCfg, 
       }).catch(err => ({ ok:false, message: err.message }));
       if(!closed.ok){ gridLiveLog(`Level ${level.levelIndex} filled but its close order failed: ${closed.message} — check ${symbol} directly.`, 'error'); continue; }
       level.status = 'PENDING_CLOSE'; level.closeOrderId = closed.orderId; level.entryPrice = level.price; level.targetPrice = targetPrice; level.openedAt = nowMs;
-
-      // First time this side goes non-flat, attach its protective stop
-      // at the grid's own outer boundary (see the header safety note).
-      const stopField = level.direction === 'LONG' ? 'longStopSet' : 'shortStopSet';
-      if(!gs[stopField]){
-        const stopPrice = level.direction === 'LONG' ? gs.plan.lower : gs.plan.upper;
-        const stopResult = await callProxy('/api/futures/grid/set-side-stop', { ...proxyArgs, direction: level.direction, stopPrice }).catch(err => ({ ok:false, message: err.message }));
-        if(stopResult.ok) gs[stopField] = true;
-        else gridLiveLog(`Could not attach protective stop on the ${level.direction} side of ${symbol}: ${stopResult.message} — that side has NO exchange-side protection yet.`, 'error');
-      }
     } else if(level.status === 'PENDING_CLOSE' && level.closeOrderId != null && !openIds.has(String(level.closeOrderId))){
       // Close filled — this grid cycle is complete. Log it with grid.js's
       // OWN fee-aware accounting (netCycleProfit) so live and backtest
@@ -483,6 +482,42 @@ async function manageActiveGridLiveDeployment(f, exchange, mode, cred, gridCfg, 
         gridLiveLog(`Cycle closed on level ${level.levelIndex} but couldn't re-arm it: ${rePlaced.message}`, 'error');
       }
     }
+  }
+
+  // Re-amend each non-flat side's protective stop to track that side's
+  // OWN average entry price (see the header safety note) — run every
+  // cycle, not just on first fill, since avgEntry moves as more levels
+  // fill into (or close out of) the same aggregate position. Amending
+  // with an unchanged price is a safe no-op on both exchanges, but this
+  // only calls out when the target actually moved more than a tiny
+  // (0.02%) tolerance, to avoid hammering the API every 8s over
+  // sub-tick-size float noise.
+  const posResp = await callProxy('/api/futures/grid/positions', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  if(posResp.ok){
+    for(const [direction, pos] of [['LONG', posResp.long], ['SHORT', posResp.short]]){
+      if(!pos || !pos.avgPrice) continue;
+      const legPct = gs.plan.legStopLossPct;
+      const boundary = direction === 'LONG' ? gs.plan.lower : gs.plan.upper;
+      const entryBased = direction === 'LONG' ? pos.avgPrice * (1 - legPct / 100) : pos.avgPrice * (1 + legPct / 100);
+      const targetStop = direction === 'LONG' ? Math.max(boundary, entryBased) : Math.min(boundary, entryBased);
+      const lastField = direction === 'LONG' ? 'longStopPrice' : 'shortStopPrice';
+      const algoIdField = direction === 'LONG' ? 'longStopAlgoId' : 'shortStopAlgoId';
+      const movedEnough = gs[lastField] == null || Math.abs(targetStop - gs[lastField]) / pos.avgPrice > 0.0002;
+      if(!movedEnough) continue;
+      const stopResult = await callProxy('/api/futures/grid/set-side-stop', { ...proxyArgs, direction, stopPrice: targetStop, existingAlgoId: gs[algoIdField] }).catch(err => ({ ok:false, message: err.message }));
+      if(stopResult.ok){
+        gs[lastField] = stopResult.stopPrice != null ? stopResult.stopPrice : targetStop;
+        // Binance issues a new conditional order per call (its stop isn't
+        // an amendable position field like Bybit's) — the returned algoId
+        // is fed back in as existingAlgoId next cycle so THIS call's own
+        // cancel-then-replace step retires the previous one instead of
+        // leaving stray stop orders resting on the account. Bybit doesn't
+        // return one; gs[algoIdField] just stays null there, harmlessly.
+        if(stopResult.algoId != null) gs[algoIdField] = stopResult.algoId;
+      } else gridLiveLog(`Could not update the ${direction} side's protective stop on ${symbol}: ${stopResult.message} — that side may still be on its previous (wider) stop.`, 'error');
+    }
+  } else {
+    gridLiveLog(`Could not read ${symbol} positions to refresh protective stops: ${posResp.message}`, 'error');
   }
 
   // Grid's own max-loss circuit breaker and account daily-loss gate —
@@ -2057,6 +2092,13 @@ const GRID_FIELDS = [
   { key: 'breakoutSensitivityAtr', label: 'ATR Multiplier (breakout)', type: 'number', step: 0.1, min: 0.5, max: 4 },
   { key: 'breakoutVolumeMult', label: 'Breakout Sensitivity (vol x)', type: 'number', step: 0.1, min: 1, max: 4 },
   { key: 'maxGridLevels', label: 'Max Open Grid Positions', type: 'number', min: 5, max: 50 },
+  // Per-level hard stop as a fraction of that level's own spacing. Lower
+  // = tighter stop = better win:loss ratio but more legs stopped out
+  // before price reverts (lower win rate). 0.65 targets roughly 1:1.5;
+  // 1.0 targets roughly 1:1; below ~0.4 starts risking whipsaw against
+  // ordinary noise. This is the main lever for the RR/profit-factor
+  // problem reported from paper/backtest results.
+  { key: 'legStopLossMultiple', label: 'Grid Stop-Loss (x spacing)', type: 'number', step: 0.05, min: 0.3, max: 2 },
 ];
 const GRID_TOGGLES = [
   { key: 'emergencyExitOn', label: 'Emergency Exit' },
