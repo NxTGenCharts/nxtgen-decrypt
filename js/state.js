@@ -197,6 +197,7 @@ export const els = {
   btSymbolsAllBtn: document.getElementById('btSymbolsAllBtn'),
   btSymbolsNoneBtn: document.getElementById('btSymbolsNoneBtn'),
   btStrategyChecks: document.getElementById('btStrategyChecks'),
+  btGridParamsNote: document.getElementById('btGridParamsNote'),
   btRunBtn: document.getElementById('btRunBtn'),
   btProgress: document.getElementById('btProgress'),
   btMessages: document.getElementById('btMessages'),

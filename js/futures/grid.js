@@ -589,25 +589,35 @@ export function runGridBacktest({ symbol, candles, cfg, startingEquity, exchange
 // model ever changes to allow multi-leg cycles).
 export function summarizeGridTrades(trades, startingEquity, counters){
   const cycles = trades.length;
+  // NET-based (after fees/slippage/funding), matching summarizeTrades'
+  // methodology in backtest.js exactly — this used to classify wins/
+  // losses and compute profit factor from raw grossUsd (pre-cost), which
+  // produced a different, contradictory profit factor than the overall
+  // stat cards for the exact same trades (cost drag pushes real profit
+  // factor below the gross-only figure). Net P&L is what actually
+  // happened; gross is tracked below only as a separate informational
+  // figure, not as the basis for win/loss or profit factor.
   const wins = trades.filter(t => t.netUsd > 0);
   const losses = trades.filter(t => t.netUsd <= 0);
-  const grossProfit = wins.reduce((a, t) => a + t.grossUsd, 0);
-  const grossLoss = Math.abs(losses.reduce((a, t) => a + t.grossUsd, 0));
+  const grossProfitRaw = trades.reduce((a, t) => a + Math.max(0, t.grossUsd), 0);
+  const grossLossRaw = Math.abs(trades.reduce((a, t) => a + Math.min(0, t.grossUsd), 0));
+  const netProfit = wins.reduce((a, t) => a + t.netUsd, 0);
+  const netLoss = Math.abs(losses.reduce((a, t) => a + t.netUsd, 0));
   const netUsd = trades.reduce((a, t) => a + t.netUsd, 0);
   const feesUsd = trades.reduce((a, t) => a + t.feesUsd, 0);
   const fundingUsd = trades.reduce((a, t) => a + (t.fundingUsd || 0), 0);
   const slippageUsd = trades.reduce((a, t) => a + (t.slippageUsd || 0), 0);
   const winRate = cycles ? (wins.length / cycles) * 100 : 0;
-  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? Infinity : 0);
-  const avgWinUsd = wins.length ? grossProfit / wins.length : 0;
-  const avgLossUsd = losses.length ? -grossLoss / losses.length : 0;
+  const profitFactor = netLoss > 0 ? netProfit / netLoss : (netProfit > 0 ? Infinity : 0);
+  const avgWinUsd = wins.length ? netProfit / wins.length : 0;
+  const avgLossUsd = losses.length ? -netLoss / losses.length : 0;
   const expectancyUsd = cycles ? netUsd / cycles : 0;
   const largestLossUsd = losses.length ? Math.min(...losses.map(t => t.netUsd)) : 0;
   const durations = trades.map(t => t.durationMin);
   const avgDurationMin = durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : 0;
   return {
     gridCycles: cycles, tradeWinRate: winRate, gridCycleWinRate: winRate, // see comment above
-    grossProfit, grossLoss, netUsd, feesUsd, fundingUsd, slippageUsd,
+    grossProfit: grossProfitRaw, grossLoss: grossLossRaw, netUsd, feesUsd, fundingUsd, slippageUsd,
     profitFactor, avgWinUsd, avgLossUsd, largestLossUsd, expectancyUsd, avgDurationMin,
     netReturnPct: startingEquity ? (netUsd / startingEquity) * 100 : 0,
     liquidations: counters.liquidations, emergencyExits: counters.emergencyExits,

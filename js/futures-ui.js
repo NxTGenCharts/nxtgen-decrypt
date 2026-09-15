@@ -184,6 +184,12 @@ function runGridPaperTick(nowMs){
   const f = fu();
   const gridCfg = loadGridConfig();
   if(!gridCfg.enabled) return;
+  // Deployment size now tracks the SAME "Risk per trade (%)" the six
+  // strategies use (f.riskPctPerTrade, synced from fuRiskPct/
+  // fuLiveRiskPct — see readFuturesConfig's comment) rather than the old
+  // separate "Maximum Grid Allocation (%)" field, so one risk control
+  // governs sizing everywhere instead of Grid silently using its own.
+  gridCfg.maxGridAllocationPct = f.riskPctPerTrade;
   if(!f.gridSession) f.gridSession = createGridSession(readStartingBalance());
   const symbols = GRID_SYMBOLS.filter(s => mockMarket.symbols.includes(s));
   for(const symbol of symbols){
@@ -276,6 +282,10 @@ async function runGridLiveCycleInner(){
   if(!cred){ gridLiveLog(`No verified ${exchange} ${mode} credential — connect it in Autotrade & Balances first.`, 'error'); return; }
   const symbol = f.gridLiveSymbol;
   const gridCfg = loadGridConfig();
+  // Same override as Paper's runGridPaperTick — deployment size tracks
+  // the shared "Risk per trade (%)" control (fuRiskPct/fuLiveRiskPct)
+  // instead of a separate Grid-only allocation setting.
+  gridCfg.maxGridAllocationPct = f.riskPctPerTrade;
 
   const snap = await fetchLiveSnapshot(exchange, symbol, '5m').catch(err => { gridLiveLog(`Snapshot fetch failed for ${symbol}: ${err.message}`, 'error'); return null; });
   if(!snap) return;
@@ -289,7 +299,7 @@ async function runGridLiveCycleInner(){
   // time) is what sizing derives from — re-querying balance mid-
   // deployment would let a leg's size drift from what the rest of the
   // grid was planned against.
-  let equityForSizing = f.gridLiveState ? f.gridLiveState.plan.allocationUsd / (loadGridConfig().maxGridAllocationPct / 100) : null;
+  let equityForSizing = f.gridLiveState ? f.gridLiveState.plan.allocationUsd / (gridCfg.maxGridAllocationPct / 100) : null;
   rollGridLiveDay(f, nowMs, equityForSizing || 0);
 
   const proxyArgs = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol };
@@ -1928,7 +1938,6 @@ const GRID_FIELDS = [
   { key: 'mode', label: 'Grid Mode', type: 'select', options: ['AUTO', 'LONG', 'SHORT', 'NEUTRAL'] },
   { key: 'defaultGridLevels', label: 'Grid Levels', type: 'number', min: 5, max: 50 },
   { key: 'minNetProfitPct', label: 'Minimum Grid Profit (%)', type: 'number', step: 0.01, min: 0.05 },
-  { key: 'maxGridAllocationPct', label: 'Maximum Grid Allocation (%)', type: 'number', min: 1, max: 100 },
   { key: 'maxLeverage', label: 'Maximum Leverage', type: 'number', min: 1, max: 5 },
   { key: 'minGridScore', label: 'Minimum Grid Score', type: 'number', min: 0, max: 100 },
   { key: 'maxDailyLossPct', label: 'Maximum Daily Loss (%)', type: 'number', min: 0.5, max: 50 },
@@ -1956,6 +1965,7 @@ function renderGridPanel(){
           <strong>${GRID_STRATEGY.label}</strong>
           <span style="font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:6px;">Paper + Live/Demo (Bybit/Binance) supported</span>
           <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Toggle "Enabled (Paper)" below to run it against the synthetic feed, check it as the 7th strategy in Backtest for real-historical-data testing, or arm Live/Demo below to trade one real symbol on Bybit or Binance. <strong>Live/Demo is untested against real exchanges — start in Demo and watch it closely before ever arming Live.</strong></div>
+          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">Deployment size per symbol uses the same <strong>Risk per trade (${f.riskPctPerTrade}%)</strong> control as the six single-entry strategies above (Paper Engine section) — e.g. ${f.riskPctPerTrade}% of a $10,000 balance commits $${(10000 * f.riskPctPerTrade / 100).toLocaleString('en-US')} to a grid deployment, not a separate Grid-only allocation setting. Leverage is separately capped at ${Math.min(cfg.maxLeverage, 5)}x below regardless of this.</div>
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:12px;">

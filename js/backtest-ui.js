@@ -212,6 +212,11 @@ async function runBacktestFlow(){
         const raw = localStorage.getItem('nxtgen_grid_config_v1');
         if(raw) gridCfg = { ...gridCfg, ...JSON.parse(raw) };
       }catch(e){ /* ignore — defaults already set */ }
+      // Deployment size tracks THIS PAGE's "Risk per trade (%)" field
+      // (riskPctPerTrade, above) instead of the saved panel's own
+      // allocation setting — same override Paper/Live apply, so a
+      // backtest run actually respects the risk% you set here.
+      gridCfg.maxGridAllocationPct = riskPctPerTrade;
       const gridSymbols = usableSymbols; // whatever the user actually checked and got real data for
       const allGridTrades = [];
       const combinedCounters = { liquidations: 0, emergencyExits: 0, breakoutExits: 0, recalculations: 0 };
@@ -277,6 +282,45 @@ function renderEquityCurveSvg(equityCurve){
   `;
 }
 
+// Builds a single cumulative-P&L curve from the FINAL merged trade list
+// (six-strategy ensemble + NxTGen Grid, whichever ran), in the order
+// trades actually closed. This intentionally replaces relying on the
+// six-strategy ensemble's own tick-by-tick dayState.equity curve, which
+// never moves at all when only Grid is enabled (Grid keeps its own
+// separately-capitalized session per symbol — see grid.js's header
+// comment — so the ensemble's dayState sees zero trades and its curve
+// sits dead flat even while Grid racks up real gains/losses). Plotting
+// cumulative net P&L against starting equity is well-defined and
+// accurate regardless of how capital was internally sized per symbol —
+// it always reconciles with the NET P&L stat card above it — even
+// though for a multi-symbol Grid run it's a "what if this all came out
+// of one pool" view rather than a literal shared-margin simulation
+// (each symbol's Grid deployment was actually sized against its own
+// startingEquity-sized allocation, not a shared account — a true
+// shared-capital multi-symbol Grid backtest would need the engine
+// itself reworked to step all symbols through one session, the way
+// Paper/Live's createGridSession already does for a running account).
+function buildCombinedEquityCurve(trades, startingEquity){
+  const sorted = [...trades].sort((a, b) => a.closedAtMs - b.closedAtMs);
+  const curve = [{ t: sorted.length ? sorted[0].closedAtMs : Date.now(), equity: startingEquity }];
+  let equity = startingEquity;
+  for(const t of sorted){
+    equity += t.netUsd;
+    curve.push({ t: t.closedAtMs, equity });
+  }
+  return curve;
+}
+
+function maxDrawdownPctFromCurve(curve){
+  let peak = curve.length ? curve[0].equity : 0;
+  let maxDd = 0;
+  for(const p of curve){
+    if(p.equity > peak) peak = p.equity;
+    if(peak > 0) maxDd = Math.max(maxDd, ((peak - p.equity) / peak) * 100);
+  }
+  return maxDd;
+}
+
 function renderBacktestResults(result){
   const stats = summarizeTrades(result.trades, result.startingEquity);
   els.btResults.style.display = '';
@@ -290,7 +334,14 @@ function renderBacktestResults(result){
   els.btrAvg.textContent = `${fmtUsd(stats.avgWinUsd)} / ${fmtUsd(stats.avgLossUsd)}`;
   els.btrFees.textContent = '-$' + stats.feesUsd.toFixed(2);
 
-  renderEquityCurveSvg(result.equityCurve);
+  // Built from the final merged trade list (includes Grid trades when
+  // Grid ran) rather than the six-strategy ensemble's own equity curve
+  // — see buildCombinedEquityCurve's comment for why the latter goes
+  // flat/misleading whenever Grid is the only strategy enabled.
+  const combinedEquityCurve = buildCombinedEquityCurve(result.trades, result.startingEquity);
+  els.btrDD.textContent = maxDrawdownPctFromCurve(combinedEquityCurve).toFixed(2) + '%';
+
+  renderEquityCurveSvg(combinedEquityCurve);
 
   const strategyRows = Object.entries(stats.byStrategy).sort((a, b) => b[1].netUsd - a[1].netUsd);
   els.btByStrategy.innerHTML = strategyRows.length ? `
@@ -442,6 +493,7 @@ export function initBacktestUI(){
   populateSymbolChecks();
   populateStrategyChecks();
   updateFeeDefaults();
+  updateGridParamsNote();
 
   if(els.btExchange) els.btExchange.addEventListener('change', updateFeeDefaults);
   if(els.btRangePreset) els.btRangePreset.addEventListener('change', () => {
@@ -455,8 +507,41 @@ export function initBacktestUI(){
   if(els.btSymbolsNoneBtn) els.btSymbolsNoneBtn.addEventListener('click', () => {
     document.querySelectorAll('.bt-symbol-check').forEach(el => { el.checked = false; });
   });
+  // Leverage/Risk per trade above only feed the six single-entry
+  // strategies' position sizing (positionSize() in risk.js) — Grid uses
+  // a completely different sizing model (% of equity per deployment,
+  // leverage hard-capped regardless of input, see grid.js's
+  // GRID_DEFAULTS) and never reads either field. That's easy to miss
+  // since the Grid checkbox sits right below those inputs, so surface
+  // it explicitly whenever Grid is (de)selected instead of leaving it
+  // silently unapplied.
+  if(els.btStrategyChecks) els.btStrategyChecks.addEventListener('change', updateGridParamsNote);
+  if(els.btRiskPct) els.btRiskPct.addEventListener('input', updateGridParamsNote);
+  if(els.btStartingBalance) els.btStartingBalance.addEventListener('input', updateGridParamsNote);
   if(els.btRunBtn) els.btRunBtn.addEventListener('click', runBacktestFlow);
   if(els.btExportCsvBtn) els.btExportCsvBtn.addEventListener('click', exportBacktestCsv);
   if(els.btExportXlsBtn) els.btExportXlsBtn.addEventListener('click', exportBacktestXls);
   if(els.btExportPdfBtn) els.btExportPdfBtn.addEventListener('click', exportBacktestPdf);
+}
+
+// See the addEventListener comment above for why this exists. Leverage
+// is still hard-capped/ignored for Grid (GRID_DEFAULTS' safety ceiling),
+// but deployment size now DOES follow this page's Risk per trade (%)
+// field (see runBacktestFlow's gridCfg.maxGridAllocationPct override),
+// so the note reflects that instead of pointing at the separate panel.
+function updateGridParamsNote(){
+  if(!els.btGridParamsNote) return;
+  const gridChecked = document.querySelector('.bt-strategy-check[value="nxtgenGrid"]:checked');
+  if(!gridChecked){ els.btGridParamsNote.style.display = 'none'; return; }
+  let gridCfg = { ...GRID_DEFAULTS };
+  try{
+    const raw = localStorage.getItem('nxtgen_grid_config_v1');
+    if(raw) gridCfg = { ...gridCfg, ...JSON.parse(raw) };
+  }catch(e){ /* defaults already set */ }
+  const effectiveLeverage = Math.min(gridCfg.maxLeverage, 5);
+  const riskPct = els.btRiskPct ? (parseFloat(els.btRiskPct.value) || 1) : 1;
+  const balance = els.btStartingBalance ? (parseFloat(els.btStartingBalance.value) || 10000) : 10000;
+  const dollarSize = balance * riskPct / 100;
+  els.btGridParamsNote.style.display = '';
+  els.btGridParamsNote.innerHTML = `<strong style="color:var(--text);">NxTGen Grid ignores the Leverage field above</strong> (hard-capped at <strong>${effectiveLeverage}x</strong> regardless of any setting) but DOES use <strong>Risk per trade (${riskPct}%)</strong> to size each deployment — ${riskPct}% of ${fmtUsd(balance)} = <strong>${fmtUsd(dollarSize)}</strong> committed per symbol, not a separate allocation setting.`;
 }
