@@ -133,6 +133,7 @@ export const els = {
   fuStartingBalance: document.getElementById('fuStartingBalance'),
   fuResetSessionBtn: document.getElementById('fuResetSessionBtn'),
   fuStrategyRows: document.getElementById('fuStrategyRows'),
+  fuGridPanel: document.getElementById('fuGridPanel'),
   fuStrategiesDetails: document.getElementById('fuStrategiesDetails'),
   fuStrategiesBadge: document.getElementById('fuStrategiesBadge'),
   fuStrategiesBest: document.getElementById('fuStrategiesBest'),
@@ -375,6 +376,15 @@ export const state = {
     leverage: 5,
     dayState: null,           // built lazily by futures-ui.js: { equity, startingEquity, trades, wins, losses, ... , positions:[] }
     tradeHistory: [],
+    // NxTGen Grid — Paper mode only (see js/futures/grid.js and the
+    // "Enabled (Paper)" toggle in the Strategies panel's Grid config).
+    // Entirely separate capital/session from dayState above, same way
+    // Live/Demo below is separate — a grid deployment sizes itself as a
+    // % of ITS OWN allocated equity, not a slice of whatever the
+    // six-strategy ensemble happens to have open. Built lazily by
+    // futures-ui.js's runGridPaperTick on first tick after being enabled.
+    gridSession: null,
+    gridTradeHistory: [],
     lastRows: [],
     lastRegimeSummary: null,
     lastExplainIndex: null,

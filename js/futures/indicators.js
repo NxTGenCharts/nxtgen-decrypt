@@ -89,6 +89,77 @@ export function macdHistogram(candles, fast, slow, signal){
   };
 }
 
+// Bollinger Bands: SMA(period) +/- stdDevMult standard deviations of
+// closing price. Returns null until `period` closes are available.
+// Added for NxTGen Grid's range-suitability/volatility read (grid.js) —
+// existing callers of this file are unaffected, this is purely additive.
+export function bollingerBands(candles, period, stdDevMult){
+  period = period || 20; stdDevMult = stdDevMult || 2;
+  const c = closes(candles);
+  if(c.length < period) return null;
+  const win = c.slice(-period);
+  const mean = win.reduce((a, b) => a + b, 0) / period;
+  const variance = win.reduce((a, b) => a + (b - mean) * (b - mean), 0) / period;
+  const sd = Math.sqrt(variance);
+  const upper = mean + stdDevMult * sd;
+  const lower = mean - stdDevMult * sd;
+  return { mean, upper, lower, sd, widthPct: mean ? ((upper - lower) / mean) * 100 : 0 };
+}
+
+// Bollinger Band Width series (widthPct at each bar from `period` onward)
+// — used to read whether current BB width is compressed/expanded versus
+// its own recent history, the same "ratio vs its own recent average"
+// pattern regime.js already uses for ATR (volRatio).
+export function bollingerBandWidthSeries(candles, period, stdDevMult, lookback){
+  const out = [];
+  const start = Math.max(period, candles.length - lookback);
+  for(let i = start; i <= candles.length; i++){
+    const bb = bollingerBands(candles.slice(0, i), period, stdDevMult);
+    if(bb) out.push(bb.widthPct);
+  }
+  return out;
+}
+
+// Wilder's ADX (Average Directional Index) over `period` bars — standard
+// trend-strength read (0-100; >25 is conventionally "trending", <20 is
+// conventionally "range/weak trend"). Used by grid.js's market-regime
+// filter alongside regime.js's own EMA-based classification, since ADX
+// is the specific indicator the grid spec calls for and existing
+// regime.js does not compute it.
+export function adx(candles, period){
+  period = period || 14;
+  if(candles.length < period * 2 + 1) return null;
+  const trs = [], plusDMs = [], minusDMs = [];
+  for(let i = 1; i < candles.length; i++){
+    const cur = candles[i], prev = candles[i - 1];
+    trs.push(Math.max(cur.h - cur.l, Math.abs(cur.h - prev.c), Math.abs(cur.l - prev.c)));
+    const upMove = cur.h - prev.h, downMove = prev.l - cur.l;
+    plusDMs.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDMs.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+  const wilderSmooth = (arr) => {
+    const out = [];
+    let sum = arr.slice(0, period).reduce((a, b) => a + b, 0);
+    out.push(sum);
+    for(let i = period; i < arr.length; i++){
+      sum = out[out.length - 1] - (out[out.length - 1] / period) + arr[i];
+      out.push(sum);
+    }
+    return out;
+  };
+  const trSm = wilderSmooth(trs), plusSm = wilderSmooth(plusDMs), minusSm = wilderSmooth(minusDMs);
+  const dxs = [];
+  for(let i = 0; i < trSm.length; i++){
+    const plusDI = trSm[i] ? (plusSm[i] / trSm[i]) * 100 : 0;
+    const minusDI = trSm[i] ? (minusSm[i] / trSm[i]) * 100 : 0;
+    const dx = (plusDI + minusDI) ? (Math.abs(plusDI - minusDI) / (plusDI + minusDI)) * 100 : 0;
+    dxs.push(dx);
+  }
+  if(dxs.length < period) return null;
+  const adxVal = dxs.slice(-period).reduce((a, b) => a + b, 0) / period;
+  return adxVal;
+}
+
 // Simple swing high/low structure over a lookback window — used for
 // support/resistance and market-structure (higher-highs/lows) reads.
 export function swingLevels(candles, lookback){

@@ -26,6 +26,8 @@ import { RISK_DEFAULTS } from './futures/risk.js';
 import { DEFAULT_WEIGHTS } from './futures/scoring.js';
 import { computeBtcShock } from './futures/indicators.js';
 import { STRATEGY_REGISTRY } from './futures/setups.js';
+import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGridSymbol, closeAllGridSessions } from './futures/grid.js';
+import { classifyRegime } from './futures/regime.js';
 import { getAiConfirmation } from './ai-signal.js';
 
 const CYCLE_MS = 4000; // one synthetic "cycle" every 4s; each cycle advances the mock clock by a few minutes
@@ -128,6 +130,12 @@ function resetSession(){
   };
   f.tradeHistory = [];
   f.lastRows = [];
+  // NxTGen Grid's Paper session is independent capital from the
+  // six-strategy dayState above (see state.js's gridSession comment) —
+  // reset it alongside so "Reset Session" actually starts everything
+  // fresh, not just the ensemble half of it.
+  f.gridSession = createGridSession(startingEquity);
+  f.gridTradeHistory = [];
   render();
 }
 
@@ -162,12 +170,45 @@ function readSettingsFromInputs(){
   f.highSelectivity = !!(els.fuSelectivityToggle && els.fuSelectivityToggle.checked);
 }
 
+// NxTGen Grid's Paper-mode tick — separate capital pool/session from
+// the six-strategy dayState above (see state.js's gridSession comment),
+// called once per Paper cycle right alongside the six-strategy logic.
+// This calls the EXACT SAME stepGridSymbol used by the Backtest tab's
+// NxTGen Grid run (js/futures/grid.js) — same suitability scoring, same
+// fee-aware fills, same breakout/liquidation/daily-loss protection — so
+// Paper behavior can't silently diverge from what the backtest showed.
+// Only Paper is wired here; Live/Demo order placement against real
+// Binance/Bybit Futures is NOT implemented (see the file header note in
+// grid.js) — this never touches real money.
+function runGridPaperTick(nowMs){
+  const f = fu();
+  const gridCfg = loadGridConfig();
+  if(!gridCfg.enabled) return;
+  if(!f.gridSession) f.gridSession = createGridSession(readStartingBalance());
+  const symbols = GRID_SYMBOLS.filter(s => mockMarket.symbols.includes(s));
+  for(const symbol of symbols){
+    const snap = mockMarket.snapshot(symbol);
+    if(!snap) continue;
+    const regime = classifyRegime(snap.h1, snap.m15);
+    const bar = snap.m5[snap.m5.length - 1];
+    const trades = stepGridSymbol(f.gridSession, {
+      symbol, snap, regime, bar, nowMs, cfg: gridCfg, exchange: f.exchange,
+      metaOverrides: { spreadPct: snap.meta.spreadPct, fundingRatePct: snap.meta.fundingRatePct },
+    });
+    if(trades.length){
+      f.gridTradeHistory = trades.concat(f.gridTradeHistory).slice(0, 500);
+      appendGridPaperTrades(trades);
+    }
+  }
+}
+
 function runCycle(){
   const f = fu();
   const dayState = ensureDayState();
   readSettingsFromInputs();
 
   mockMarket.tick(3); // advance synthetic market clock ~3 minutes per cycle
+  runGridPaperTick(mockMarket.now());
 
   const beforeCount = f.tradeHistory.length;
   managePositions(dayState, f.tradeHistory, { timeStopMinutes: 240 });
@@ -244,6 +285,7 @@ function render(){
   // the sample-size counter and "best so far" line update live while
   // Paper mode runs, not just when a checkbox/dropdown is touched.
   renderStrategyRows();
+  renderGridDashboard();
 }
 
 function computeProfitFactor(history){
@@ -1171,6 +1213,33 @@ function appendPaperTrades(records){
   }catch(e){ /* storage full/unavailable — f.tradeHistory (this session only) still has it */ }
 }
 
+// NxTGen Grid's own persisted Paper log — kept separate from the six-
+// strategy PAPER_TRADE_LOG_KEY above rather than merged into it, since
+// grid trade records carry different fields (gridId, gridLevel,
+// cycleResult) and the strategy-stats code that reads
+// PAPER_TRADE_LOG_KEY isn't written to expect those. Same shape as the
+// records grid.js's runGridBacktest produces, so if this ever needs
+// combining with backtest output for a report, no reshaping is needed.
+const GRID_PAPER_TRADE_LOG_KEY = 'nxtgen_grid_paper_trade_log_v1';
+const GRID_PAPER_TRADE_LOG_MAX = 20000;
+
+function loadGridPaperTradeLog(){
+  try{
+    const raw = localStorage.getItem(GRID_PAPER_TRADE_LOG_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  }catch(e){ return []; }
+}
+function appendGridPaperTrades(records){
+  if(!records.length) return;
+  try{
+    const log = loadGridPaperTradeLog();
+    log.unshift(...records);
+    if(log.length > GRID_PAPER_TRADE_LOG_MAX) log.length = GRID_PAPER_TRADE_LOG_MAX;
+    localStorage.setItem(GRID_PAPER_TRADE_LOG_KEY, JSON.stringify(log));
+  }catch(e){ /* storage full/unavailable — f.gridTradeHistory (this session only) still has it */ }
+}
+
 // { preset: 'today'|'week'|'month'|'all'|'custom', fromMs, toMs } — UI-only,
 // recomputed on demand, not persisted itself (only the underlying trades are).
 let tradeLogRange = { preset: 'today' };
@@ -1580,6 +1649,175 @@ function initStrategySelector(){
       }
     });
   }
+}
+
+// =============================================================
+// NxTGen Grid — config panel (7th strategy, kept separate from the
+// STRATEGY_REGISTRY rows above — see grid.js's header comment for why
+// it's a different engine). This panel persists the settings the spec
+// calls for (Grid Mode, Levels, Spacing, Min Grid Profit, Max
+// Allocation, Max Leverage, Min Grid Score, Max Daily Loss, Daily
+// Profit Target, ATR Multiplier, Breakout Sensitivity, Max Open
+// Positions, Emergency Exit / Funding Filter / Liquidity Filter
+// toggles) and is what js/backtest-ui.js's NxTGen Grid backtest run
+// reads. It intentionally does NOT drive a live/Paper order-execution
+// loop yet — this app's Paper mode ticks mockMarket.js and Live/Demo
+// places real orders through server.js's exchange integration, and
+// wiring the grid engine into either of those (continuous multi-level
+// order placement/cancellation, not a single entry/TP/SL) is real
+// execution code that needs building and testing against each
+// exchange directly, not something to fake here. The badge below says
+// so plainly rather than implying it's live when it isn't.
+// =============================================================
+const GRID_CONFIG_KEY = 'nxtgen_grid_config_v1';
+
+function loadGridConfig(){
+  try{
+    const raw = localStorage.getItem(GRID_CONFIG_KEY);
+    // 'enabled' isn't part of GRID_DEFAULTS (that object is the pure
+    // strategy config shared with the backtest path, which has no
+    // concept of "on/off" — a backtest run either includes the
+    // strategy or doesn't via its own checkbox) — it's a Paper-mode-
+    // only switch, so it's defaulted here rather than in grid.js.
+    if(!raw) return { ...GRID_DEFAULTS, enabled: false };
+    return { ...GRID_DEFAULTS, enabled: false, ...JSON.parse(raw) };
+  }catch(e){ return { ...GRID_DEFAULTS, enabled: false }; }
+}
+function saveGridConfig(cfg){
+  try{ localStorage.setItem(GRID_CONFIG_KEY, JSON.stringify(cfg)); }catch(e){ /* non-fatal */ }
+}
+
+const GRID_FIELDS = [
+  { key: 'mode', label: 'Grid Mode', type: 'select', options: ['AUTO', 'LONG', 'SHORT', 'NEUTRAL'] },
+  { key: 'defaultGridLevels', label: 'Grid Levels', type: 'number', min: 5, max: 50 },
+  { key: 'minNetProfitPct', label: 'Minimum Grid Profit (%)', type: 'number', step: 0.01, min: 0.05 },
+  { key: 'maxGridAllocationPct', label: 'Maximum Grid Allocation (%)', type: 'number', min: 1, max: 100 },
+  { key: 'maxLeverage', label: 'Maximum Leverage', type: 'number', min: 1, max: 5 },
+  { key: 'minGridScore', label: 'Minimum Grid Score', type: 'number', min: 0, max: 100 },
+  { key: 'maxDailyLossPct', label: 'Maximum Daily Loss (%)', type: 'number', min: 0.5, max: 50 },
+  { key: 'dailyProfitTargetPct', label: 'Daily Profit Target (%)', type: 'number', min: 1, max: 50 },
+  { key: 'breakoutSensitivityAtr', label: 'ATR Multiplier (breakout)', type: 'number', step: 0.1, min: 0.5, max: 4 },
+  { key: 'breakoutVolumeMult', label: 'Breakout Sensitivity (vol x)', type: 'number', step: 0.1, min: 1, max: 4 },
+  { key: 'maxGridLevels', label: 'Max Open Grid Positions', type: 'number', min: 5, max: 50 },
+];
+const GRID_TOGGLES = [
+  { key: 'enabled', label: 'Enabled (Paper)' },
+  { key: 'emergencyExitOn', label: 'Emergency Exit' },
+  { key: 'fundingFilterOn', label: 'Funding Filter' },
+  { key: 'liquidityFilterOn', label: 'Liquidity Filter' },
+];
+
+function renderGridPanel(){
+  if(!els.fuGridPanel) return;
+  const cfg = loadGridConfig();
+  els.fuGridPanel.innerHTML = `
+    <div class="ov-block" style="margin-top:10px;padding:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div>
+          <strong>${GRID_STRATEGY.label}</strong>
+          <span style="font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:6px;">Paper only — no Live/Demo order execution yet</span>
+          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Toggle "Enabled (Paper)" below to run it live in Paper mode against ${GRID_SYMBOLS.join(', ')}, or check it as the 7th strategy in the Backtest section for real-historical-data testing. Live/Demo order placement against Binance/Bybit Futures is not implemented (see the file header note in grid.js) — nothing here ever touches a real account.</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:12px;">
+        ${GRID_FIELDS.map(f => `
+          <label style="font-size:11px;color:var(--dim);display:block;">
+            ${f.label}
+            ${f.type === 'select'
+              ? `<select class="grid-cfg-field" data-key="${f.key}" style="width:100%;margin-top:3px;">
+                  ${f.options.map(o => `<option value="${o}" ${cfg[f.key] === o ? 'selected' : ''}>${o}</option>`).join('')}
+                </select>`
+              : `<input class="grid-cfg-field" data-key="${f.key}" type="number" ${f.step ? `step="${f.step}"` : ''} ${f.min != null ? `min="${f.min}"` : ''} ${f.max != null ? `max="${f.max}"` : ''} value="${cfg[f.key]}" style="width:100%;margin-top:3px;">`}
+          </label>
+        `).join('')}
+      </div>
+      <div style="display:flex;gap:16px;margin-top:12px;flex-wrap:wrap;">
+        ${GRID_TOGGLES.map(t => `
+          <label class="toggle-check" style="font-size:12px;">
+            <input type="checkbox" class="grid-cfg-toggle" data-key="${t.key}" ${cfg[t.key] ? 'checked' : ''}>
+            <span>${t.label}</span>
+          </label>
+        `).join('')}
+      </div>
+      <div id="fuGridDashboard" style="margin-top:14px;"></div>
+    </div>
+  `;
+  renderGridDashboard();
+}
+
+// Live-updating dashboard — only touches its own #fuGridDashboard
+// sub-container (never the config fields above it), so it can refresh
+// every Paper cycle without stealing focus from an input the user is
+// mid-edit on. Reads f.gridSession (per-symbol grid state, mutated in
+// place by stepGridSymbol every tick) and f.gridTradeHistory (this
+// session's closed cycles) — nothing here is fabricated, it's exactly
+// the state the running Paper engine is in.
+function renderGridDashboard(){
+  const host = els.fuGridPanel && els.fuGridPanel.querySelector('#fuGridDashboard');
+  if(!host) return;
+  const cfg = loadGridConfig();
+  const f = fu();
+  if(!cfg.enabled){
+    host.innerHTML = `<div style="font-size:12px;color:var(--dim);padding:8px 0;">Grid Paper trading is OFF. Turn on "Enabled (Paper)" above to start it — it runs alongside the six-strategy Paper engine, not instead of it.</div>`;
+    return;
+  }
+  const session = f.gridSession;
+  const history = f.gridTradeHistory || [];
+  const wins = history.filter(t => t.netUsd > 0).length;
+  const netUsd = history.reduce((a, t) => a + t.netUsd, 0);
+  const feesUsd = history.reduce((a, t) => a + t.feesUsd, 0);
+  const fundingUsd = history.reduce((a, t) => a + (t.fundingUsd || 0), 0);
+  const winRate = history.length ? (wins / history.length) * 100 : 0;
+  const equity = session ? session.equity : null;
+
+  const rows = GRID_SYMBOLS.map(symbol => {
+    const g = session && session.grids[symbol];
+    if(!g){
+      return `<tr><td>${symbol}</td><td colspan="7" style="color:var(--dim);">No active grid — market not currently suitable, or daily halt in effect</td></tr>`;
+    }
+    const gridPnl = g.realizedUsd; // realized only — open legs aren't marked-to-market here, matching the backtest's own realized-only accounting
+    return `<tr>
+      <td>${symbol}</td><td>${g.regime}</td><td>${g.gridScore}/100</td><td>${g.direction}</td>
+      <td>${g.upper.toFixed(4)} / ${g.lower.toFixed(4)}</td><td>${g.levelCount}</td>
+      <td>${g.openLegs.length}</td><td>${fmtUsd(gridPnl)}</td>
+    </tr>`;
+  }).join('');
+
+  host.innerHTML = `
+    <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;margin-bottom:8px;">
+      <div><span style="color:var(--dim);">Status</span> <strong>ACTIVE</strong></div>
+      <div><span style="color:var(--dim);">Grid Equity</span> <strong>${equity != null ? '$' + equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}</strong></div>
+      <div><span style="color:var(--dim);">Net P&L</span> <strong>${fmtUsd(netUsd)}</strong></div>
+      <div><span style="color:var(--dim);">Win Rate</span> <strong>${history.length ? winRate.toFixed(1) + '%' : '—'}</strong></div>
+      <div><span style="color:var(--dim);">Cycles</span> <strong>${history.length}</strong></div>
+      <div><span style="color:var(--dim);">Fees</span> <strong>-$${feesUsd.toFixed(2)}</strong></div>
+      <div><span style="color:var(--dim);">Funding</span> <strong>-$${fundingUsd.toFixed(2)}</strong></div>
+      <div><span style="color:var(--dim);">Max Drawdown</span> <strong>${session ? session.maxDrawdownPct.toFixed(2) : '0.00'}%</strong></div>
+    </div>
+    <table style="width:100%;font-size:11.5px;border-collapse:collapse;">
+      <thead><tr style="color:var(--dim);text-align:left;">
+        <th>Symbol</th><th>Regime</th><th>Grid Score</th><th>Direction</th><th>Upper/Lower</th><th>Levels</th><th>Open</th><th>Grid P&L</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function initGridPanel(){
+  if(!els.fuGridPanel) return;
+  renderGridPanel();
+  els.fuGridPanel.addEventListener('change', (e) => {
+    const cfg = loadGridConfig();
+    if(e.target.classList.contains('grid-cfg-field')){
+      const key = e.target.dataset.key;
+      const field = GRID_FIELDS.find(f => f.key === key);
+      cfg[key] = field.type === 'number' ? parseFloat(e.target.value) : e.target.value;
+      saveGridConfig(cfg);
+    } else if(e.target.classList.contains('grid-cfg-toggle')){
+      cfg[e.target.dataset.key] = e.target.checked;
+      saveGridConfig(cfg);
+    }
+  });
 }
 
 function initTradeLog(){
@@ -2152,6 +2390,7 @@ export function initFuturesEngine(){
   initLiveMaxDailyLossInput();
   initLiveTimeframeInput();
   initStrategySelector();
+  initGridPanel();
   initLiveTradingControls();
   initTradeLog();
   restoreLivePositions();

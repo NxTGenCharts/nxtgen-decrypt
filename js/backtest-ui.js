@@ -14,6 +14,7 @@ import { STRATEGY_REGISTRY } from './futures/setups.js';
 import { DEFAULT_FEE_CONFIG } from './futures/costs.js';
 import { runBacktest, summarizeTrades } from './futures/backtest.js';
 import { RISK_DEFAULTS } from './futures/risk.js';
+import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, runGridBacktest, summarizeGridTrades } from './futures/grid.js';
 
 let lastResult = null; // kept for CSV/XLS/PDF export after a run
 
@@ -25,20 +26,38 @@ function showBtMessage(msg, kind){
 
 function populateSymbolChecks(){
   if(!els.btSymbolChecks) return;
-  // A reasonable default selection (not literally all 29 tradeable
-  // symbols) so a first run finishes in a sensible time — Select
-  // All/None below make widening or narrowing it a one-click choice.
+  // TRADEABLE_FUTURES_SYMBOLS deliberately EXCLUDES the majors
+  // (BTCUSDT/ETHUSDT/SOLUSDT/BNBUSDT/etc — see engine.js's
+  // EXCLUDED_FUTURES_SYMBOLS) because the six single-entry strategies
+  // trade momentum/reversal patterns those cleaner-moving majors don't
+  // suit as well. NxTGen Grid is the opposite: it specifically WANTS
+  // those deep, liquid majors (see grid.js's GRID_SYMBOLS comment) — so
+  // they're added back into this checklist here, unchecked by default
+  // (so existing default behavior for the six strategies is unchanged),
+  // purely so a Grid backtest run has something to select. The six
+  // detectors still skip these symbols automatically either way
+  // (runBacktest's own EXCLUDED_FUTURES_SYMBOLS guard, unchanged).
+  const allSymbols = Array.from(new Set([...TRADEABLE_FUTURES_SYMBOLS, ...GRID_SYMBOLS]));
+  // A reasonable default selection (not literally every symbol) so a
+  // first run finishes in a sensible time — Select All/None below make
+  // widening or narrowing it a one-click choice.
   const defaultOn = new Set(TRADEABLE_FUTURES_SYMBOLS.slice(0, 10));
-  els.btSymbolChecks.innerHTML = TRADEABLE_FUTURES_SYMBOLS.map(sym => `
-    <label style="display:flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;">
-      <input type="checkbox" class="bt-symbol-check" value="${sym}" ${defaultOn.has(sym) ? 'checked' : ''}>${sym}
+  els.btSymbolChecks.innerHTML = allSymbols.map(sym => `
+    <label style="display:flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;" title="${GRID_SYMBOLS.includes(sym) ? 'Major/liquid pair — used by NxTGen Grid, excluded from the other six strategies' : ''}">
+      <input type="checkbox" class="bt-symbol-check" value="${sym}" ${defaultOn.has(sym) ? 'checked' : ''}>${sym}${GRID_SYMBOLS.includes(sym) ? ' *' : ''}
     </label>
   `).join('');
 }
 
 function populateStrategyChecks(){
   if(!els.btStrategyChecks) return;
-  els.btStrategyChecks.innerHTML = STRATEGY_REGISTRY.map(s => `
+  // NxTGen Grid is appended after the six STRATEGY_REGISTRY entries —
+  // it's rendered here (same checklist, same look) but is NOT part of
+  // STRATEGY_REGISTRY itself, since it runs its own independent engine
+  // (js/futures/grid.js) rather than plugging into detectAllSetups'
+  // single-entry ensemble. See grid.js's header comment for why.
+  const all = [...STRATEGY_REGISTRY, GRID_STRATEGY];
+  els.btStrategyChecks.innerHTML = all.map(s => `
     <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;" title="${s.description.replace(/"/g, '&quot;')}">
       <input type="checkbox" class="bt-strategy-check" value="${s.id}" ${s.defaultEnabled ? 'checked' : ''}>${s.label}
     </label>
@@ -169,7 +188,56 @@ async function runBacktestFlow(){
       metaOverrides: { spreadPct, fundingRatePct },
       onProgress: (frac) => { els.btProgress.textContent = `Simulating… ${Math.round(frac * 100)}%`; },
     });
-    lastResult = { ...result, startingEquity };
+
+    // NxTGen Grid runs as a SEPARATE engine (grid.js) per symbol — see
+    // that file's header comment on why it can't share detectAllSetups'
+    // single-entry ensemble loop. Each symbol's grid deployment is
+    // simulated against its own candle series with its own
+    // startingEquity-sized capital allocation (grid trading sizes a
+    // deployment as a % of an account, not as a fraction of whatever the
+    // six-strategy ensemble happens to have left over); its resulting
+    // trades are merged into the SAME trades array so the existing
+    // by-strategy breakdown, trade list, and CSV/XLS/PDF export all
+    // show NxTGen Grid rows exactly like the other six, with zero new
+    // UI plumbing needed. The equity CURVE chart intentionally still
+    // reflects only the six-strategy ensemble (merging two independently-
+    // capitalized equity curves into one line would misrepresent either
+    // one) — Grid's own net P&L is fully reflected in the stat cards,
+    // breakdown table, and trade list, just not in that specific chart.
+    let gridSummary = null;
+    if(strategies.nxtgenGrid){
+      // Read the user's saved NxTGen Grid config panel settings (see
+      // futures-ui.js's GRID_CONFIG_KEY) if present, falling back to
+      // GRID_DEFAULTS — same "seed from defaults, overlay saved" pattern
+      // the six-strategy config uses (restoreStrategyConfig).
+      let gridCfg = { ...GRID_DEFAULTS };
+      try{
+        const raw = localStorage.getItem('nxtgen_grid_config_v1');
+        if(raw) gridCfg = { ...gridCfg, ...JSON.parse(raw) };
+      }catch(e){ /* ignore — defaults already set */ }
+      const gridSymbols = usableSymbols; // whatever the user actually checked and got real data for
+      const allGridTrades = [];
+      const combinedCounters = { liquidations: 0, emergencyExits: 0, breakoutExits: 0, recalculations: 0 };
+      for(let i = 0; i < gridSymbols.length; i++){
+        const sym = gridSymbols[i];
+        els.btProgress.textContent = `Simulating NxTGen Grid… ${i + 1}/${gridSymbols.length} (${sym})`;
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const gridResult = runGridBacktest({
+          symbol: sym, candles: candlesBySymbol[sym], cfg: gridCfg, startingEquity, exchange,
+          metaOverrides: { spreadPct, fundingRatePct }, intervalMinutes,
+        });
+        allGridTrades.push(...gridResult.trades);
+        combinedCounters.liquidations += gridResult.counters.liquidations;
+        combinedCounters.emergencyExits += gridResult.counters.emergencyExits;
+        combinedCounters.breakoutExits += gridResult.counters.breakoutExits;
+        combinedCounters.recalculations += gridResult.counters.recalculations;
+      }
+      allGridTrades.sort((a, b) => a.closedAtMs - b.closedAtMs);
+      result.trades = result.trades.concat(allGridTrades).sort((a, b) => a.closedAtMs - b.closedAtMs);
+      gridSummary = allGridTrades.length ? summarizeGridTrades(allGridTrades, startingEquity, combinedCounters) : null;
+    }
+
+    lastResult = { ...result, startingEquity, gridSummary };
     renderBacktestResults(lastResult);
     showBtMessage(
       failed.length
@@ -239,6 +307,24 @@ function renderBacktestResults(result){
       </div>
     `).join('')}
   ` : '<div class="fu-empty">No trades to break down.</div>';
+
+  // NxTGen Grid's own trades already flow through stats.byStrategy above
+  // (grouped by setupType, same as every other strategy) — this extra
+  // block just surfaces the grid-specific figures the six single-entry
+  // strategies don't have (liquidations, breakout/emergency exits, grid
+  // recalculations) since those aren't meaningful outside a grid engine.
+  if(els.btByStrategy && result.gridSummary){
+    const g = result.gridSummary;
+    els.btByStrategy.innerHTML += `
+      <div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);font-size:11.5px;color:var(--dim);">
+        <strong style="color:var(--text);">NxTGen Grid detail:</strong>
+        ${g.gridCycles} grid cycles · cycle win rate ${g.gridCycleWinRate.toFixed(1)}% · profit factor ${Number.isFinite(g.profitFactor) ? g.profitFactor.toFixed(2) : '∞'} ·
+        net ${fmtUsd(g.netUsd)} · fees -$${g.feesUsd.toFixed(2)} · funding -$${g.fundingUsd.toFixed(2)} · slippage -$${g.slippageUsd.toFixed(2)} ·
+        largest loss ${fmtUsd(g.largestLossUsd)} · avg cycle ${g.avgDurationMin.toFixed(0)}m ·
+        liquidation exits ${g.liquidations} · emergency exits ${g.emergencyExits} · breakout exits ${g.breakoutExits} · recalculations ${g.recalculations}
+      </div>
+    `;
+  }
 
   els.btTradeRows.innerHTML = result.trades.length ? result.trades.slice(0, 1000).map(t => `
     <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr .9fr;">
