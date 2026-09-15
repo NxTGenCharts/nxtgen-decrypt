@@ -272,9 +272,9 @@ async function runGridLiveCycle(){
 
 async function runGridLiveCycleInner(){
   const f = fu();
-  const exchange = f.liveExchange;
+  const exchange = f.gridLiveExchange;
   if(!GRID_LIVE_EXCHANGES.includes(exchange)){
-    gridLiveLog(`NxTGen Grid Live/Demo only supports Bybit or Binance — switch the exchange selector above to one of those.`, 'error');
+    gridLiveLog(`NxTGen Grid Live/Demo only supports Bybit or Binance — switch the exchange selector in this panel to one of those.`, 'error');
     return;
   }
   const mode = f.liveModeByExchange[exchange] || 'live';
@@ -438,6 +438,18 @@ async function runGridLiveCycleInner(){
     if(!flat.ok) gridLiveLog(`Flatten call failed: ${flat.message} — check ${symbol} on ${exchange} directly.`, 'error');
     if(dailyPnlPct <= -gridCfg.maxDailyLossPct) f.gridLiveDailyHalted = true;
     f.gridLiveState = null;
+  } else if(!f.gridLiveDailyHalted && gridCfg.dailyProfitTargetPct && dailyPnlPct >= gridCfg.dailyProfitTargetPct){
+    // Daily Profit Target hit — same semantics as stepGridSymbol's Paper/
+    // backtest path (grid.js): stop opening NEW grids for the rest of the
+    // day, but don't force-close a grid that's still working. The active
+    // deployment above keeps running/managing itself as normal.
+    // Honesty note: this check only runs while a grid is actively being
+    // managed (this branch), since idle cycles have no cheap equity read
+    // to check it against without an extra balance call every tick — a
+    // narrower window than Paper/backtest's session-level check, but it
+    // catches the common case (a live grid cycling levels toward target).
+    f.gridLiveDailyHalted = true;
+    gridLiveLog(`${symbol}: daily profit target (${gridCfg.dailyProfitTargetPct}%) reached — no new grid deployments until tomorrow. Active grid left running.`, null);
   }
   renderGridDashboard();
 }
@@ -1818,7 +1830,7 @@ function renderStrategyRows(){
       ? `🏆 Best so far (Paper, ${best.stats.trades} trades): <b>${best.strategy.label}</b> — ${best.stats.winRatePct.toFixed(0)}% win rate, ${fmtUsd(best.stats.netUsd)} net${best.stats.profitFactor != null && isFinite(best.stats.profitFactor) ? `, ${best.stats.profitFactor.toFixed(2)} profit factor` : ''}`
       : `No strategy has reached ${MIN_SIGNIFICANT_TRADES} paper trades yet — run Paper mode to build a real sample before trusting any win-rate comparison.`;
   }
-  els.fuStrategyRows.innerHTML = STRATEGY_REGISTRY.map(s => {
+  const strategyRowsHtml = STRATEGY_REGISTRY.map(s => {
     const stats = computeStrategyStats(s.type);
     let statsLine;
     if(stats.trades === 0){
@@ -1852,17 +1864,48 @@ function renderStrategyRows(){
       </div>
     `;
   }).join('');
+
+  // NxTGen Grid — a 7th strategy, structurally different enough (many
+  // simultaneous levels vs. one signal/entry) that its detailed config
+  // lives in its own panel just below (grid.js's header comment explains
+  // why), but the on/off switch itself belongs right here with the other
+  // six so it's not the one strategy the user can't select from this
+  // list. This checkbox and the panel below both read/write the same
+  // GRID_CONFIG_KEY-backed 'enabled' flag, so they can never disagree.
+  const gridCfg = loadGridConfig();
+  const gridEnabled = gridCfg.enabled;
+  if(gridEnabled) enabledCount++;
+  const gridStats = computeStrategyStats(GRID_STRATEGY.type);
+  let gridStatsLine;
+  if(gridStats.trades === 0){
+    gridStatsLine = `<span style="color:var(--dim);">No paper trades yet — enable it here to start building a sample</span>`;
+  } else if(!gridStats.isSignificant){
+    gridStatsLine = `<span style="color:var(--amber);">⏳ ${gridStats.trades}/${MIN_SIGNIFICANT_TRADES} paper trades — not yet enough for a reliable win rate</span> · so far: ${gridStats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(gridStats.netUsd)} net (Paper simulation)`;
+  } else {
+    gridStatsLine = `<span style="color:var(--green);">✓ ${gridStats.trades} paper trades</span> · ${gridStats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(gridStats.netUsd)} net${gridStats.profitFactor != null && isFinite(gridStats.profitFactor) ? ` · ${gridStats.profitFactor.toFixed(2)} profit factor` : ''} — Paper simulation, this browser`;
+  }
+  const gridRowHtml = `
+    <div class="ov-block" style="margin-bottom:10px;padding:12px;border-color:${gridEnabled ? 'var(--line)' : 'var(--line-dim, var(--line))'};opacity:${gridEnabled ? '1' : '.6'};">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:220px;">
+          <label class="toggle-check" style="font-weight:600;">
+            <input type="checkbox" class="fu-strategy-enable" data-id="${GRID_STRATEGY.id}" ${gridEnabled ? 'checked' : ''}>
+            <span>${GRID_STRATEGY.label}</span>
+          </label>
+          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;">${GRID_STRATEGY.description}</div>
+        </div>
+        <div style="min-width:150px;font-size:11px;color:var(--dim);text-align:right;">Levels, leverage, exchange, and Live/Demo controls are configured below ↓</div>
+      </div>
+      <div style="font-size:11px;margin-top:8px;">${gridStatsLine}</div>
+    </div>
+  `;
+
+  els.fuStrategyRows.innerHTML = strategyRowsHtml + gridRowHtml;
   // Shown next to "Strategies" in the collapsed <summary> row (see
   // index.html/css/components.css) so collapsing the section to save
   // space doesn't hide which/how many strategies are actually live.
-  // NxTGen Grid (grid.js's GRID_STRATEGY) is a 7th strategy kept in its
-  // own config/panel (different engine — see grid.js's header comment),
-  // but it's still one of the strategies a user can turn on, so it
-  // counts toward this total too instead of silently sitting outside it.
-  const gridEnabledForBadge = loadGridConfig().enabled;
   const totalStrategyCount = STRATEGY_REGISTRY.length + 1;
-  const totalEnabledCount = enabledCount + (gridEnabledForBadge ? 1 : 0);
-  if(els.fuStrategiesBadge) els.fuStrategiesBadge.textContent = `${totalEnabledCount}/${totalStrategyCount} enabled`;
+  if(els.fuStrategiesBadge) els.fuStrategiesBadge.textContent = `${enabledCount}/${totalStrategyCount} enabled`;
 }
 
 const STRATEGIES_OPEN_KEY = 'nxtgen_futures_strategies_open_v1';
@@ -1886,8 +1929,21 @@ function initStrategySelector(){
     els.fuStrategyRows.addEventListener('change', (e) => {
       const f = fu();
       if(e.target.classList.contains('fu-strategy-enable')){
-        f.strategies[e.target.dataset.id] = e.target.checked;
-        persistStrategyConfig();
+        const id = e.target.dataset.id;
+        if(id === GRID_STRATEGY.id){
+          // Grid's enable flag lives in its own GRID_CONFIG_KEY-backed
+          // config (loadGridConfig/saveGridConfig), not f.strategies —
+          // different engine, different persisted shape (see grid.js's
+          // header comment) — but this checkbox is the same on/off
+          // control as the panel's own, just surfaced here too.
+          const gridCfg = loadGridConfig();
+          gridCfg.enabled = e.target.checked;
+          saveGridConfig(gridCfg);
+          renderGridPanel();
+        } else {
+          f.strategies[id] = e.target.checked;
+          persistStrategyConfig();
+        }
         renderStrategyRows();
       } else if(e.target.classList.contains('fu-strategy-rr')){
         f.strategyRR[e.target.dataset.id] = parseFloat(e.target.value);
@@ -1947,7 +2003,6 @@ const GRID_FIELDS = [
   { key: 'maxGridLevels', label: 'Max Open Grid Positions', type: 'number', min: 5, max: 50 },
 ];
 const GRID_TOGGLES = [
-  { key: 'enabled', label: 'Enabled (Paper)' },
   { key: 'emergencyExitOn', label: 'Emergency Exit' },
   { key: 'fundingFilterOn', label: 'Funding Filter' },
   { key: 'liquidityFilterOn', label: 'Liquidity Filter' },
@@ -1957,15 +2012,19 @@ function renderGridPanel(){
   if(!els.fuGridPanel) return;
   const cfg = loadGridConfig();
   const f = fu();
-  const liveExchangeOk = GRID_LIVE_EXCHANGES.includes(f.liveExchange);
+  const gridExchange = f.gridLiveExchange;
+  const liveExchangeOk = GRID_LIVE_EXCHANGES.includes(gridExchange);
+  const gridMode = f.liveModeByExchange[gridExchange] || 'live';
+  const gridCred = state.exchangeCreds[gridExchange] && state.exchangeCreds[gridExchange][gridMode];
+  const gridCredOk = !!(gridCred && gridCred.apiKey && gridCred.verified);
   els.fuGridPanel.innerHTML = `
     <div class="ov-block" style="margin-top:10px;padding:12px;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
         <div>
           <strong>${GRID_STRATEGY.label}</strong>
           <span style="font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:6px;">Paper + Live/Demo (Bybit/Binance) supported</span>
-          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Toggle "Enabled (Paper)" below to run it against the synthetic feed, check it as the 7th strategy in Backtest for real-historical-data testing, or arm Live/Demo below to trade one real symbol on Bybit or Binance. <strong>Live/Demo is untested against real exchanges — start in Demo and watch it closely before ever arming Live.</strong></div>
-          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">Deployment size per symbol uses the same <strong>Risk per trade (${f.riskPctPerTrade}%)</strong> control as the six single-entry strategies above (Paper Engine section) — e.g. ${f.riskPctPerTrade}% of a $10,000 balance commits $${(10000 * f.riskPctPerTrade / 100).toLocaleString('en-US')} to a grid deployment, not a separate Grid-only allocation setting. Leverage is separately capped at ${Math.min(cfg.maxLeverage, 5)}x below regardless of this.</div>
+          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Turn it on above in the Strategies list to run it against the synthetic feed, check it as the 7th strategy in Backtest for real-historical-data testing, or arm Live/Demo below to trade one real symbol on Bybit or Binance. <strong>Live/Demo is untested against real exchanges — start in Demo and watch it closely before ever arming Live.</strong></div>
+          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">Deployment size per symbol uses the same <strong>Risk per trade (${f.riskPctPerTrade}%)</strong> control as the six single-entry strategies above (Paper Engine section) — e.g. ${f.riskPctPerTrade}% of a $10,000 balance commits $${(10000 * f.riskPctPerTrade / 100).toLocaleString('en-US')} to a grid deployment, not a separate Grid-only allocation setting. Leverage is capped at ${Math.min(cfg.maxLeverage, 5)}x (your Maximum Leverage setting below, hard-ceilinged at 5x) and a deployment stops opening new grids for the day once your Daily Profit Target below is hit.</div>
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:12px;">
@@ -1991,11 +2050,18 @@ function renderGridPanel(){
       <div id="fuGridDashboard" style="margin-top:14px;"></div>
 
       <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line);">
-        <strong style="font-size:12.5px;">Live / Demo (Bybit or Binance only)</strong>
+        <strong style="font-size:12.5px;">Live / Demo (Bybit or Binance)</strong>
         <div style="font-size:11.5px;color:var(--dim);margin:4px 0 8px;">
-          Uses whichever exchange/network is selected above in the Live/Demo controls — currently <strong>${f.liveExchange}${liveExchangeOk ? '' : ' (not supported for Grid — switch to Bybit or Binance)'}</strong>. Runs ONE symbol at a time (see the runGridLiveCycle comment in futures-ui.js for why).
+          Grid picks its own exchange here — independent of the Live/Demo exchange selected above for the six single-entry strategies, so running Grid on one doesn't disturb the other. Runs ONE symbol at a time (see the runGridLiveCycle comment in futures-ui.js for why).
+          ${liveExchangeOk ? (gridCredOk ? `<span style="color:var(--green);"> Verified ${gridMode} key connected for ${EXCHANGE_DISPLAY_NAMES[gridExchange] || gridExchange}.</span>` : `<span style="color:var(--dim);"> No verified ${gridMode} key for ${EXCHANGE_DISPLAY_NAMES[gridExchange] || gridExchange} yet — connect one in Autotrade &amp; Balances.</span>`) : ''}
         </div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <select id="fuGridLiveExchange" style="min-width:110px;" ${f.gridLiveArmed ? 'disabled' : ''}>
+            ${GRID_LIVE_EXCHANGES.map(x => `<option value="${x}" ${gridExchange === x ? 'selected' : ''}>${EXCHANGE_DISPLAY_NAMES[x] || x}</option>`).join('')}
+          </select>
+          <span style="font-size:11px;color:var(--dim);">${gridMode === 'demo' ? 'Demo' : 'Live'} network (set per-exchange in the Live/Demo controls above)</span>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px;">
           <select id="fuGridLiveSymbol" style="min-width:120px;" ${!liveExchangeOk ? 'disabled' : ''}>
             ${GRID_SYMBOLS.map(s => `<option value="${s}" ${f.gridLiveSymbol === s ? 'selected' : ''}>${s}</option>`).join('')}
           </select>
@@ -2041,7 +2107,7 @@ function renderGridDashboard(){
     const resting = gs ? gs.levels.filter(l => l.status === 'PENDING_ENTRY').length : 0;
     liveBlock = `
       <div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:12px;">
-        <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px;">LIVE/DEMO — ${f.gridLiveSymbol} on ${f.liveExchange} (${f.liveModeByExchange[f.liveExchange] || 'live'}) ${f.gridLiveRunning ? '· running' : '· stopped'}</div>
+        <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px;">LIVE/DEMO — ${f.gridLiveSymbol} on ${f.gridLiveExchange} (${f.liveModeByExchange[f.gridLiveExchange] || 'live'}) ${f.gridLiveRunning ? '· running' : '· stopped'}</div>
         <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;margin-bottom:6px;">
           <div><span style="color:var(--dim);">Status</span> <strong>${gs ? 'ACTIVE' : 'No grid'}</strong></div>
           ${gs ? `<div><span style="color:var(--dim);">Grid Score</span> <strong>${gs.plan.gridScore}/100</strong></div>` : ''}
@@ -2128,6 +2194,21 @@ function initGridPanel(){
       renderStrategyRows();
     } else if(e.target.id === 'fuGridLiveSymbol'){
       fu().gridLiveSymbol = e.target.value;
+    } else if(e.target.id === 'fuGridLiveExchange'){
+      const f = fu();
+      const next = e.target.value;
+      if(next !== f.gridLiveExchange){
+        f.gridLiveExchange = next;
+        // Switching exchanges mid-arm would leave Start/Flatten pointed at
+        // credentials for a different account than the one just armed
+        // against — disarm (and stop, if running) the same way the
+        // six-strategy exchange rows force a fresh arm decision on change.
+        if(f.gridLiveArmed){
+          if(f.gridLiveRunning) stopGridLive();
+          f.gridLiveArmed = false;
+        }
+        renderGridPanel();
+      }
     }
   });
   els.fuGridPanel.addEventListener('click', (e) => {
@@ -2149,8 +2230,8 @@ function initGridPanel(){
 function startGridLive(){
   const f = fu();
   if(!f.gridLiveArmed || f.gridLiveRunning) return;
-  if(!GRID_LIVE_EXCHANGES.includes(f.liveExchange)){
-    gridLiveLog('Switch the Live/Demo exchange selector to Bybit or Binance first.', 'error');
+  if(!GRID_LIVE_EXCHANGES.includes(f.gridLiveExchange)){
+    gridLiveLog('Switch this panel\'s exchange selector to Bybit or Binance first.', 'error');
     return;
   }
   f.gridLiveRunning = true;
@@ -2170,7 +2251,7 @@ function stopGridLive(){
 
 async function flattenGridLiveNow(){
   const f = fu();
-  const exchange = f.liveExchange;
+  const exchange = f.gridLiveExchange;
   if(!GRID_LIVE_EXCHANGES.includes(exchange)){ gridLiveLog('Switch to Bybit or Binance to flatten.', 'error'); return; }
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);

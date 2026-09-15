@@ -393,6 +393,13 @@ export const state = {
     // since it drives a completely different order-management model
     // (resting multi-level limit orders, not one market entry + bracket).
     gridLiveSymbol: 'BTCUSDT',
+    // Grid's own exchange choice for Live/Demo — deliberately separate
+    // from liveExchange below (the six single-entry strategies' shared
+    // selector). Grid only ever supports Bybit or Binance (see
+    // GRID_LIVE_EXCHANGES in futures-ui.js), and picking one here no
+    // longer requires switching the six strategies' Live/Demo exchange
+    // away from whatever they're already trading on.
+    gridLiveExchange: 'bybit',
     gridLiveArmed: false,
     gridLiveRunning: false,
     gridLiveTimer: null,
