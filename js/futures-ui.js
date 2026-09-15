@@ -26,7 +26,7 @@ import { RISK_DEFAULTS } from './futures/risk.js';
 import { DEFAULT_WEIGHTS } from './futures/scoring.js';
 import { computeBtcShock } from './futures/indicators.js';
 import { STRATEGY_REGISTRY } from './futures/setups.js';
-import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGridSymbol, closeAllGridSessions, buildGridPlan, detectGridBreakout, netCycleProfit } from './futures/grid.js';
+import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGridSymbol, closeAllGridSessions, buildGridPlan, detectGridBreakout, netCycleProfit, scoreGridSuitability } from './futures/grid.js';
 import { classifyRegime } from './futures/regime.js';
 import { getAiConfirmation } from './ai-signal.js';
 
@@ -247,6 +247,14 @@ function runGridPaperTick(nowMs){
 // safety net layered on top of the real order flow only.
 // =============================================================
 const GRID_LIVE_EXCHANGES = ['bybit', 'binance'];
+// Symbols probed per idle cycle when auto-scanning the watchlist for a
+// deployment — bounded so scanning doesn't multiply real exchange API
+// calls by the whole GRID_SYMBOLS list every LIVE_CYCLE_MS tick. At 4
+// candidates per 8s cycle, a ~28-symbol watchlist gets a full pass in
+// roughly a minute. Once a grid IS active, only that one symbol gets
+// polled (see manageActiveGridLiveDeployment) — this batch size only
+// applies while idle and scanning for the next one.
+const GRID_SCAN_BATCH_SIZE = 4;
 
 function gridLiveLog(msg, kind){
   const host = els.fuGridPanel && els.fuGridPanel.querySelector('#fuGridLiveStatus');
@@ -280,46 +288,71 @@ async function runGridLiveCycleInner(){
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);
   if(!cred){ gridLiveLog(`No verified ${exchange} ${mode} credential — connect it in Autotrade & Balances first.`, 'error'); return; }
-  const symbol = f.gridLiveSymbol;
   const gridCfg = loadGridConfig();
   // Same override as Paper's runGridPaperTick — deployment size tracks
   // the shared "Risk per trade (%)" control (fuRiskPct/fuLiveRiskPct)
   // instead of a separate Grid-only allocation setting.
   gridCfg.maxGridAllocationPct = f.riskPctPerTrade;
-
-  const snap = await fetchLiveSnapshot(exchange, symbol, '5m').catch(err => { gridLiveLog(`Snapshot fetch failed for ${symbol}: ${err.message}`, 'error'); return null; });
-  if(!snap) return;
-  const regime = classifyRegime(snap.h1, snap.m15);
   const nowMs = Date.now();
-  // Sizing a NEW deployment uses the REAL account balance (not the Paper
-  // "Simulation balance" field, which has nothing to do with a real
-  // account) — queried fresh right before deploying, same balance
-  // endpoint the six-strategy Live/Demo code already uses. Once a grid
-  // is already active, its own plan.allocationUsd (fixed at deployment
-  // time) is what sizing derives from — re-querying balance mid-
-  // deployment would let a leg's size drift from what the rest of the
-  // grid was planned against.
-  let equityForSizing = f.gridLiveState ? f.gridLiveState.plan.allocationUsd / (gridCfg.maxGridAllocationPct / 100) : null;
-  rollGridLiveDay(f, nowMs, equityForSizing || 0);
 
-  const proxyArgs = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol };
+  if(f.gridLiveState){
+    await manageActiveGridLiveDeployment(f, exchange, mode, cred, gridCfg, nowMs);
+  } else {
+    await scanForGridLiveDeployment(f, exchange, mode, cred, gridCfg, nowMs);
+  }
+}
 
-  // --- No active deployment: try to start one ---
-  if(!f.gridLiveState){
-    if(f.gridLiveDailyHalted){ gridLiveLog(`Daily loss/profit limit reached — not opening a new grid until tomorrow.`, null); return; }
-    if(equityForSizing == null){
-      const balResp = await callProxy('/api/futures/balance', proxyArgs).catch(err => ({ ok:false, message: err.message }));
-      if(!balResp.ok || balResp.balance == null){ gridLiveLog(`Could not read ${exchange} account balance: ${balResp.message || 'no balance returned'}`, 'error'); return; }
-      equityForSizing = balResp.balance;
-      rollGridLiveDay(f, nowMs, equityForSizing);
-    }
+// --- No active deployment: scan for one. Auto-scan (default) probes a
+// bounded, round-robin batch of the watchlist (GRID_SYMBOLS, the same
+// list Paper/backtest trade) each idle cycle rather than pinning to a
+// single manually-picked pair — a single symbol can easily sit in an
+// unsuitable regime (High Volatility, strong trend, etc.) indefinitely,
+// which is what "it never places a trade" usually means: nothing was
+// wrong, that one pair just never cleared the Grid Score gate. Scanning
+// more of the watchlist means whichever symbol actually presents a
+// profitable grid setup (long or short side, per its own AUTO direction
+// call) is the one that gets deployed. Turning "Scan watchlist" off
+// falls back to the original single pinned-symbol behavior.
+async function scanForGridLiveDeployment(f, exchange, mode, cred, gridCfg, nowMs){
+  if(f.gridLiveDailyHalted){ gridLiveLog(`Daily loss/profit limit reached — not opening a new grid until tomorrow.`, null); return; }
+
+  const proxyArgsBase = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase };
+
+  let candidates;
+  if(f.gridLiveAutoScan){
+    const cursor = f.gridLiveScanCursor % GRID_SYMBOLS.length;
+    const batchSize = Math.min(GRID_SCAN_BATCH_SIZE, GRID_SYMBOLS.length);
+    candidates = Array.from({ length: batchSize }, (_, i) => GRID_SYMBOLS[(cursor + i) % GRID_SYMBOLS.length]);
+    f.gridLiveScanCursor = (cursor + batchSize) % GRID_SYMBOLS.length;
+  } else {
+    candidates = [f.gridLiveSymbol];
+  }
+
+  // Real account balance, queried once per cycle (not once per candidate
+  // symbol) — same balance endpoint the six-strategy Live/Demo code uses.
+  const balResp = await callProxy('/api/futures/balance', proxyArgsBase).catch(err => ({ ok:false, message: err.message }));
+  if(!balResp.ok || balResp.balance == null){ gridLiveLog(`Could not read ${exchange} account balance: ${balResp.message || 'no balance returned'}`, 'error'); return; }
+  const equityForSizing = balResp.balance;
+  rollGridLiveDay(f, nowMs, equityForSizing);
+  if(f.gridLiveDailyHalted){ gridLiveLog(`Daily loss/profit limit reached — not opening a new grid until tomorrow.`, null); return; }
+
+  let bestReject = null; // { symbol, score, regime } — closest candidate this batch, just for the status message
+  for(const symbol of candidates){
+    const snap = await fetchLiveSnapshot(exchange, symbol, '5m').catch(err => { gridLiveLog(`Snapshot fetch failed for ${symbol}: ${err.message}`, 'error'); return null; });
+    if(!snap) continue;
+    const regime = classifyRegime(snap.h1, snap.m15);
+    const suitability = scoreGridSuitability(snap, regime, gridCfg);
+    if(!bestReject || suitability.score > bestReject.score) bestReject = { symbol, score: suitability.score, regime: regime.regime };
+    if(!suitability.regimeOk || suitability.score < gridCfg.minGridScore) continue;
+
     const plan = buildGridPlan(symbol, snap, regime, gridCfg, equityForSizing);
-    if(!plan){ gridLiveLog(`${symbol}: market not currently suitable for a grid (regime ${regime.regime}) — waiting.`, null); return; }
+    if(!plan) continue; // buildGridPlan is the real source of truth; the score check above is just to pick a candidate worth trying
 
+    const proxyArgs = { ...proxyArgsBase, symbol };
     const modeCheck = await callProxy('/api/futures/grid/ensure-mode', proxyArgs);
     if(!modeCheck.ok || (modeCheck.hedgeModeReady === false)){
       gridLiveLog(modeCheck.message || `Could not confirm hedge mode for ${symbol} on ${exchange}.`, 'error');
-      return;
+      continue; // try the next candidate rather than giving up the whole cycle
     }
 
     gridLiveLog(`${symbol}: deploying grid (score ${plan.gridScore}/100, ${plan.levelCount} levels, ${plan.direction})…`, null);
@@ -339,16 +372,44 @@ async function runGridLiveCycleInner(){
       if(!placed.ok){ gridLiveLog(`Level ${li} (${levelPrice.toFixed(6)}) skipped: ${placed.message}`, null); continue; }
       levels.push({ levelIndex: li, price: levelPrice, direction, status: 'PENDING_ENTRY', entryOrderId: placed.orderId, targetIndex: wantLong ? li + 1 : li - 1 });
     }
-    if(levels.length === 0){ gridLiveLog(`${symbol}: no grid levels could be placed — see messages above. Not marking a grid active.`, 'error'); return; }
+    if(levels.length === 0){ gridLiveLog(`${symbol}: no grid levels could be placed — see messages above. Trying the next candidate.`, 'error'); continue; }
 
     f.gridLiveState = { id: `GRID-${symbol.replace('USDT', '')}-${nowMs}`, plan, levels, longStopSet: false, shortStopSet: false, realizedUsd: 0, openedAt: nowMs };
+    f.gridLiveSymbol = symbol; // keep the manual/last-picked symbol field in sync with whatever the scan actually deployed
     gridLiveLog(`${symbol}: grid ACTIVE — ${levels.length}/${plan.levelCount} levels resting.`, null);
     renderGridDashboard();
-    return; // one deployment step per cycle — manage it starting next cycle
+    return; // one deployment per cycle — manage it starting next cycle
   }
 
-  // --- Active deployment: manage it ---
+  // Nothing in this batch cleared the gate.
+  if(f.gridLiveAutoScan){
+    gridLiveLog(`Scanned ${candidates.join(', ')} — none suitable this cycle${bestReject ? ` (closest: ${bestReject.symbol} at ${bestReject.score}/${gridCfg.minGridScore}, regime ${bestReject.regime})` : ''}. Continuing scan next cycle.`, null);
+  } else {
+    gridLiveLog(`${candidates[0]}: market not currently suitable for a grid (regime ${bestReject ? bestReject.regime : '—'}) — waiting.`, null);
+  }
+}
+
+// --- Active deployment: manage it. Fixed to whichever symbol it's
+// actually running on (gs.plan.symbol) regardless of what the scan
+// cursor or manual dropdown is currently pointed at — unchanged
+// mechanics from the original single-symbol version; see this section's
+// header comment for the polling design and why it's one symbol at a
+// time once deployed.
+async function manageActiveGridLiveDeployment(f, exchange, mode, cred, gridCfg, nowMs){
   const gs = f.gridLiveState;
+  const symbol = gs.plan.symbol;
+  const proxyArgs = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol };
+
+  const snap = await fetchLiveSnapshot(exchange, symbol, '5m').catch(err => { gridLiveLog(`Snapshot fetch failed for ${symbol}: ${err.message}`, 'error'); return null; });
+  if(!snap) return;
+
+  // Sizing an already-active deployment derives from its own fixed
+  // plan.allocationUsd (set at deployment time) rather than re-querying
+  // balance mid-deployment, which would let a leg's size drift from what
+  // the rest of the grid was planned against.
+  const equityForSizing = gs.plan.allocationUsd / (gridCfg.maxGridAllocationPct / 100);
+  rollGridLiveDay(f, nowMs, equityForSizing);
+
   const bo = detectGridBreakout(snap, gs.plan, gridCfg);
   if(bo.breakout){
     gridLiveLog(`${symbol}: BREAKOUT detected (${bo.reasons[0] || ''}) — flattening grid.`, 'error');
@@ -443,11 +504,6 @@ async function runGridLiveCycleInner(){
     // backtest path (grid.js): stop opening NEW grids for the rest of the
     // day, but don't force-close a grid that's still working. The active
     // deployment above keeps running/managing itself as normal.
-    // Honesty note: this check only runs while a grid is actively being
-    // managed (this branch), since idle cycles have no cheap equity read
-    // to check it against without an extra balance call every tick — a
-    // narrower window than Paper/backtest's session-level check, but it
-    // catches the common case (a live grid cycling levels toward target).
     f.gridLiveDailyHalted = true;
     gridLiveLog(`${symbol}: daily profit target (${gridCfg.dailyProfitTargetPct}%) reached — no new grid deployments until tomorrow. Active grid left running.`, null);
   }
@@ -2023,7 +2079,7 @@ function renderGridPanel(){
         <div>
           <strong>${GRID_STRATEGY.label}</strong>
           <span style="font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:6px;">Paper + Live/Demo (Bybit/Binance) supported</span>
-          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Turn it on above in the Strategies list to run it against the synthetic feed, check it as the 7th strategy in Backtest for real-historical-data testing, or arm Live/Demo below to trade one real symbol on Bybit or Binance. <strong>Live/Demo is untested against real exchanges — start in Demo and watch it closely before ever arming Live.</strong></div>
+          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Turn it on above in the Strategies list to run it against the synthetic feed, check it as the 7th strategy in Backtest for real-historical-data testing, or arm Live/Demo below to scan the watchlist on Bybit or Binance and deploy on whichever symbol presents a valid grid. <strong>Live/Demo is untested against real exchanges — start in Demo and watch it closely before ever arming Live.</strong></div>
           <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">Deployment size per symbol uses the same <strong>Risk per trade (${f.riskPctPerTrade}%)</strong> control as the six single-entry strategies above (Paper Engine section) — e.g. ${f.riskPctPerTrade}% of a $10,000 balance commits $${(10000 * f.riskPctPerTrade / 100).toLocaleString('en-US')} to a grid deployment, not a separate Grid-only allocation setting. Leverage is capped at ${Math.min(cfg.maxLeverage, 5)}x (your Maximum Leverage setting below, hard-ceilinged at 5x) and a deployment stops opening new grids for the day once your Daily Profit Target below is hit.</div>
         </div>
       </div>
@@ -2052,7 +2108,7 @@ function renderGridPanel(){
       <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line);">
         <strong style="font-size:12.5px;">Live / Demo (Bybit or Binance)</strong>
         <div style="font-size:11.5px;color:var(--dim);margin:4px 0 8px;">
-          Grid picks its own exchange here — independent of the Live/Demo exchange selected above for the six single-entry strategies, so running Grid on one doesn't disturb the other. Runs ONE symbol at a time (see the runGridLiveCycle comment in futures-ui.js for why).
+          Grid picks its own exchange here — independent of the Live/Demo exchange selected above for the six single-entry strategies, so running Grid on one doesn't disturb the other. With "Scan watchlist" on (default), it probes a few symbols from the same watchlist as Paper/Backtest each idle cycle and deploys on the first that presents a valid grid setup (long or short side) — no single pinned pair to sit idle in an unsuitable regime. Manages ONE deployment at a time (see the runGridLiveCycle comment in futures-ui.js for why).
           ${liveExchangeOk ? (gridCredOk ? `<span style="color:var(--green);"> Verified ${gridMode} key connected for ${EXCHANGE_DISPLAY_NAMES[gridExchange] || gridExchange}.</span>` : `<span style="color:var(--dim);"> No verified ${gridMode} key for ${EXCHANGE_DISPLAY_NAMES[gridExchange] || gridExchange} yet — connect one in Autotrade &amp; Balances.</span>`) : ''}
         </div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
@@ -2062,9 +2118,15 @@ function renderGridPanel(){
           <span style="font-size:11px;color:var(--dim);">${gridMode === 'demo' ? 'Demo' : 'Live'} network (set per-exchange in the Live/Demo controls above)</span>
         </div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px;">
-          <select id="fuGridLiveSymbol" style="min-width:120px;" ${!liveExchangeOk ? 'disabled' : ''}>
+          <label class="toggle-check" style="font-size:12px;">
+            <input type="checkbox" id="fuGridLiveAutoScan" ${f.gridLiveAutoScan ? 'checked' : ''} ${f.gridLiveArmed ? 'disabled' : ''}>
+            <span>Scan watchlist (${GRID_SYMBOLS.length} symbols)</span>
+          </label>
+          <select id="fuGridLiveSymbol" style="min-width:120px;" ${(!liveExchangeOk || f.gridLiveAutoScan) ? 'disabled' : ''} title="${f.gridLiveAutoScan ? 'Uncheck \'Scan watchlist\' to pin a single symbol' : ''}">
             ${GRID_SYMBOLS.map(s => `<option value="${s}" ${f.gridLiveSymbol === s ? 'selected' : ''}>${s}</option>`).join('')}
           </select>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px;">
           <button type="button" id="fuGridLiveArmBtn" class="primary ghost" style="font-size:12px;padding:5px 12px;" ${!liveExchangeOk ? 'disabled' : ''}>${f.gridLiveArmed ? 'Armed' : 'Arm'}</button>
           <button type="button" id="fuGridLiveStartBtn" class="primary" style="font-size:12px;padding:5px 12px;" ${!f.gridLiveArmed ? 'disabled' : ''}>${f.gridLiveRunning ? 'Running…' : 'Start'}</button>
           <button type="button" id="fuGridLiveStopBtn" class="primary ghost" style="font-size:12px;padding:5px 12px;" ${!f.gridLiveRunning ? 'disabled' : ''}>Stop</button>
@@ -2107,7 +2169,7 @@ function renderGridDashboard(){
     const resting = gs ? gs.levels.filter(l => l.status === 'PENDING_ENTRY').length : 0;
     liveBlock = `
       <div style="border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:12px;">
-        <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px;">LIVE/DEMO — ${f.gridLiveSymbol} on ${f.gridLiveExchange} (${f.liveModeByExchange[f.gridLiveExchange] || 'live'}) ${f.gridLiveRunning ? '· running' : '· stopped'}</div>
+        <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px;">LIVE/DEMO — ${gs ? gs.plan.symbol : (f.gridLiveAutoScan ? 'scanning watchlist…' : f.gridLiveSymbol)} on ${f.gridLiveExchange} (${f.liveModeByExchange[f.gridLiveExchange] || 'live'}) ${f.gridLiveRunning ? '· running' : '· stopped'}</div>
         <div style="display:flex;gap:18px;flex-wrap:wrap;font-size:12px;margin-bottom:6px;">
           <div><span style="color:var(--dim);">Status</span> <strong>${gs ? 'ACTIVE' : 'No grid'}</strong></div>
           ${gs ? `<div><span style="color:var(--dim);">Grid Score</span> <strong>${gs.plan.gridScore}/100</strong></div>` : ''}
@@ -2194,6 +2256,9 @@ function initGridPanel(){
       renderStrategyRows();
     } else if(e.target.id === 'fuGridLiveSymbol'){
       fu().gridLiveSymbol = e.target.value;
+    } else if(e.target.id === 'fuGridLiveAutoScan'){
+      fu().gridLiveAutoScan = e.target.checked;
+      renderGridPanel();
     } else if(e.target.id === 'fuGridLiveExchange'){
       const f = fu();
       const next = e.target.value;
@@ -2235,7 +2300,7 @@ function startGridLive(){
     return;
   }
   f.gridLiveRunning = true;
-  gridLiveLog(`Starting NxTGen Grid Live/Demo on ${f.gridLiveSymbol}…`, null);
+  gridLiveLog(f.gridLiveAutoScan ? `Starting NxTGen Grid Live/Demo — scanning the watchlist for a deployment…` : `Starting NxTGen Grid Live/Demo on ${f.gridLiveSymbol}…`, null);
   runGridLiveCycle();
   f.gridLiveTimer = setInterval(runGridLiveCycle, LIVE_CYCLE_MS);
   renderGridPanel();
@@ -2256,11 +2321,17 @@ async function flattenGridLiveNow(){
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);
   if(!cred){ gridLiveLog(`No verified ${exchange} ${mode} credential.`, 'error'); return; }
-  gridLiveLog(`Flattening ${f.gridLiveSymbol} on ${exchange}…`, null);
-  const result = await callProxy('/api/futures/grid/flatten', { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: f.gridLiveSymbol }).catch(err => ({ ok:false, message: err.message }));
+  // Flatten whatever's actually deployed (gridLiveState.plan.symbol) —
+  // with auto-scan on, that can differ from the manual dropdown's value.
+  // Fall back to the dropdown only if there's no tracked active symbol,
+  // so the button still does something sensible if state was lost.
+  const symbol = f.gridLiveState ? f.gridLiveState.plan.symbol : f.gridLiveSymbol;
+  if(!symbol){ gridLiveLog('No symbol to flatten — nothing tracked as active.', 'error'); return; }
+  gridLiveLog(`Flattening ${symbol} on ${exchange}…`, null);
+  const result = await callProxy('/api/futures/grid/flatten', { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol }).catch(err => ({ ok:false, message: err.message }));
   if(result.ok){
     f.gridLiveState = null;
-    gridLiveLog(`${f.gridLiveSymbol} flattened.`, null);
+    gridLiveLog(`${symbol} flattened.`, null);
     renderGridDashboard();
   } else {
     gridLiveLog(`Flatten failed: ${result.message}`, 'error');

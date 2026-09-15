@@ -393,6 +393,16 @@ export const state = {
     // since it drives a completely different order-management model
     // (resting multi-level limit orders, not one market entry + bracket).
     gridLiveSymbol: 'BTCUSDT',
+    // Auto-scan: cycles through GRID_SYMBOLS (the same watchlist Paper/
+    // backtest use) looking for one that clears the Grid Score gate,
+    // instead of being pinned to a single manually-picked pair — see
+    // scanForGridLiveDeployment's header comment in futures-ui.js.
+    // gridLiveScanCursor is the round-robin position so idle scanning
+    // covers the whole watchlist a few symbols per cycle rather than
+    // hammering every symbol's API calls at once. Turning autoScan off
+    // falls back to the old single-symbol behavior (gridLiveSymbol only).
+    gridLiveAutoScan: true,
+    gridLiveScanCursor: 0,
     // Grid's own exchange choice for Live/Demo — deliberately separate
     // from liveExchange below (the six single-entry strategies' shared
     // selector). Grid only ever supports Bybit or Binance (see
