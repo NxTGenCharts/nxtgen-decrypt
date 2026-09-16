@@ -71,30 +71,6 @@ export const GRID_DEFAULTS = {
   breakoutSensitivityAtr: 1.2,  // candle close beyond boundary by this many ATRs, confirmed
   breakoutVolumeMult: 1.4,      // + volume expansion at least this much, to filter false breakouts
   recalcDriftPct: 35,           // % of grid half-width the price must drift beyond boundary (without a confirmed breakout) before recalculating
-  // Per-level hard stop. FIRST VERSION of this (legStopLossMultiple,
-  // a fraction of the level's own spacingPct) fixed the RR problem —
-  // avg win/loss came back ~1:1 in the user's real Backtest re-run —
-  // but tanked the win rate to 33.8% (506/772 legs stopped out) and net
-  // P&L was still negative. Root cause: spacingPct is calibrated for
-  // fee-clearing profit capture (roughly 0.55x ATR, see rawSpacingPct
-  // above), NOT for how far price normally wobbles before a mean-
-  // reversion leg actually completes — a stop at 0.65x THAT (≈0.36x
-  // ATR, well under one typical 5m candle's own range) sits inside
-  // ordinary noise, so most legs got stopped before ever reverting.
-  // Re-based on ATR(5m) instead — a measure of actual local
-  // noise/volatility, on the same timeframe/indicator detectGridBreakout
-  // already uses for its own distance check — so the stop scales with
-  // what the market is really doing near this level, independent of how
-  // tight the profit spacing was set. 1.3x ATR(5m) is a starting point,
-  // not a validated number — I have no network access to Bybit's API in
-  // this environment to re-run the real backtest myself and check where
-  // it actually lands. Re-run your Backtest after this change: if win
-  // rate is still low, legs are still getting stopped before completing
-  // — raise legStopLossAtrMult (UI: "Grid Stop-Loss (x ATR)"); if win
-  // rate looks strong, try lowering it to tighten losses further and
-  // see whether the ratio still holds up.
-  legStopLossAtrMult: 1.3,
-  minLegStopLossPct: 0.15,      // floor so a very low-ATR moment's stop isn't degenerately tight
   fundingFilterOn: true,
   liquidityFilterOn: true,
   minVolume24hUsd: 15_000_000,
@@ -270,19 +246,11 @@ export function buildGridPlan(symbol, snap, regime, cfg, accountEquity){
 
   const leverage = Math.min(c.maxLeverage, 5);
   const allocationUsd = accountEquity * (c.maxGridAllocationPct / 100);
-  // Stop distance now tracks real local noise (ATR on the SAME 5m
-  // timeframe stepGridSymbol/detectGridBreakout check bars against),
-  // not a fraction of spacingPct — see the GRID_DEFAULTS comment on
-  // legStopLossAtrMult for why the earlier spacing-fraction version
-  // stopped out most legs before they could revert.
-  const atrM5 = atr(snap.m5, 14) || s.atrM15 || 0;
-  const atrM5Pct = mid ? (atrM5 / mid) * 100 : 0;
-  const legStopLossPct = Math.max(atrM5Pct * c.legStopLossAtrMult, c.minLegStopLossPct);
 
   return {
     symbol, direction, upper, lower, levels, spacingPct, levelCount,
     gridScore: s.score, scoreBreakdown: s.breakdown, scoreReasons: s.reasons,
-    leverage, allocationUsd, minNetProfitPct: c.minNetProfitPct, legStopLossPct,
+    leverage, allocationUsd, minNetProfitPct: c.minNetProfitPct,
     regime: regime.regime, atrM15: s.atrM15, mid,
   };
 }
@@ -361,11 +329,11 @@ export function stepGridSymbol(session, { symbol, snap, regime, bar, nowMs, cfg,
 
   let grid = session.grids[symbol] || null;
 
-  function closeLeg(leg, exitPrice, exitReason, exitExecution = 'TAKER'){
+  function closeLeg(leg, exitPrice, exitReason){
     const pnl = netCycleProfit({
       entryPrice: leg.entry, exitPrice, qty: leg.qty, leverage: grid.leverage, direction: leg.direction,
       exchange, holdMinutes: (nowMs - leg.openedAt) / 60_000, fundingRatePct: (metaOverrides && metaOverrides.fundingRatePct) || 0,
-      slippagePct: (metaOverrides && metaOverrides.spreadPct) || 0.02, exitExecution,
+      slippagePct: (metaOverrides && metaOverrides.spreadPct) || 0.02,
     });
     session.equity += pnl.netUsd;
     session.peakEquity = Math.max(session.peakEquity, session.equity);
@@ -436,28 +404,8 @@ export function stepGridSymbol(session, { symbol, snap, regime, bar, nowMs, cfg,
       if(grid.openLegs.length >= c.maxGridLevels) continue;
       const direction = wantLong ? 'LONG' : 'SHORT';
       const qty = perLevelUsd * grid.leverage / levelPrice;
-      const stopPrice = direction === 'LONG'
-        ? levelPrice * (1 - grid.legStopLossPct / 100)
-        : levelPrice * (1 + grid.legStopLossPct / 100);
       grid.filledLevel[li] = true;
-      grid.openLegs.push({ levelIndex: li, entry: levelPrice, qty, direction, openedAt: nowMs, targetIndex: wantLong ? li + 1 : li - 1, stopPrice });
-    }
-
-    // Hard per-leg stop, checked before targets: caps any one leg's loss
-    // to roughly grid.legStopLossPct regardless of how far price keeps
-    // running past it, instead of leaving that leg open until a grid-wide
-    // event (breakout/recalc/emergency) eventually closes it — which is
-    // what let losing legs run several levels deeper than a winning leg
-    // ever earns. The level is freed (not permanently abandoned) so the
-    // grid can re-fill it if price comes back, same as a normal TP cycle.
-    for(const leg of grid.openLegs.slice()){
-      if(leg.stopPrice == null) continue;
-      const stopped = leg.direction === 'LONG' ? bar.l <= leg.stopPrice : bar.h >= leg.stopPrice;
-      if(!stopped) continue;
-      const pnl = closeLeg(leg, leg.stopPrice, 'GRID_LEG_STOP_LOSS');
-      grid.realizedUsd += pnl.netUsd;
-      grid.openLegs = grid.openLegs.filter(l => l !== leg);
-      grid.filledLevel[leg.levelIndex] = false;
+      grid.openLegs.push({ levelIndex: li, entry: levelPrice, qty, direction, openedAt: nowMs, targetIndex: wantLong ? li + 1 : li - 1 });
     }
 
     for(const leg of grid.openLegs.slice()){
@@ -471,7 +419,7 @@ export function stepGridSymbol(session, { symbol, snap, regime, bar, nowMs, cfg,
         slippagePct: (metaOverrides && metaOverrides.spreadPct) || 0.02,
       });
       if(check.netPct < grid.minNetProfitPct) continue;
-      const pnl = closeLeg(leg, targetPrice, 'GRID_CYCLE_TP', 'MAKER');
+      const pnl = closeLeg(leg, targetPrice, 'GRID_CYCLE_TP');
       grid.realizedUsd += pnl.netUsd;
       grid.openLegs = grid.openLegs.filter(l => l !== leg);
       grid.filledLevel[leg.levelIndex] = false;
@@ -519,7 +467,7 @@ export function closeAllGridSessions(session, priceBySymbol, nowMs, exchange, me
       const pnl = netCycleProfit({
         entryPrice: leg.entry, exitPrice: price, qty: leg.qty, leverage: grid.leverage, direction: leg.direction,
         exchange, holdMinutes: (nowMs - leg.openedAt) / 60_000, fundingRatePct: (metaOverrides && metaOverrides.fundingRatePct) || 0,
-        slippagePct: (metaOverrides && metaOverrides.spreadPct) || 0.02, exitExecution: 'TAKER',
+        slippagePct: (metaOverrides && metaOverrides.spreadPct) || 0.02,
       });
       session.equity += pnl.netUsd;
       trades.push({
@@ -543,21 +491,14 @@ export function closeAllGridSessions(session, priceBySymbol, nowMs, exchange, me
 // fee - slippage - funding accrued) clears minNetProfitPct. This is the
 // gate described in the spec's "FEE-AWARE GRID" section.
 // -------------------------------------------------------------
-export function netCycleProfit({ entryPrice, exitPrice, qty, leverage, direction, exchange, holdMinutes, fundingRatePct, slippagePct, exitExecution }){
+export function netCycleProfit({ entryPrice, exitPrice, qty, leverage, direction, exchange, holdMinutes, fundingRatePct, slippagePct }){
   const fees = DEFAULT_FEE_CONFIG[exchange] || DEFAULT_FEE_CONFIG.binance;
   const notional = entryPrice * qty;
   const sign = direction === 'LONG' ? 1 : -1;
   const grossPct = ((exitPrice - entryPrice) / entryPrice) * sign * 100;
   const grossUsd = notional * (grossPct / 100);
-  const entryFeeUsd = notional * (fees.makerPct / 100); // entry is always a resting grid limit order
-  // Exit fee depends on HOW the position actually closes: a normal grid-
-  // cycle take-profit is itself a resting limit order at the next level
-  // (maker). A stop-loss, breakout, liquidation-risk, emergency, daily-
-  // loss, or recalculation exit is a forced market close (taker) — using
-  // maker for those (as this used to, unconditionally) understated every
-  // loss's real cost and made losers look cheaper than they actually are.
-  const exitFeePct = exitExecution === 'TAKER' ? fees.takerPct : fees.makerPct;
-  const exitFeeUsd = (exitPrice * qty) * (exitFeePct / 100);
+  const entryFeeUsd = notional * (fees.makerPct / 100);
+  const exitFeeUsd = (exitPrice * qty) * (fees.makerPct / 100); // both legs assumed maker/limit fills — the whole point of resting grid orders
   const slippageUsd = notional * ((slippagePct || 0) / 100);
   const fundingPeriods = Math.max(0, holdMinutes || 0) / (8 * 60);
   const fundingUsd = notional * Math.abs(fundingRatePct || 0) / 100 * fundingPeriods;
