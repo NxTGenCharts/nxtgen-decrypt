@@ -26,7 +26,8 @@ import { RISK_DEFAULTS } from './futures/risk.js';
 import { DEFAULT_WEIGHTS } from './futures/scoring.js';
 import { computeBtcShock } from './futures/indicators.js';
 import { STRATEGY_REGISTRY } from './futures/setups.js';
-import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGridSymbol, closeAllGridSessions, buildGridPlan, detectGridBreakout, netCycleProfit, scoreGridSuitability } from './futures/grid.js';
+import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGridSymbol, closeAllGridSessions, buildGridPlan, buildManualGridPlan, detectGridBreakout, netCycleProfit, scoreGridSuitability } from './futures/grid.js';
+import { DCA_STRATEGY, DCA_DEFAULTS, buildDcaPlan, computeDcaExitPrices } from './futures/dca.js';
 import { classifyRegime } from './futures/regime.js';
 import { getAiConfirmation } from './ai-signal.js';
 
@@ -2893,6 +2894,535 @@ function initLiveTimeframeInput(){
   }
 }
 
+// =============================================================
+// Trading Bots — user-CREATED Futures Grid + DCA bots. Bybit/Binance,
+// Live/Demo only, real orders. Deliberately separate from NxTGen Grid
+// above: that's one auto-scanning strategy with its own Grid Score gate;
+// these are bots the person configures directly (price range, safety
+// orders, investment, etc — like a manual grid/DCA bot creator) and
+// several can run side by side, each on its own symbol/exchange. No
+// Paper/backtest path for these yet — see dca.js's header comment for
+// why that's a deliberate, statable scope choice rather than an
+// oversight.
+// =============================================================
+const TRADING_BOT_TYPES = { grid: 'Futures Grid', dca: 'DCA' };
+const TRADING_BOTS_CYCLE_MS = 8000; // same conservative real-API cadence as NxTGen Grid Live/Demo
+
+function newTradingBotId(type){ return `BOT-${type.toUpperCase()}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`; }
+
+function tradingBotLog(bot, msg, isError){
+  bot.statusMessage = msg;
+  bot.statusIsError = !!isError;
+  renderTradingBotsList();
+}
+
+// Same three-estimate blend buildGridPlan uses internally, exposed here
+// standalone for the create-form's "Smart Fill" button — suggests a
+// starting price range the person can then edit, rather than making
+// them guess one from scratch. Not a suitability gate (no minGridScore
+// check) since a Trading Bots Grid bot deploys on demand, whatever the
+// current regime — Smart Fill is a starting point, not a gatekeeper.
+function suggestGridRange(snap, regime){
+  const s = scoreGridSuitability(snap, regime, GRID_DEFAULTS);
+  const mid = s.vwapM15 || snap.price;
+  const atrHalfWidth = (s.atrM15 || 0) * 2.2;
+  const bbHalfWidth = s.bb ? (s.bb.upper - s.bb.lower) / 2 : atrHalfWidth;
+  const swingHalfWidth = (s.resistance - s.support) / 2 || atrHalfWidth;
+  let halfWidth = (atrHalfWidth + bbHalfWidth + swingHalfWidth) / 3;
+  halfWidth = Math.min(Math.max(halfWidth, mid * 0.75 / 100), mid * 8 / 100);
+  return { upper: mid + halfWidth, lower: mid - halfWidth, mid };
+}
+
+function renderTradingBotsCreate(){
+  if(!els.fuTradingBotsCreate) return;
+  const f = fu();
+  const type = f.tbCreateType || 'grid';
+  const exchange = f.tbCreateExchange || 'bybit';
+  const mode = f.liveModeByExchange[exchange] || 'live';
+  els.fuTradingBotsCreate.innerHTML = `
+    <div class="ov-block" style="padding:12px;margin-bottom:12px;">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;">
+        <label style="font-size:11px;color:var(--dim);">Bot Type
+          <select id="tbType" style="display:block;margin-top:3px;min-width:140px;">
+            ${Object.entries(TRADING_BOT_TYPES).map(([k, v]) => `<option value="${k}" ${type === k ? 'selected' : ''}>${v}</option>`).join('')}
+          </select>
+        </label>
+        <label style="font-size:11px;color:var(--dim);">Exchange
+          <select id="tbExchange" style="display:block;margin-top:3px;min-width:110px;">
+            ${GRID_LIVE_EXCHANGES.map(x => `<option value="${x}" ${exchange === x ? 'selected' : ''}>${EXCHANGE_DISPLAY_NAMES[x] || x}</option>`).join('')}
+          </select>
+        </label>
+        <div style="font-size:11px;color:var(--dim);align-self:flex-end;padding-bottom:6px;">${mode === 'demo' ? 'Demo' : 'Live'} network (set per-exchange in the Live/Demo controls above)</div>
+        <label style="font-size:11px;color:var(--dim);">Symbol
+          <input id="tbSymbol" type="text" placeholder="e.g. AVAXUSDT" value="${f.tbCreateSymbol || ''}" style="display:block;margin-top:3px;min-width:130px;text-transform:uppercase;">
+        </label>
+      </div>
+      <div id="tbTypeFields"></div>
+      <div id="tbCreateStatus" style="font-size:11.5px;color:var(--dim);margin-top:8px;"></div>
+      <button type="button" id="tbCreateBtn" class="primary" style="font-size:12px;padding:6px 16px;margin-top:10px;">Create Now</button>
+    </div>
+  `;
+  renderTradingBotTypeFields();
+}
+
+function renderTradingBotTypeFields(){
+  const host = document.getElementById('tbTypeFields');
+  if(!host) return;
+  const f = fu();
+  const type = f.tbCreateType || 'grid';
+  if(type === 'grid'){
+    const cfg = f.tbGridForm || (f.tbGridForm = { direction: 'NEUTRAL', upper: '', lower: '', levelCount: 20, leverage: 5, investmentUsd: 100 });
+    host.innerHTML = `
+      <div style="display:flex;gap:10px;margin-bottom:10px;">
+        ${['NEUTRAL', 'LONG', 'SHORT'].map(d => `<button type="button" class="primary ${cfg.direction === d ? '' : 'ghost'} tb-grid-direction" data-dir="${d}" style="font-size:12px;padding:5px 14px;">${d === 'NEUTRAL' ? 'Neutral' : d === 'LONG' ? 'Long' : 'Short'}</button>`).join('')}
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
+        <label style="font-size:11px;color:var(--dim);">Price Range (lower)
+          <input id="tbGridLower" type="number" step="any" value="${cfg.lower}" style="display:block;margin-top:3px;min-width:110px;">
+        </label>
+        <label style="font-size:11px;color:var(--dim);">Price Range (upper)
+          <input id="tbGridUpper" type="number" step="any" value="${cfg.upper}" style="display:block;margin-top:3px;min-width:110px;">
+        </label>
+        <button type="button" id="tbGridSmartFill" class="primary ghost" style="font-size:11px;padding:5px 10px;">Smart Fill</button>
+        <label style="font-size:11px;color:var(--dim);">Grids
+          <input id="tbGridLevels" type="number" min="2" max="150" step="1" value="${cfg.levelCount}" style="display:block;margin-top:3px;min-width:80px;">
+        </label>
+        <label style="font-size:11px;color:var(--dim);">Leverage
+          <input id="tbGridLeverage" type="number" min="1" max="50" step="1" value="${cfg.leverage}" style="display:block;margin-top:3px;min-width:80px;">
+        </label>
+        <label style="font-size:11px;color:var(--dim);">Total Investment (USDT)
+          <input id="tbGridInvestment" type="number" min="1" step="any" value="${cfg.investmentUsd}" style="display:block;margin-top:3px;min-width:120px;">
+        </label>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-top:8px;">Neutral holds a long AND short leg at once (needs Bybit/Binance hedge mode — this bot switches it on for you on Bybit; on Binance it's account-wide, so you'll be asked to switch it yourself once). Long/Short only takes one side.</div>
+    `;
+  } else {
+    const cfg = f.tbDcaForm || (f.tbDcaForm = { direction: 'LONG', baseOrderUsd: DCA_DEFAULTS.baseOrderUsd, safetyOrderUsd: DCA_DEFAULTS.safetyOrderUsd, maxSafetyOrders: DCA_DEFAULTS.maxSafetyOrders, priceDeviationPct: DCA_DEFAULTS.priceDeviationPct, stepScale: DCA_DEFAULTS.stepScale, volumeScale: DCA_DEFAULTS.volumeScale, takeProfitPct: DCA_DEFAULTS.takeProfitPct, stopLossPct: '', leverage: DCA_DEFAULTS.leverage });
+    host.innerHTML = `
+      <div style="display:flex;gap:10px;margin-bottom:10px;">
+        ${['LONG', 'SHORT'].map(d => `<button type="button" class="primary ${cfg.direction === d ? '' : 'ghost'} tb-dca-direction" data-dir="${d}" style="font-size:12px;padding:5px 14px;">${d === 'LONG' ? 'Long' : 'Short'}</button>`).join('')}
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;">
+        <label style="font-size:11px;color:var(--dim);">Base Order (USDT)<input id="tbDcaBase" type="number" min="1" step="any" value="${cfg.baseOrderUsd}" style="display:block;margin-top:3px;width:100%;"></label>
+        <label style="font-size:11px;color:var(--dim);">Safety Order (USDT)<input id="tbDcaSafety" type="number" min="1" step="any" value="${cfg.safetyOrderUsd}" style="display:block;margin-top:3px;width:100%;"></label>
+        <label style="font-size:11px;color:var(--dim);">Max Safety Orders<input id="tbDcaMaxSafety" type="number" min="0" max="10" step="1" value="${cfg.maxSafetyOrders}" style="display:block;margin-top:3px;width:100%;"></label>
+        <label style="font-size:11px;color:var(--dim);">Price Deviation (%)<input id="tbDcaDeviation" type="number" min="0.1" step="any" value="${cfg.priceDeviationPct}" style="display:block;margin-top:3px;width:100%;"></label>
+        <label style="font-size:11px;color:var(--dim);">Step Scale<input id="tbDcaStepScale" type="number" min="1" step="any" value="${cfg.stepScale}" style="display:block;margin-top:3px;width:100%;"></label>
+        <label style="font-size:11px;color:var(--dim);">Volume Scale<input id="tbDcaVolScale" type="number" min="1" step="any" value="${cfg.volumeScale}" style="display:block;margin-top:3px;width:100%;"></label>
+        <label style="font-size:11px;color:var(--dim);">Take Profit (%)<input id="tbDcaTp" type="number" min="0.1" step="any" value="${cfg.takeProfitPct}" style="display:block;margin-top:3px;width:100%;"></label>
+        <label style="font-size:11px;color:var(--dim);">Stop Loss (%, optional)<input id="tbDcaSl" type="number" min="0" step="any" value="${cfg.stopLossPct}" placeholder="none" style="display:block;margin-top:3px;width:100%;"></label>
+        <label style="font-size:11px;color:var(--dim);">Leverage<input id="tbDcaLeverage" type="number" min="1" max="50" step="1" value="${cfg.leverage}" style="display:block;margin-top:3px;width:100%;"></label>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-top:8px;">One-way position — needs Bybit/Binance in ONE-WAY (not hedge) mode for this symbol. If NxTGen Grid ran Live on it before, switch that symbol back to one-way first (Bybit) or your whole account back to one-way (Binance, account-wide).</div>
+    `;
+  }
+}
+
+function readTradingBotFormNumbers(){
+  const f = fu();
+  const type = f.tbCreateType || 'grid';
+  if(type === 'grid'){
+    const cfg = f.tbGridForm;
+    cfg.upper = parseFloat(document.getElementById('tbGridUpper').value);
+    cfg.lower = parseFloat(document.getElementById('tbGridLower').value);
+    cfg.levelCount = parseInt(document.getElementById('tbGridLevels').value, 10);
+    cfg.leverage = parseFloat(document.getElementById('tbGridLeverage').value);
+    cfg.investmentUsd = parseFloat(document.getElementById('tbGridInvestment').value);
+  } else {
+    const cfg = f.tbDcaForm;
+    cfg.baseOrderUsd = parseFloat(document.getElementById('tbDcaBase').value);
+    cfg.safetyOrderUsd = parseFloat(document.getElementById('tbDcaSafety').value);
+    cfg.maxSafetyOrders = parseInt(document.getElementById('tbDcaMaxSafety').value, 10);
+    cfg.priceDeviationPct = parseFloat(document.getElementById('tbDcaDeviation').value);
+    cfg.stepScale = parseFloat(document.getElementById('tbDcaStepScale').value);
+    cfg.volumeScale = parseFloat(document.getElementById('tbDcaVolScale').value);
+    cfg.takeProfitPct = parseFloat(document.getElementById('tbDcaTp').value);
+    const slRaw = document.getElementById('tbDcaSl').value;
+    cfg.stopLossPct = slRaw === '' ? null : parseFloat(slRaw);
+    cfg.leverage = parseFloat(document.getElementById('tbDcaLeverage').value);
+  }
+}
+
+function tbCreateStatus(msg, isError){
+  const host = document.getElementById('tbCreateStatus');
+  if(host){ host.textContent = msg; host.style.color = isError ? 'var(--red)' : ''; }
+}
+
+function initTradingBots(){
+  renderTradingBotsCreate();
+  renderTradingBotsList();
+  if(els.fuTradingBotsCreate){
+    els.fuTradingBotsCreate.addEventListener('change', (e) => {
+      const f = fu();
+      if(e.target.id === 'tbType'){ f.tbCreateType = e.target.value; renderTradingBotTypeFields(); }
+      else if(e.target.id === 'tbExchange'){ readTradingBotFormNumbers(); f.tbCreateExchange = e.target.value; renderTradingBotsCreate(); }
+      else if(e.target.id === 'tbSymbol'){ f.tbCreateSymbol = e.target.value.trim().toUpperCase(); }
+    });
+    els.fuTradingBotsCreate.addEventListener('click', async (e) => {
+      if(e.target.classList.contains('tb-grid-direction')){
+        readTradingBotFormNumbers(); fu().tbGridForm.direction = e.target.dataset.dir; renderTradingBotTypeFields(); return;
+      }
+      if(e.target.classList.contains('tb-dca-direction')){
+        readTradingBotFormNumbers(); fu().tbDcaForm.direction = e.target.dataset.dir; renderTradingBotTypeFields(); return;
+      }
+      if(e.target.id === 'tbGridSmartFill'){
+        const f = fu();
+        readTradingBotFormNumbers();
+        const symbol = (document.getElementById('tbSymbol').value || '').trim().toUpperCase();
+        if(!symbol){ tbCreateStatus('Enter a symbol first.', true); return; }
+        tbCreateStatus('Fetching current range…');
+        const exchange = f.tbCreateExchange || 'bybit';
+        const snap = await fetchLiveSnapshot(exchange, symbol, '5m').catch(err => { tbCreateStatus(`Could not fetch ${symbol}: ${err.message}`, true); return null; });
+        if(!snap) return;
+        const regime = classifyRegime(snap.h1, snap.m15);
+        const suggestion = suggestGridRange(snap, regime);
+        f.tbGridForm.upper = suggestion.upper; f.tbGridForm.lower = suggestion.lower;
+        renderTradingBotTypeFields();
+        tbCreateStatus(`Suggested range around current price ${snap.price} (regime: ${regime.regime}) — edit before creating if you'd like.`);
+        return;
+      }
+      if(e.target.id === 'tbCreateBtn'){
+        await createTradingBotFromForm();
+        return;
+      }
+      if(e.target.classList.contains('tb-stop-btn')){
+        await stopTradingBot(e.target.dataset.id);
+        return;
+      }
+      if(e.target.classList.contains('tb-delete-btn')){
+        deleteTradingBot(e.target.dataset.id);
+        return;
+      }
+    });
+  }
+  if(els.fuTradingBotsList){
+    // Delegate the same click handling to the list container too, since
+    // Stop/Delete buttons live there, not in the create form's container.
+    els.fuTradingBotsList.addEventListener('click', async (e) => {
+      if(e.target.classList.contains('tb-stop-btn')) await stopTradingBot(e.target.dataset.id);
+      else if(e.target.classList.contains('tb-delete-btn')) deleteTradingBot(e.target.dataset.id);
+    });
+  }
+}
+
+async function createTradingBotFromForm(){
+  const f = fu();
+  const type = f.tbCreateType || 'grid';
+  const exchange = f.tbCreateExchange || 'bybit';
+  const symbol = (document.getElementById('tbSymbol').value || '').trim().toUpperCase();
+  if(!symbol){ tbCreateStatus('Enter a symbol.', true); return; }
+  if(!GRID_LIVE_EXCHANGES.includes(exchange)){ tbCreateStatus('Trading Bots only support Bybit or Binance.', true); return; }
+  const mode = f.liveModeByExchange[exchange] || 'live';
+  const cred = liveCred(exchange, mode);
+  if(!cred){ tbCreateStatus(`No verified ${exchange} ${mode} credential — connect it in Autotrade & Balances first.`, true); return; }
+  readTradingBotFormNumbers();
+
+  const bot = {
+    id: newTradingBotId(type), type, exchange, mode, symbol,
+    createdAtMs: Date.now(), status: 'deploying', statusMessage: 'Deploying…', statusIsError: false,
+    realizedUsd: 0, runtime: {},
+  };
+
+  if(type === 'grid'){
+    const cfg = f.tbGridForm;
+    if(!(cfg.upper > cfg.lower)){ tbCreateStatus('Upper price must be greater than lower price.', true); return; }
+    if(!(cfg.investmentUsd > 0)){ tbCreateStatus('Enter a total investment amount.', true); return; }
+    const plan = buildManualGridPlan({ symbol, direction: cfg.direction, upper: cfg.upper, lower: cfg.lower, levelCount: cfg.levelCount, leverage: cfg.leverage, investmentUsd: cfg.investmentUsd });
+    if(!plan){ tbCreateStatus('Check your grid settings — could not build a valid plan from them.', true); return; }
+    bot.direction = cfg.direction; bot.investmentUsd = cfg.investmentUsd; bot.leverage = cfg.leverage;
+    bot.config = { ...cfg }; bot.plan = plan; bot.runtime = { levels: [], longStopSet: false, shortStopSet: false };
+  } else {
+    const cfg = f.tbDcaForm;
+    if(!(cfg.baseOrderUsd > 0)){ tbCreateStatus('Enter a base order size.', true); return; }
+    bot.direction = cfg.direction; bot.leverage = cfg.leverage; bot.config = { ...cfg };
+    bot.investmentUsd = null; // filled in once the plan is built against a real anchor price below
+  }
+
+  f.tradingBots.push(bot);
+  renderTradingBotsList();
+  tbCreateStatus('');
+
+  if(type === 'grid') await deployGridBotInstance(bot, cred);
+  else await deployDcaBotInstance(bot, cred);
+
+  if(!f.tradingBotsRunning) toggleTradingBotsRunning(); // start the management loop the moment there's a bot to manage
+}
+
+// -------------------------------------------------------------
+// Futures Grid bot — deployment + ongoing management. Reuses the EXACT
+// same order-placement calls NxTGen Grid Live/Demo already uses
+// (place-level/place-close/set-side-stop/flatten/orders/ensure-mode),
+// just against this bot's OWN manually-built plan/levels instead of the
+// single global gridLiveState — several of these can run at once, one
+// per bot instance, each fully independent.
+// -------------------------------------------------------------
+async function deployGridBotInstance(bot, cred){
+  const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
+  const modeCheck = await callProxy('/api/futures/grid/ensure-mode', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  if(!modeCheck.ok || modeCheck.hedgeModeReady === false){
+    bot.status = 'error';
+    tradingBotLog(bot, modeCheck.message || `Could not confirm hedge mode for ${bot.symbol} on ${bot.exchange}.`, true);
+    return;
+  }
+  const plan = bot.plan;
+  const levels = [];
+  for(let li = 0; li < plan.levels.length; li++){
+    const levelPrice = plan.levels[li];
+    const isLowerHalf = levelPrice <= plan.mid;
+    const wantLong = (plan.direction === 'LONG' || plan.direction === 'NEUTRAL') && isLowerHalf;
+    const wantShort = (plan.direction === 'SHORT' || plan.direction === 'NEUTRAL') && !isLowerHalf;
+    if(!wantLong && !wantShort) continue;
+    const direction = wantLong ? 'LONG' : 'SHORT';
+    const perLevelUsd = plan.allocationUsd / plan.levelCount;
+    const qty = (perLevelUsd * plan.leverage) / levelPrice;
+    const placed = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction, price: levelPrice, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${li}` }).catch(err => ({ ok:false, message: err.message }));
+    if(!placed.ok){ tradingBotLog(bot, `Level ${li} (${levelPrice.toFixed(6)}) skipped: ${placed.message}`, false); continue; }
+    levels.push({ levelIndex: li, price: levelPrice, direction, status: 'PENDING_ENTRY', entryOrderId: placed.orderId, targetIndex: wantLong ? li + 1 : li - 1 });
+  }
+  if(levels.length === 0){
+    bot.status = 'error';
+    tradingBotLog(bot, 'No grid levels could be placed — see messages above.', true);
+    return;
+  }
+  bot.runtime.levels = levels;
+  bot.runtime.openedAtMs = Date.now();
+  bot.status = 'active';
+  tradingBotLog(bot, `Grid ACTIVE — ${levels.length}/${plan.levelCount} levels resting.`, false);
+}
+
+async function manageGridBotInstance(bot, cred, nowMs){
+  const plan = bot.plan;
+  const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
+  const snap = await fetchLiveSnapshot(bot.exchange, bot.symbol, '5m').catch(err => { tradingBotLog(bot, `Snapshot fetch failed: ${err.message}`, true); return null; });
+  if(!snap) return;
+
+  const bo = detectGridBreakout(snap, plan, GRID_DEFAULTS);
+  if(bo.breakout){
+    tradingBotLog(bot, `BREAKOUT detected (${bo.reasons[0] || ''}) — flattening.`, true);
+    const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+    if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+    bot.status = 'closed';
+    renderTradingBotsList();
+    return;
+  }
+
+  const openOrdersResp = await callProxy('/api/futures/grid/orders', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  if(!openOrdersResp.ok){ tradingBotLog(bot, `Could not read open orders: ${openOrdersResp.message}`, true); return; }
+  const openIds = new Set(openOrdersResp.list.map(o => String(o.orderId)));
+
+  for(const level of bot.runtime.levels){
+    if(level.status === 'PENDING_ENTRY' && level.entryOrderId != null && !openIds.has(String(level.entryOrderId))){
+      const targetPrice = plan.levels[level.targetIndex];
+      if(targetPrice == null){ level.status = 'FILLED_NO_TARGET'; continue; }
+      const perLevelUsd = plan.allocationUsd / plan.levelCount;
+      const qty = (perLevelUsd * plan.leverage) / level.price;
+      const closed = await callProxy('/api/futures/grid/place-close', { ...proxyArgs, direction: level.direction, price: targetPrice, qty, orderLinkTag: `${bot.id}-${level.levelIndex}` }).catch(err => ({ ok:false, message: err.message }));
+      if(!closed.ok){ tradingBotLog(bot, `Level ${level.levelIndex} filled but its close order failed: ${closed.message}`, true); continue; }
+      level.status = 'PENDING_CLOSE'; level.closeOrderId = closed.orderId; level.entryPrice = level.price; level.targetPrice = targetPrice; level.openedAt = nowMs;
+      const stopField = level.direction === 'LONG' ? 'longStopSet' : 'shortStopSet';
+      if(!bot.runtime[stopField]){
+        const stopPrice = level.direction === 'LONG' ? plan.lower : plan.upper;
+        const stopResult = await callProxy('/api/futures/grid/set-side-stop', { ...proxyArgs, direction: level.direction, stopPrice }).catch(err => ({ ok:false, message: err.message }));
+        if(stopResult.ok) bot.runtime[stopField] = true;
+        else tradingBotLog(bot, `Could not attach protective stop on the ${level.direction} side: ${stopResult.message} — that side has NO exchange-side protection yet.`, true);
+      }
+    } else if(level.status === 'PENDING_CLOSE' && level.closeOrderId != null && !openIds.has(String(level.closeOrderId))){
+      const perLevelUsd = plan.allocationUsd / plan.levelCount;
+      const qty = (perLevelUsd * plan.leverage) / level.entryPrice;
+      const pnl = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: level.targetPrice, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
+      bot.realizedUsd += pnl.netUsd;
+      const record = {
+        closedAtMs: nowMs, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
+        entry: level.entryPrice, exit: level.targetPrice, qty, leverage: plan.leverage,
+        grossUsd: pnl.grossUsd, feesUsd: pnl.feesUsd, fundingUsd: pnl.fundingUsd, slippageUsd: pnl.slippageUsd, netUsd: pnl.netUsd,
+        confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_CYCLE_TP', durationMin: Math.round((nowMs - level.openedAt) / 60_000),
+        gridId: bot.id, gridLevel: level.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
+      };
+      appendPersistentTrade(record);
+      const rePlaced = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction: level.direction, price: level.price, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${level.levelIndex}-r` }).catch(err => ({ ok:false, message: err.message }));
+      if(rePlaced.ok){ level.status = 'PENDING_ENTRY'; level.entryOrderId = rePlaced.orderId; level.closeOrderId = null; }
+      else { level.status = 'IDLE'; level.entryOrderId = null; level.closeOrderId = null; tradingBotLog(bot, `Cycle closed on level ${level.levelIndex} but couldn't re-arm it: ${rePlaced.message}`, true); }
+    }
+  }
+  tradingBotLog(bot, `Running — ${bot.runtime.levels.filter(l => l.status === 'PENDING_CLOSE').length} leg(s) open, ${fmtUsd(bot.realizedUsd)} realized.`, false);
+}
+
+// -------------------------------------------------------------
+// DCA bot — deployment + ongoing management. One-way mode; safety
+// orders just accumulate into the same position, average price shifts,
+// TP is re-set to the new average after every fill. Closure (TP or the
+// optional hard stop firing) is detected by the position going flat —
+// see the header note in dca.js for why that's the reliable signal
+// rather than watching for a specific order to disappear.
+// -------------------------------------------------------------
+async function deployDcaBotInstance(bot, cred){
+  const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
+  const snap = await fetchLiveSnapshot(bot.exchange, bot.symbol, '5m').catch(err => { bot.status = 'error'; tradingBotLog(bot, `Snapshot fetch failed: ${err.message}`, true); return null; });
+  if(!snap) return;
+  const plan = buildDcaPlan({ symbol: bot.symbol, direction: bot.direction, anchorPrice: snap.price, cfg: bot.config });
+  if(!plan){ bot.status = 'error'; tradingBotLog(bot, 'Could not build a valid DCA plan from these settings.', true); return; }
+  bot.plan = plan; bot.investmentUsd = plan.totalInvestmentUsd;
+
+  const balResp = await callProxy('/api/futures/balance', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  bot.runtime.balanceBeforeUsd = balResp.ok ? balResp.balance : null;
+  bot.runtime.openedAtMs = Date.now();
+
+  const baseQty = (plan.baseOrderUsd * plan.leverage) / snap.price;
+  const baseResult = await callProxy('/api/futures/dca/place', { ...proxyArgs, direction: bot.direction, orderType: 'MARKET', qty: baseQty, leverage: plan.leverage }).catch(err => ({ ok:false, message: err.message }));
+  if(!baseResult.ok){ bot.status = 'error'; tradingBotLog(bot, `Base order failed: ${baseResult.message}`, true); return; }
+
+  bot.runtime.safetyOrders = [];
+  for(const level of plan.safetyLevels){
+    const qty = (level.sizeUsd * plan.leverage) / level.price;
+    const placed = await callProxy('/api/futures/dca/place', { ...proxyArgs, direction: bot.direction, orderType: 'LIMIT', price: level.price, qty, leverage: plan.leverage }).catch(err => ({ ok:false, message: err.message }));
+    if(!placed.ok){ tradingBotLog(bot, `Safety order ${level.index} skipped: ${placed.message}`, false); continue; }
+    bot.runtime.safetyOrders.push({ index: level.index, orderId: placed.orderId, price: level.price, status: 'PENDING' });
+  }
+
+  // Confirm the base order's real fill and set the initial TP off it —
+  // a market order should be filled by the time we get here, but poll
+  // briefly rather than assume.
+  const posResp = await callProxy('/api/futures/position', { ...proxyArgs, openedAtMs: bot.runtime.openedAtMs, balanceBeforeUsd: bot.runtime.balanceBeforeUsd }).catch(err => ({ ok:false, message: err.message }));
+  if(posResp.ok && posResp.open){
+    bot.runtime.avgEntryPrice = posResp.position.avgPrice; bot.runtime.totalQty = posResp.position.size;
+    const exits = computeDcaExitPrices({ direction: bot.direction, avgEntryPrice: bot.runtime.avgEntryPrice, takeProfitPct: plan.takeProfitPct, stopLossPct: plan.stopLossPct });
+    const tpResult = await callProxy('/api/futures/dca/set-tp', { ...proxyArgs, direction: bot.direction, takeProfitPrice: exits.takeProfitPrice, stopLossPrice: exits.stopLossPrice, existingTpAlgoId: bot.runtime.tpAlgoId, existingSlAlgoId: bot.runtime.slAlgoId }).catch(err => ({ ok:false, message: err.message }));
+    if(tpResult.ok){ bot.runtime.tpAlgoId = tpResult.tpAlgoId || null; bot.runtime.slAlgoId = tpResult.slAlgoId || null; }
+    else tradingBotLog(bot, `Base order filled but setting take-profit failed: ${tpResult.message} — the position is OPEN WITHOUT a take-profit yet, will retry next cycle.`, true);
+  } else {
+    tradingBotLog(bot, `Base order sent but position isn't confirmed open yet — will confirm and set take-profit next cycle.`, false);
+  }
+  bot.status = 'active';
+  tradingBotLog(bot, `DCA ACTIVE — base order sent, ${bot.runtime.safetyOrders.length}/${plan.safetyLevels.length} safety orders resting.`, false);
+}
+
+async function manageDcaBotInstance(bot, cred, nowMs){
+  const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
+  const posResp = await callProxy('/api/futures/position', { ...proxyArgs, openedAtMs: bot.runtime.openedAtMs, balanceBeforeUsd: bot.runtime.balanceBeforeUsd }).catch(err => ({ ok:false, message: err.message }));
+  if(!posResp.ok){ tradingBotLog(bot, `Could not read position: ${posResp.message}`, true); return; }
+
+  if(!posResp.open){
+    // Flat — TP or the hard stop fired (or it was closed manually on the
+    // exchange). Cancel anything still resting, log what we can from the
+    // exchange's own realized-PnL read (real, not estimated — same
+    // balance-diff/closed-pnl mechanism the six strategies' Live/Demo
+    // trades already use), and mark this bot done.
+    await callProxy('/api/futures/dca/flatten', proxyArgs).catch(() => {});
+    const closed = posResp.closed;
+    const record = {
+      closedAtMs: nowMs, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: bot.direction,
+      entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : bot.runtime.avgEntryPrice,
+      exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
+      leverage: bot.plan.leverage, qty: bot.runtime.totalQty,
+      grossUsd: closed && closed.grossPnl != null ? closed.grossPnl : null,
+      feesUsd: closed && closed.feesUsd != null ? closed.feesUsd : null,
+      netUsd: closed ? closed.closedPnl : 0,
+      setupType: 'Trading Bot: DCA', durationMin: Math.round((nowMs - bot.runtime.openedAtMs) / 60_000), gridId: bot.id,
+    };
+    bot.realizedUsd = record.netUsd || 0;
+    appendPersistentTrade(record);
+    bot.status = 'closed';
+    tradingBotLog(bot, `Position closed — ${fmtUsd(bot.realizedUsd)} realized.`, false);
+    return;
+  }
+
+  if(posResp.position.size > (bot.runtime.totalQty || 0) + 1e-9){
+    // A safety order filled — average moved, re-set TP.
+    bot.runtime.avgEntryPrice = posResp.position.avgPrice; bot.runtime.totalQty = posResp.position.size;
+    const filledOrder = bot.runtime.safetyOrders.find(s => s.status === 'PENDING'); // best-effort marker; exact matching would need an open-orders diff like Grid's, kept simple since TP re-set is what actually matters here
+    const orders = await callProxy('/api/futures/dca/orders', proxyArgs).catch(() => ({ ok:false }));
+    if(orders.ok){
+      const openIds = new Set(orders.list.map(o => String(o.orderId)));
+      for(const s of bot.runtime.safetyOrders){ if(s.status === 'PENDING' && !openIds.has(String(s.orderId))) s.status = 'FILLED'; }
+    } else if(filledOrder){
+      filledOrder.status = 'FILLED';
+    }
+    const exits = computeDcaExitPrices({ direction: bot.direction, avgEntryPrice: bot.runtime.avgEntryPrice, takeProfitPct: bot.plan.takeProfitPct, stopLossPct: bot.plan.stopLossPct });
+    const tpResult = await callProxy('/api/futures/dca/set-tp', { ...proxyArgs, direction: bot.direction, takeProfitPrice: exits.takeProfitPrice, stopLossPrice: exits.stopLossPrice, existingTpAlgoId: bot.runtime.tpAlgoId, existingSlAlgoId: bot.runtime.slAlgoId }).catch(err => ({ ok:false, message: err.message }));
+    if(tpResult.ok){ bot.runtime.tpAlgoId = tpResult.tpAlgoId || null; bot.runtime.slAlgoId = tpResult.slAlgoId || null; }
+    else tradingBotLog(bot, `Safety order filled but re-setting take-profit failed: ${tpResult.message} — retrying next cycle.`, true);
+    tradingBotLog(bot, `Safety order filled — average now ${bot.runtime.avgEntryPrice.toFixed(6)}, TP re-set to ${exits.takeProfitPrice.toFixed(6)}.`, false);
+  } else {
+    tradingBotLog(bot, `Running — avg ${bot.runtime.avgEntryPrice.toFixed(6)}, size ${bot.runtime.totalQty}, uPnL ${fmtUsd(posResp.position.unrealisedPnl)}.`, false);
+  }
+}
+
+async function runTradingBotsCycle(){
+  const f = fu();
+  const activeBots = f.tradingBots.filter(b => b.status === 'active');
+  for(const bot of activeBots){
+    const cred = liveCred(bot.exchange, bot.mode);
+    if(!cred){ tradingBotLog(bot, `No verified ${bot.exchange} ${bot.mode} credential anymore — check your connection.`, true); continue; }
+    try{
+      if(bot.type === 'grid') await manageGridBotInstance(bot, cred, Date.now());
+      else await manageDcaBotInstance(bot, cred, Date.now());
+    }catch(err){
+      tradingBotLog(bot, `Unexpected error managing this bot: ${err.message}`, true);
+    }
+  }
+  renderTradingBotsList();
+}
+
+function toggleTradingBotsRunning(){
+  const f = fu();
+  f.tradingBotsRunning = !f.tradingBotsRunning;
+  if(f.tradingBotsRunning){
+    f.tradingBotsTimer = setInterval(runTradingBotsCycle, TRADING_BOTS_CYCLE_MS);
+  } else if(f.tradingBotsTimer){
+    clearInterval(f.tradingBotsTimer); f.tradingBotsTimer = null;
+  }
+}
+
+async function stopTradingBot(id){
+  const f = fu();
+  const bot = f.tradingBots.find(b => b.id === id);
+  if(!bot) return;
+  const cred = liveCred(bot.exchange, bot.mode);
+  if(cred){
+    const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
+    const path = bot.type === 'grid' ? '/api/futures/grid/flatten' : '/api/futures/dca/flatten';
+    const result = await callProxy(path, proxyArgs).catch(err => ({ ok:false, message: err.message }));
+    if(!result.ok) tradingBotLog(bot, `Stop/flatten failed: ${result.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+    else tradingBotLog(bot, 'Stopped — all resting orders cancelled, any open position closed.', false);
+  }
+  bot.status = 'stopped';
+  if(f.tradingBots.every(b => b.status !== 'active') && f.tradingBotsRunning) toggleTradingBotsRunning();
+  renderTradingBotsList();
+}
+
+function deleteTradingBot(id){
+  const f = fu();
+  const bot = f.tradingBots.find(b => b.id === id);
+  if(bot && bot.status === 'active'){ tradingBotLog(bot, 'Stop this bot before deleting it.', true); return; }
+  f.tradingBots = f.tradingBots.filter(b => b.id !== id);
+  renderTradingBotsList();
+}
+
+function renderTradingBotsList(){
+  if(!els.fuTradingBotsList) return;
+  const f = fu();
+  if(els.fuTradingBotsBadge) els.fuTradingBotsBadge.textContent = `${f.tradingBots.filter(b => b.status === 'active').length} active`;
+  if(f.tradingBots.length === 0){
+    els.fuTradingBotsList.innerHTML = `<div style="font-size:12px;color:var(--dim);padding:8px 0;">No bots created yet.</div>`;
+    return;
+  }
+  els.fuTradingBotsList.innerHTML = [...f.tradingBots].reverse().map(bot => `
+    <div class="ov-block" style="padding:10px 12px;margin-bottom:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <div>
+          <strong>${TRADING_BOT_TYPES[bot.type]}</strong> — ${bot.symbol} on ${EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange} (${bot.mode})
+          <span style="font-size:11px;color:var(--dim);margin-left:8px;">${bot.direction || ''} · ${bot.investmentUsd != null ? fmtUsd(bot.investmentUsd) + ' invested' : ''} · ${bot.leverage}x</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span style="font-size:11px;padding:2px 8px;border-radius:6px;border:1px solid var(--line);color:${bot.status === 'active' ? 'var(--green)' : bot.status === 'error' ? 'var(--red)' : 'var(--dim)'};">${bot.status}</span>
+          ${bot.status === 'active' ? `<button type="button" class="primary ghost tb-stop-btn" data-id="${bot.id}" style="font-size:11px;padding:4px 10px;">Stop</button>` : `<button type="button" class="primary ghost tb-delete-btn" data-id="${bot.id}" style="font-size:11px;padding:4px 10px;">Delete</button>`}
+        </div>
+      </div>
+      <div style="font-size:11.5px;color:${bot.statusIsError ? 'var(--red)' : 'var(--dim)'};margin-top:6px;">${bot.statusMessage || ''}</div>
+    </div>
+  `).join('');
+}
+
 // Resumes MONITORING (never new-order placement — f.liveArmed still
 // resets to false on every load, unchanged) for any real position that
 // was still open when the page last reloaded. See renderLive()'s
@@ -2921,6 +3451,7 @@ export function initFuturesEngine(){
   initLiveTimeframeInput();
   initStrategySelector();
   initGridPanel();
+  initTradingBots();
   initLiveTradingControls();
   initTradeLog();
   restoreLivePositions();

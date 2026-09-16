@@ -256,6 +256,33 @@ export function buildGridPlan(symbol, snap, regime, cfg, accountEquity){
 }
 
 // -------------------------------------------------------------
+// Manual grid plan — for Trading Bots' user-created Futures Grid bots
+// (as opposed to buildGridPlan above, which NxTGen Grid's auto-scan
+// strategy uses). No scoring, no regime gate, no auto-sizing: the user
+// sets price range, grid count, leverage, and investment directly
+// (mirrors a manual grid-bot creator's own fields) and this just turns
+// that into the SAME plan shape buildGridPlan returns, so it can run
+// through the identical order-placement/management code either way.
+// -------------------------------------------------------------
+export function buildManualGridPlan({ symbol, direction, upper, lower, levelCount, leverage, investmentUsd }){
+  if(!(upper > lower) || levelCount < 2 || !(leverage > 0) || !(investmentUsd > 0)){
+    return null; // caller's responsibility to validate/report specifics — this is just the last-line sanity check
+  }
+  const mid = (upper + lower) / 2;
+  const levels = [];
+  for(let i = 0; i < levelCount; i++){
+    levels.push(lower + (i / (levelCount - 1)) * (upper - lower));
+  }
+  const spacingPct = ((upper - lower) / mid * 100) / (levelCount - 1);
+  return {
+    symbol, direction, upper, lower, levels, spacingPct, levelCount,
+    gridScore: null, scoreBreakdown: null, scoreReasons: null,
+    leverage, allocationUsd: investmentUsd, minNetProfitPct: GRID_DEFAULTS.minNetProfitPct,
+    regime: null, atrM15: null, mid,
+  };
+}
+
+// -------------------------------------------------------------
 // Breakout detection — confirmed close beyond the grid boundary, with
 // ATR-expansion + volume confirmation (false-breakout filter). Returns
 // { breakout: bool, reasons: [] }.

@@ -137,6 +137,10 @@ export const els = {
   fuStrategiesDetails: document.getElementById('fuStrategiesDetails'),
   fuStrategiesBadge: document.getElementById('fuStrategiesBadge'),
   fuStrategiesBest: document.getElementById('fuStrategiesBest'),
+  fuTradingBotsDetails: document.getElementById('fuTradingBotsDetails'),
+  fuTradingBotsBadge: document.getElementById('fuTradingBotsBadge'),
+  fuTradingBotsCreate: document.getElementById('fuTradingBotsCreate'),
+  fuTradingBotsList: document.getElementById('fuTradingBotsList'),
   fuLiveExchRows: document.getElementById('fuLiveExchRows'),
   fuLiveStatusLabel: document.getElementById('fuLiveStatusLabel'),
   fuLiveArmWrap: document.getElementById('fuLiveArmWrap'),
@@ -416,6 +420,18 @@ export const state = {
     gridLiveState: null,      // the single active deployment for gridLiveSymbol, or null — see runGridLiveCycle
     gridLiveTradeHistory: [],
     gridLiveDayAnchorEquity: null, gridLiveDailyHalted: false, gridLiveCurrentDayKey: null,
+    // ---- Trading Bots (Futures Grid + DCA) — user-created, multi-
+    // instance, Binance/Bybit Live/Demo only. Deliberately separate from
+    // gridLive* above (NxTGen Grid's own auto-scanning single deployment)
+    // — these are bots the person explicitly creates with their own
+    // price range/investment/etc, mirroring a manual grid-bot or DCA-bot
+    // creator, and several can run side by side. See futures-ui.js's
+    // Trading Bots section for the create-flow and per-tick management.
+    // Session-only, like gridLiveState — does not survive a reload, same
+    // as every other Live/Demo runtime state in this app.
+    tradingBots: [],       // { id, type:'grid'|'dca', exchange, mode, symbol, direction, investmentUsd, leverage, status, createdAtMs, config, plan, runtime, statusMessage, realizedUsd }
+    tradingBotsTimer: null,
+    tradingBotsRunning: false,
     lastRows: [],
     lastRegimeSummary: null,
     lastExplainIndex: null,

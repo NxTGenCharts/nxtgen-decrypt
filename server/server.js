@@ -1073,6 +1073,113 @@ async function flattenBybitGrid(mode, apiKey, secretKey, symbol){
   return { closed };
 }
 
+// =============================================================
+// Trading Bots — DCA (Bybit + Binance only, same two exchanges as Grid).
+// Deliberately ONE-WAY position mode (positionIdx 0 / no positionSide on
+// Binance) — unlike Grid, a DCA deployment only ever holds ONE side at a
+// time, so it doesn't need hedge mode at all. Safety orders are just
+// plain same-direction LIMIT entries with reduceOnly unset/false: both
+// exchanges natively average same-side fills into one bigger position at
+// a blended entry price, so "adding a safety order" is nothing more than
+// placing another ordinary entry order — no special "add" flag exists or
+// is needed. Take-profit is re-set (not re-created) via the position-
+// level trading-stop endpoint every time the average price moves, same
+// idempotent-replace approach as setBybitGridSideStop/
+// setBinanceGridSideStop above use for the stop side.
+// =============================================================
+async function placeBybitDcaOrder(mode, apiKey, secretKey, { symbol, direction, orderType, price, qty, leverage }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  if(roundedQty <= 0 || roundedQty < filters.minOrderQty){
+    throw new VerifyRejected(`DCA order size ${qty} ${symbol} rounds down to ${roundedQty}, below the exchange minimum (${filters.minOrderQty}) — order skipped, not sent.`);
+  }
+  if(leverage != null){
+    const clampedLeverage = Math.min(leverage, filters.maxLeverage);
+    await bybitSetLeverage(mode, apiKey, secretKey, symbol, clampedLeverage);
+  }
+  const side = direction === 'LONG' ? 'Buy' : 'Sell';
+  const body = {
+    category: 'linear', symbol, side, orderType: orderType === 'MARKET' ? 'Market' : 'Limit',
+    qty: roundedQty.toString(), positionIdx: 0,
+    orderLinkId: `nxdca-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  };
+  if(orderType !== 'MARKET'){
+    const roundedPrice = Math.round(price / filters.tickSize) * filters.tickSize;
+    body.price = roundedPrice.toString();
+    body.timeInForce = 'GTC';
+  } else {
+    body.timeInForce = 'IOC';
+  }
+  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', body).catch(err => {
+    // If NxTGen Grid ever ran Live on this same symbol, it switched Bybit
+    // to hedge (BothSide) mode for it — DCA needs one-way mode instead,
+    // and Bybit refuses positionIdx:0 orders on a hedge-mode symbol with
+    // a distinctive error. Surface that plainly rather than a bare retCode.
+    if(/position idx not match|position mode/i.test(err.message)){
+      throw new VerifyRejected(`${symbol} on Bybit is currently in hedge (BothSide) mode — likely from running NxTGen Grid Live/Demo on it earlier. DCA needs one-way mode. Close/cancel anything open on ${symbol} on Bybit, then switch it back to one-way yourself (Bybit app > Futures settings > Position Mode) before creating a DCA bot on it.`);
+    }
+    throw err;
+  });
+  const orderId = created.result?.orderId;
+  if(!orderId) throw new VerifyRejected('Bybit accepted the DCA order but returned no orderId.');
+  return { orderId, price: body.price ? parseFloat(body.price) : null, qty: roundedQty };
+}
+
+// Sets (or replaces) the take-profit for the WHOLE current one-way
+// position, recalculated every time a safety order fills and the
+// average entry moves — trading-stop's tpPrice fully replaces whatever
+// was set before, so this never needs to "cancel" a prior TP first.
+// stopLossPrice is optional (DCA's own hard stop, distinct from a
+// safety-order ladder running out) — omit to leave/clear it.
+async function setBybitDcaTakeProfit(mode, apiKey, secretKey, { symbol, direction, takeProfitPrice, stopLossPrice }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const body = { category: 'linear', symbol, tpslMode: 'Full', positionIdx: 0 };
+  if(takeProfitPrice != null){
+    body.takeProfit = (Math.round(takeProfitPrice / filters.tickSize) * filters.tickSize).toString();
+    body.tpOrderType = 'Market';
+  }
+  if(stopLossPrice != null){
+    body.stopLoss = (Math.round(stopLossPrice / filters.tickSize) * filters.tickSize).toString();
+    body.slOrderType = 'Market';
+  }
+  await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/trading-stop', body);
+  return { takeProfitPrice: body.takeProfit ? parseFloat(body.takeProfit) : null, stopLossPrice: body.stopLoss ? parseFloat(body.stopLoss) : null };
+}
+
+async function getBybitDcaOpenOrders(mode, apiKey, secretKey, symbol){
+  const data = await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'GET', '/v5/order/realtime', `category=linear&symbol=${symbol}`);
+  const list = data.result?.list || [];
+  return list.map(o => ({ orderId: o.orderId, side: o.side, price: parseFloat(o.price), qty: parseFloat(o.qty), status: o.orderStatus }));
+}
+
+// One-way position read — a single row (no positionIdx split like
+// Grid's hedge-mode getBybitGridPositions needs).
+async function getBybitDcaPosition(mode, apiKey, secretKey, symbol){
+  const data = await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'GET', '/v5/position/list', `category=linear&symbol=${symbol}`);
+  const list = data.result?.list || [];
+  const pos = list.find(p => (p.positionIdx === 0 || p.positionIdx == null) && parseFloat(p.size || '0') > 0);
+  return pos ? { size: parseFloat(pos.size), avgPrice: parseFloat(pos.avgPrice || '0'), side: pos.side, liqPrice: pos.liqPrice ? parseFloat(pos.liqPrice) : null, unrealisedPnl: parseFloat(pos.unrealisedPnl || '0') } : null;
+}
+
+async function flattenBybitDca(mode, apiKey, secretKey, symbol){
+  await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'POST', '/v5/order/cancel-all', { category: 'linear', symbol }).catch(() => {});
+  const pos = await getBybitDcaPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) return { closed: null };
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const qty = floorToStep(pos.size, filters.qtyStep);
+  if(qty <= 0) return { closed: null };
+  const exitSide = pos.side === 'Buy' ? 'Sell' : 'Buy';
+  const result = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+    category: 'linear', symbol, side: exitSide, orderType: 'Market', qty: qty.toString(),
+    reduceOnly: true, positionIdx: 0, timeInForce: 'IOC',
+    orderLinkId: `nxdca-flat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  }).catch(err => { throw new VerifyRejected(`Cancelled resting DCA orders but FAILED to close the position (size ${qty}) on Bybit: ${err.message}. Check ${symbol} on Bybit directly.`); });
+  return { closed: { qty, orderId: result.result?.orderId || null } };
+}
+
 async function getBybitExecutionFees(mode, apiKey, secretKey, symbol, openedAtMs){
   const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
   const startTime = String(openedAtMs || (Date.now() - 24 * 60 * 60 * 1000));
@@ -2814,6 +2921,114 @@ async function flattenBinanceGrid(mode, apiKey, secretKey, symbol){
   return { closed };
 }
 
+// =============================================================
+// Trading Bots — DCA on Binance. One-way mode (no positionSide sent —
+// Binance treats a one-way account's orders as BOTH implicitly), same
+// rationale as the Bybit DCA section above: same-side fills just
+// accumulate into one bigger position at a blended entry, no special
+// "add" semantics needed for safety orders beyond an ordinary order.
+// =============================================================
+async function placeBinanceDcaOrder(mode, apiKey, secretKey, { symbol, direction, orderType, price, qty, leverage }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  if(roundedQty <= 0 || roundedQty < filters.minQty){
+    throw new VerifyRejected(`DCA order size ${qty} ${symbol} rounds down to ${roundedQty}, below the exchange minimum (${filters.minQty}) — order skipped, not sent.`);
+  }
+  if(leverage != null) await binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage);
+  const side = direction === 'LONG' ? 'BUY' : 'SELL';
+  const params = {
+    symbol, side, type: orderType === 'MARKET' ? 'MARKET' : 'LIMIT',
+    quantity: roundedQty.toString(),
+    newClientOrderId: `nxdca-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 36),
+  };
+  let roundedPrice = null;
+  if(orderType !== 'MARKET'){
+    roundedPrice = Number(price.toFixed(filters.pricePrecision));
+    params.price = roundedPrice.toString();
+    params.timeInForce = 'GTC';
+  }
+  const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', params, apiKey, secretKey, mode).catch(err => {
+    // Same cross-feature note as the Bybit side: if NxTGen Grid ran Live
+    // on this symbol on Binance, it's in Hedge mode account-wide (Binance
+    // hedge mode is account-wide, not per-symbol, unlike Bybit) — a plain
+    // one-way order like this needs positionSide, which hedge mode requires
+    // explicitly. Surface that plainly.
+    if(/position side does not match|positionside/i.test(err.message)){
+      throw new VerifyRejected(`This Binance account is currently in Hedge position mode (likely from running NxTGen Grid Live/Demo earlier — Binance's hedge mode is account-wide, not per-symbol). DCA needs one-way mode. Switch it back yourself in Binance's app under Futures settings > Position Mode once nothing is open, before creating a DCA bot.`);
+    }
+    throw err;
+  });
+  return { orderId: order.orderId, price: roundedPrice, qty: roundedQty };
+}
+
+// Binance has no single "set TP for whole position" call the way Bybit's
+// trading-stop does — a TP here is its own STOP_MARKET-style order
+// (TAKE_PROFIT_MARKET, closePosition:true) via the same /fapi/v1/algoOrder
+// path setBinanceGridSideStop already uses for stops. Re-calling this
+// cancels whatever TP algo order existed before (existingAlgoId) and
+// places a fresh one at the new price — needed every time a safety order
+// fills and the average moves, since closePosition:true always targets
+// the position's CURRENT size, but the trigger PRICE itself doesn't
+// update on its own.
+async function setBinanceDcaTakeProfit(mode, apiKey, secretKey, { symbol, direction, takeProfitPrice, stopLossPrice, existingTpAlgoId, existingSlAlgoId }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const closeSide = direction === 'LONG' ? 'SELL' : 'BUY';
+  const result = {};
+  if(existingTpAlgoId) await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: existingTpAlgoId }, apiKey, secretKey, mode).catch(() => {});
+  if(existingSlAlgoId) await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: existingSlAlgoId }, apiKey, secretKey, mode).catch(() => {});
+  if(takeProfitPrice != null){
+    const roundedTp = Number(takeProfitPrice.toFixed(filters.pricePrecision));
+    const resp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+      algoType: 'CONDITIONAL', symbol, side: closeSide, type: 'TAKE_PROFIT_MARKET',
+      triggerPrice: roundedTp.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+    }, apiKey, secretKey, mode);
+    result.takeProfitPrice = roundedTp; result.tpAlgoId = resp.algoId ?? resp.orderId ?? null;
+  }
+  if(stopLossPrice != null){
+    const roundedSl = Number(stopLossPrice.toFixed(filters.pricePrecision));
+    const resp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+      algoType: 'CONDITIONAL', symbol, side: closeSide, type: 'STOP_MARKET',
+      triggerPrice: roundedSl.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+    }, apiKey, secretKey, mode);
+    result.stopLossPrice = roundedSl; result.slAlgoId = resp.algoId ?? resp.orderId ?? null;
+  }
+  return result;
+}
+
+async function cancelAllBinanceOrders(mode, apiKey, secretKey, symbol){
+  await binanceFuturesSignedRequest('DELETE', '/fapi/v1/allOpenOrders', { symbol }, apiKey, secretKey, mode).catch(() => {});
+}
+
+async function getBinanceDcaOpenOrders(mode, apiKey, secretKey, symbol){
+  const list = await binanceFuturesSignedRequest('GET', '/fapi/v1/openOrders', { symbol }, apiKey, secretKey, mode);
+  return (Array.isArray(list) ? list : []).map(o => ({ orderId: o.orderId, side: o.side, price: parseFloat(o.price), qty: parseFloat(o.origQty), status: o.status }));
+}
+
+async function getBinanceDcaPosition(mode, apiKey, secretKey, symbol){
+  const list = await binanceFuturesSignedRequest('GET', '/fapi/v3/positionRisk', { symbol }, apiKey, secretKey, mode);
+  const rows = Array.isArray(list) ? list.filter(p => p.symbol === symbol) : [];
+  // One-way mode: positionSide is 'BOTH'; Math.abs since a short shows negative positionAmt.
+  const pos = rows.find(p => Math.abs(parseFloat(p.positionAmt || '0')) > 0);
+  return pos ? { size: Math.abs(parseFloat(pos.positionAmt)), avgPrice: parseFloat(pos.entryPrice), side: parseFloat(pos.positionAmt) > 0 ? 'BUY' : 'SELL', liqPrice: pos.liquidationPrice ? parseFloat(pos.liquidationPrice) : null, unrealisedPnl: parseFloat(pos.unRealizedProfit) } : null;
+}
+
+async function flattenBinanceDca(mode, apiKey, secretKey, symbol){
+  await cancelAllBinanceOrders(mode, apiKey, secretKey, symbol);
+  const pos = await getBinanceDcaPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) return { closed: null };
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const qty = floorToStep(pos.size, filters.qtyStep);
+  if(qty <= 0) return { closed: null };
+  const closeSide = pos.side === 'BUY' ? 'SELL' : 'BUY';
+  const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+    symbol, side: closeSide, type: 'MARKET', quantity: qty.toString(), newOrderRespType: 'RESULT',
+  }, apiKey, secretKey, mode).catch(err => { throw new VerifyRejected(`Cancelled resting DCA orders but FAILED to close the position (size ${qty}) on Binance: ${err.message}. Check ${symbol} on Binance directly.`); });
+  return { closed: { qty, orderId: order.orderId } };
+}
+
 
 
 app.post('/api/order', async (req, res) => {
@@ -3422,6 +3637,64 @@ function gridSimpleRoute(path, table){
 gridSimpleRoute('/api/futures/grid/orders', GRID_OPEN_ORDERS);
 gridSimpleRoute('/api/futures/grid/positions', GRID_POSITIONS);
 gridSimpleRoute('/api/futures/grid/flatten', GRID_FLATTEN);
+
+// =============================================================
+// Trading Bots — DCA routes. Same generic gridRoute/gridSimpleRoute
+// helpers as Grid above (they're not actually Grid-specific — just
+// named for where they were first used), just pointed at the one-way
+// DCA functions instead of Grid's hedge-mode ones.
+// =============================================================
+const DCA_PLACE = { bybit: placeBybitDcaOrder, binance: placeBinanceDcaOrder };
+const DCA_SET_TP = { bybit: setBybitDcaTakeProfit, binance: setBinanceDcaTakeProfit };
+const DCA_CANCEL = { bybit: cancelBybitOrder, binance: cancelBinanceOrder };
+const DCA_OPEN_ORDERS = { bybit: getBybitDcaOpenOrders, binance: getBinanceDcaOpenOrders };
+const DCA_POSITION = { bybit: getBybitDcaPosition, binance: getBinanceDcaPosition };
+const DCA_FLATTEN = { bybit: flattenBybitDca, binance: flattenBinanceDca };
+
+function dcaRoute(path, table, argsFromBody){
+  app.post(path, async (req, res) => {
+    const { exchange, mode, apiKey, secretKey } = req.body || {};
+    if(!exchange || !apiKey || !secretKey){
+      return res.status(400).json({ ok:false, message:'exchange, apiKey, and secretKey are all required.' });
+    }
+    const fn = table[exchange];
+    if(!fn) return res.status(400).json({ ok:false, message:`DCA Live/Demo only supports bybit and binance right now — "${exchange}" isn't wired up.` });
+    const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+    try{
+      const result = await fn(netMode, apiKey, secretKey, argsFromBody(req.body));
+      return res.json({ ok:true, ...result });
+    }catch(err){
+      if(err instanceof VerifyRejected) return res.json({ ok:false, rejected:true, message: err.message });
+      return res.json({ ok:false, rejected:false, message: `DCA order call to ${exchange} failed: ${err.message}` });
+    }
+  });
+}
+dcaRoute('/api/futures/dca/place', DCA_PLACE, b => ({ symbol: b.symbol, direction: b.direction, orderType: b.orderType, price: b.price != null ? parseFloat(b.price) : null, qty: parseFloat(b.qty), leverage: b.leverage != null ? parseFloat(b.leverage) : null }));
+dcaRoute('/api/futures/dca/set-tp', DCA_SET_TP, b => ({ symbol: b.symbol, direction: b.direction, takeProfitPrice: b.takeProfitPrice != null ? parseFloat(b.takeProfitPrice) : null, stopLossPrice: b.stopLossPrice != null ? parseFloat(b.stopLossPrice) : null, existingTpAlgoId: b.existingTpAlgoId, existingSlAlgoId: b.existingSlAlgoId }));
+dcaRoute('/api/futures/dca/cancel', DCA_CANCEL, b => ({ symbol: b.symbol, orderId: b.orderId }));
+
+function dcaSimpleRoute(path, table){
+  app.post(path, async (req, res) => {
+    const { exchange, mode, apiKey, secretKey, symbol } = req.body || {};
+    if(!exchange || !apiKey || !secretKey || !symbol){
+      return res.status(400).json({ ok:false, message:'exchange, apiKey, secretKey, and symbol are all required.' });
+    }
+    const fn = table[exchange];
+    if(!fn) return res.status(400).json({ ok:false, message:`DCA Live/Demo only supports bybit and binance right now — "${exchange}" isn't wired up.` });
+    const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+    try{
+      const result = await fn(netMode, apiKey, secretKey, symbol);
+      return res.json(Array.isArray(result) ? { ok:true, list: result } : { ok:true, ...result });
+    }catch(err){
+      if(err instanceof VerifyRejected) return res.json({ ok:false, rejected:true, message: err.message });
+      return res.json({ ok:false, rejected:false, message: `DCA call to ${exchange} failed: ${err.message}` });
+    }
+  });
+}
+dcaSimpleRoute('/api/futures/dca/orders', DCA_OPEN_ORDERS);
+dcaSimpleRoute('/api/futures/dca/position', DCA_POSITION);
+dcaSimpleRoute('/api/futures/dca/flatten', DCA_FLATTEN);
+
 
 
 //
