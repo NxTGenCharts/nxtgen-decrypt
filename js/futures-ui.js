@@ -22,11 +22,11 @@ import { els, state } from './state.js';
 import { fmtPct } from './utils.js';
 import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS } from './futures/engine.js';
 import { mockMarket } from './futures/mockMarket.js';
-import { RISK_DEFAULTS } from './futures/risk.js';
+import { RISK_DEFAULTS, estimateLiquidationPrice } from './futures/risk.js';
 import { DEFAULT_WEIGHTS } from './futures/scoring.js';
 import { computeBtcShock } from './futures/indicators.js';
 import { STRATEGY_REGISTRY } from './futures/setups.js';
-import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGridSymbol, closeAllGridSessions, buildGridPlan, buildManualGridPlan, detectGridBreakout, netCycleProfit, scoreGridSuitability } from './futures/grid.js';
+import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGridSymbol, closeAllGridSessions, buildGridPlan, buildManualGridPlan, suggestGridRange, detectGridBreakout, netCycleProfit, scoreGridSuitability, runTradingBotsGridBacktest, summarizeTradingBotsGridTrades } from './futures/grid.js';
 import { DCA_STRATEGY, DCA_DEFAULTS, buildDcaPlan, computeDcaExitPrices } from './futures/dca.js';
 import { classifyRegime } from './futures/regime.js';
 import { getAiConfirmation } from './ai-signal.js';
@@ -2916,23 +2916,6 @@ function tradingBotLog(bot, msg, isError){
   renderTradingBotsList();
 }
 
-// Same three-estimate blend buildGridPlan uses internally, exposed here
-// standalone for the create-form's "Smart Fill" button — suggests a
-// starting price range the person can then edit, rather than making
-// them guess one from scratch. Not a suitability gate (no minGridScore
-// check) since a Trading Bots Grid bot deploys on demand, whatever the
-// current regime — Smart Fill is a starting point, not a gatekeeper.
-function suggestGridRange(snap, regime){
-  const s = scoreGridSuitability(snap, regime, GRID_DEFAULTS);
-  const mid = s.vwapM15 || snap.price;
-  const atrHalfWidth = (s.atrM15 || 0) * 2.2;
-  const bbHalfWidth = s.bb ? (s.bb.upper - s.bb.lower) / 2 : atrHalfWidth;
-  const swingHalfWidth = (s.resistance - s.support) / 2 || atrHalfWidth;
-  let halfWidth = (atrHalfWidth + bbHalfWidth + swingHalfWidth) / 3;
-  halfWidth = Math.min(Math.max(halfWidth, mid * 0.75 / 100), mid * 8 / 100);
-  return { upper: mid + halfWidth, lower: mid - halfWidth, mid };
-}
-
 function renderTradingBotsCreate(){
   if(!els.fuTradingBotsCreate) return;
   const f = fu();
@@ -3078,6 +3061,25 @@ function renderTradingBotTypeFields(){
       <div style="font-size:11px;color:var(--dim);margin-top:6px;">Max Loss auto-flattens THIS bot once its own realized losses reach that % of its investment. Profit Target (optional) auto-flattens it once its own realized profit reaches that % — leave blank to let it keep cycling until you stop it or the cross-bot daily target above is hit.</div>
       `}
       <div style="font-size:11px;color:var(--dim);margin-top:8px;">Neutral holds a long AND short leg at once (needs Bybit/Binance hedge mode — this bot switches it on for you on Bybit; on Binance it's account-wide, so you'll be asked to switch it yourself once). Long/Short only takes one side.</div>
+      <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line-soft);">
+        <div style="font-size:11px;color:var(--dim);margin-bottom:8px;line-height:1.5;">
+          Backtests THIS Trading Bots grid code specifically (breakout / drift-recalculation / liquidation-buffer / your own Max Loss &amp; Profit Target above) against real historical candles — not NxTGen Grid's separate, more-gated engine. ${cfg.autoScan ? `Uses ${cfg.minGridScore}/100 as the redeploy gate, matching Auto-Scan.` : `Manual mode has no score gate, so this deploys as soon as a valid range exists — set a Minimum Grid Score below to approximate how Auto-Scan would have behaved instead.`}
+        </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
+          <label style="font-size:11px;color:var(--dim);">Symbol
+            <select id="tbBtSymbol" style="display:block;margin-top:3px;min-width:120px;">${GRID_SYMBOLS.map(s => `<option value="${s}" ${(f.tbBacktestSymbol || GRID_SYMBOLS[0]) === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+          </label>
+          <label style="font-size:11px;color:var(--dim);">Days
+            <input id="tbBtDays" type="number" min="3" max="180" step="1" value="${f.tbBacktestDays || 30}" style="display:block;margin-top:3px;min-width:70px;">
+          </label>
+          ${!cfg.autoScan ? `
+          <label style="font-size:11px;color:var(--dim);">Minimum Grid Score (redeploy gate)
+            <input id="tbBtMinScore" type="number" min="0" max="100" step="1" value="${f.tbBacktestMinScore ?? 0}" style="display:block;margin-top:3px;min-width:90px;">
+          </label>` : ''}
+          <button type="button" id="tbBtRunBtn" class="primary ghost" style="font-size:12px;padding:6px 14px;">Run Backtest</button>
+        </div>
+        <div id="tbBacktestResult" style="font-size:12px;margin-top:10px;"></div>
+      </div>
     `;
   } else {
     const cfg = f.tbDcaForm || (f.tbDcaForm = { direction: 'LONG', baseOrderUsd: DCA_DEFAULTS.baseOrderUsd, safetyOrderUsd: DCA_DEFAULTS.safetyOrderUsd, maxSafetyOrders: DCA_DEFAULTS.maxSafetyOrders, priceDeviationPct: DCA_DEFAULTS.priceDeviationPct, stepScale: DCA_DEFAULTS.stepScale, volumeScale: DCA_DEFAULTS.volumeScale, takeProfitPct: DCA_DEFAULTS.takeProfitPct, stopLossPct: '', leverage: DCA_DEFAULTS.leverage });
@@ -3150,6 +3152,9 @@ function initTradingBots(){
       else if(e.target.id === 'tbSymbol'){ f.tbCreateSymbol = e.target.value.trim().toUpperCase(); }
       else if(e.target.id === 'tbDailyProfitTarget'){ f.tbDailyProfitTargetPct = Math.max(0.5, parseFloat(e.target.value) || 20); }
       else if(e.target.id === 'tbDailyMaxLoss'){ f.tbDailyMaxLossPct = Math.max(0.5, parseFloat(e.target.value) || 10); }
+      else if(e.target.id === 'tbBtSymbol'){ f.tbBacktestSymbol = e.target.value; }
+      else if(e.target.id === 'tbBtDays'){ f.tbBacktestDays = Math.max(3, Math.min(180, parseInt(e.target.value, 10) || 30)); }
+      else if(e.target.id === 'tbBtMinScore'){ f.tbBacktestMinScore = Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0)); }
     });
     els.fuTradingBotsCreate.addEventListener('click', async (e) => {
       if(e.target.classList.contains('tb-grid-mode')){
@@ -3181,6 +3186,10 @@ function initTradingBots(){
         await createTradingBotFromForm();
         return;
       }
+      if(e.target.id === 'tbBtRunBtn'){
+        await runTradingBotsGridBacktestFromForm();
+        return;
+      }
       if(e.target.classList.contains('tb-stop-btn')){
         await stopTradingBot(e.target.dataset.id);
         return;
@@ -3200,6 +3209,69 @@ function initTradingBots(){
       else if(e.target.classList.contains('tb-delete-btn')) deleteTradingBot(e.target.dataset.id);
     });
   }
+}
+
+function tbBacktestResultEl(){ return document.getElementById('tbBacktestResult'); }
+function tbBacktestStatus(msg, isError){
+  const host = tbBacktestResultEl();
+  if(host) host.innerHTML = `<span style="color:${isError ? 'var(--red)' : 'var(--dim)'};">${msg}</span>`;
+}
+
+// Backtests the ACTUAL Trading Bots grid code (via
+// runTradingBotsGridBacktest in grid.js, which mirrors
+// deployGridBotInstance/manageGridBotInstance step for step — including
+// the breakout/drift-recalc/liquidation-buffer exits just added above)
+// against real historical candles for whatever the create form is
+// currently set to. Deliberately separate from the NxTGen Grid
+// backtest on the Backtest tab, which tests a different engine.
+async function runTradingBotsGridBacktestFromForm(){
+  const f = fu();
+  readTradingBotFormNumbers();
+  const cfg = f.tbGridForm;
+  const exchange = f.tbCreateExchange || 'bybit';
+  const symbol = f.tbBacktestSymbol || GRID_SYMBOLS[0];
+  const days = f.tbBacktestDays || 30;
+  const perBotUsd = cfg.autoScan ? cfg.investmentUsd / Math.max(1, cfg.maxConcurrent) : cfg.investmentUsd;
+  const minGridScore = cfg.autoScan ? cfg.minGridScore : (f.tbBacktestMinScore ?? 0);
+  if(!(perBotUsd > 0)){ tbBacktestStatus('Set an investment amount first.', true); return; }
+  tbBacktestStatus(`Fetching ${days}d of ${symbol} history…`);
+  const endMs = Date.now();
+  const startMs = endMs - days * 86_400_000;
+  const data = await callProxy('/api/backtest/klines', { exchange, symbol, interval: '5m', startMs, endMs }).catch(err => ({ ok:false, message: err.message }));
+  if(!data.ok || !data.candles || !data.candles.length){ tbBacktestStatus(`Could not fetch ${symbol} history: ${data.message || 'no candles returned'}.`, true); return; }
+  tbBacktestStatus(`Simulating ${data.candles.length.toLocaleString()} candles…`);
+  await new Promise(resolve => setTimeout(resolve, 0)); // let the status above paint before the sync simulation loop below runs
+  const backtestCfg = {
+    levelCount: Number.isFinite(cfg.levelCount) ? cfg.levelCount : 20,
+    leverage: Number.isFinite(cfg.leverage) ? cfg.leverage : 10,
+    investmentUsd: perBotUsd,
+    maxLossPct: Number.isFinite(cfg.maxLossPct) ? cfg.maxLossPct : 20,
+    profitTargetPct: Number.isFinite(cfg.profitTargetPct) ? cfg.profitTargetPct : null,
+    minGridScore,
+  };
+  const result = runTradingBotsGridBacktest({
+    symbol, candles: data.candles, exchange, cfg: backtestCfg,
+    metaOverrides: { spreadPct: 0.02, fundingRatePct: 0.01 }, intervalMinutes: 5,
+  });
+  const summary = summarizeTradingBotsGridTrades(result.trades, result.counters);
+  const host = tbBacktestResultEl();
+  if(!host) return;
+  if(!summary.deployments){
+    host.innerHTML = `<span style="color:var(--dim);">Never cleared a ${minGridScore}/100 Grid Score in this window — 0 deployments. Try a lower Minimum Grid Score, a different symbol, or a longer window.</span>`;
+    return;
+  }
+  const pnlColor = summary.netUsd >= 0 ? 'var(--green)' : 'var(--red)';
+  host.innerHTML = `
+    <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:8px;">
+      <div><span style="color:var(--dim);">Deployments</span> <strong>${summary.deployments}</strong></div>
+      <div><span style="color:var(--dim);">Closed cycles</span> <strong>${summary.cycles}</strong></div>
+      <div><span style="color:var(--dim);">Win rate</span> <strong>${summary.winRate.toFixed(1)}%</strong></div>
+      <div><span style="color:var(--dim);">Net P&amp;L</span> <strong style="color:${pnlColor};">${fmtUsd(summary.netUsd)}</strong></div>
+      <div><span style="color:var(--dim);">Profit factor</span> <strong>${summary.profitFactor === Infinity ? '∞' : summary.profitFactor.toFixed(2)}</strong></div>
+    </div>
+    <div style="color:var(--dim);font-size:11px;">Exits — breakout: ${summary.breakoutExits} · drift-recalc: ${summary.recalculations} · liquidation-risk: ${summary.liquidations} · max loss: ${summary.maxLossExits} · profit target: ${summary.profitTargetExits} · still open at window end: ${summary.openAtEnd}</div>
+    <div style="color:var(--dim);font-size:11px;margin-top:6px;">Simulated over ${data.candles.length.toLocaleString()} real ${symbol} 5m candles (~${days}d), ${fmtUsd(perBotUsd)} per deployment — same code path as the live bot, not a separate model. Past performance on this window is not a guarantee of future results.</div>
+  `;
 }
 
 async function createTradingBotFromForm(){
@@ -3346,6 +3418,52 @@ async function manageGridBotInstance(bot, cred, nowMs){
     bot.status = 'closed';
     renderTradingBotsList();
     return;
+  }
+
+  // Drift recalculation — price has wandered well beyond this grid's own
+  // range WITHOUT a confirmed breakout (detectGridBreakout above requires
+  // ATR-expansion + volume confirmation, so a slow, unconfirmed grind
+  // can sit outside the range for a while without ever tripping it).
+  // Ported from NxTGen Grid's stepGridSymbol — same recalcDriftPct
+  // threshold — because without this, a Trading Bots grid left running
+  // through a slow drift just keeps quoting a range the market has
+  // already left, one-sided and unmanaged, with no auto-correction.
+  const halfWidth = (plan.upper - plan.lower) / 2;
+  const driftedUp = snap.price > plan.upper + halfWidth * (GRID_DEFAULTS.recalcDriftPct / 100);
+  const driftedDown = snap.price < plan.lower - halfWidth * (GRID_DEFAULTS.recalcDriftPct / 100);
+  if(driftedUp || driftedDown){
+    tradingBotLog(bot, `Price drifted ${GRID_DEFAULTS.recalcDriftPct}%+ beyond the grid range without a confirmed breakout — flattening (stale range).`, true);
+    const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+    if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+    bot.status = 'closed';
+    renderTradingBotsList();
+    return;
+  }
+
+  // Liquidation-buffer protection — ported from stepGridSymbol's
+  // liquidationBufferRatio check. If ANY currently-open leg's estimated
+  // liquidation price has drifted uncomfortably close to the current
+  // mark, flatten NOW rather than wait for that leg to either hit its
+  // target or for a confirmed breakout. One real difference from NxTGen
+  // Grid's version: this app's exchange proxy only exposes a
+  // whole-symbol flatten (both hedge-mode sides at once, via
+  // /api/futures/grid/flatten) — there's no reduce-only single-side
+  // close endpoint yet — so this closes the WHOLE bot, not just the
+  // at-risk leg. More conservative than the simulated version, on
+  // purpose, given what's actually available to call right now.
+  const openLegs = bot.runtime.levels.filter(l => l.status === 'PENDING_CLOSE');
+  for(const leg of openLegs){
+    const liqPrice = estimateLiquidationPrice({ entryPrice: leg.entryPrice, leverage: plan.leverage, side: leg.direction, maintenanceMarginRate: RISK_DEFAULTS.maintenanceMarginRate });
+    const dist = Math.abs(snap.price - liqPrice);
+    const worstCase = Math.abs(leg.entryPrice - (leg.direction === 'LONG' ? plan.lower : plan.upper));
+    if(worstCase > 0 && dist < worstCase * GRID_DEFAULTS.liquidationBufferRatio * 0.35){
+      tradingBotLog(bot, `Liquidation risk — a ${leg.direction} leg's est. liquidation (${liqPrice.toFixed(6)}) is too close to mark (${snap.price.toFixed(6)}) — flattening the whole bot.`, true);
+      const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+      if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+      bot.status = 'closed';
+      renderTradingBotsList();
+      return;
+    }
   }
 
   const openOrdersResp = await callProxy('/api/futures/grid/orders', proxyArgs).catch(err => ({ ok:false, message: err.message }));

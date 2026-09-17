@@ -282,6 +282,26 @@ export function buildManualGridPlan({ symbol, direction, upper, lower, levelCoun
   };
 }
 
+// Same three-estimate blend buildGridPlan uses internally, exposed here
+// standalone (moved from futures-ui.js so the backtest simulator below
+// can call it too, without that module importing from the UI layer) —
+// suggests a starting price range from a snapshot, rather than making
+// the caller guess one from scratch. Not a suitability gate (no
+// minGridScore check) — a manual/Smart-Fill range suggestion, or the
+// starting range a Trading Bots grid backtest deploys with; whether to
+// deploy at all is decided separately (minGridScore, when the caller
+// wants that gate).
+export function suggestGridRange(snap, regime){
+  const s = scoreGridSuitability(snap, regime, GRID_DEFAULTS);
+  const mid = s.vwapM15 || snap.price;
+  const atrHalfWidth = (s.atrM15 || 0) * 2.2;
+  const bbHalfWidth = s.bb ? (s.bb.upper - s.bb.lower) / 2 : atrHalfWidth;
+  const swingHalfWidth = (s.resistance - s.support) / 2 || atrHalfWidth;
+  let halfWidth = (atrHalfWidth + bbHalfWidth + swingHalfWidth) / 3;
+  halfWidth = Math.min(Math.max(halfWidth, mid * 0.75 / 100), mid * 8 / 100);
+  return { upper: mid + halfWidth, lower: mid - halfWidth, mid };
+}
+
 // -------------------------------------------------------------
 // Breakout detection — confirmed close beyond the grid boundary, with
 // ATR-expansion + volume confirmation (false-breakout filter). Returns
@@ -518,8 +538,7 @@ export function closeAllGridSessions(session, priceBySymbol, nowMs, exchange, me
 // fee - slippage - funding accrued) clears minNetProfitPct. This is the
 // gate described in the spec's "FEE-AWARE GRID" section.
 // -------------------------------------------------------------
-export function netCycleProfit({ entryPrice, exitPrice, qty, leverage, direction, exchange, holdMinutes, fundingRatePct, slippagePct }){
-  const fees = DEFAULT_FEE_CONFIG[exchange] || DEFAULT_FEE_CONFIG.binance;
+export function netCycleProfit({ entryPrice, exitPrice, qty, leverage, direction, exchange, holdMinutes, fundingRatePct, slippagePct }){  const fees = DEFAULT_FEE_CONFIG[exchange] || DEFAULT_FEE_CONFIG.binance;
   const notional = entryPrice * qty;
   const sign = direction === 'LONG' ? 1 : -1;
   const grossPct = ((exitPrice - entryPrice) / entryPrice) * sign * 100;
@@ -649,5 +668,204 @@ export function summarizeGridTrades(trades, startingEquity, counters){
     netReturnPct: startingEquity ? (netUsd / startingEquity) * 100 : 0,
     liquidations: counters.liquidations, emergencyExits: counters.emergencyExits,
     breakoutExits: counters.breakoutExits, recalculations: counters.recalculations,
+  };
+}
+
+// =============================================================
+// runTradingBotsGridBacktest — simulates the ACTUAL Trading Bots grid
+// code path (deployGridBotInstance / manageGridBotInstance in
+// futures-ui.js), not the separate, more-protected NxTGen Grid engine
+// runGridBacktest above tests. Deliberately a second, independent
+// simulator rather than a shared one: the two live implementations
+// really are different code (see futures-ui.js's header comments on
+// both), so a backtest claiming to represent Trading Bots Grid has to
+// mirror ITS decisions — a manual/Smart-Fill-style range at deploy
+// time, breakout + drift-recalc + liquidation-buffer + per-bot
+// maxLoss/profitTarget exits, no daily halt (Trading Bots has none
+// globally) — not stepGridSymbol's Grid Score/regime-gated, daily-halted
+// version.
+//
+// Redeploy condition: a NEW bot only opens once the previous one has
+// closed AND the symbol clears cfg.minGridScore at that later bar —
+// same gate runGridAutoScan applies live, since that's genuinely how a
+// left-running Auto-Scan bot behaves (repeatedly redeploying on the
+// same symbol whenever it re-qualifies). A manual, single one-off
+// deployment is just this same loop with cfg.minGridScore: 0.
+//
+// No lookahead: identical discipline to runGridBacktest — bar i only
+// ever sees candles[0..i], both for the entry decision and for that
+// bar's own fills.
+// =============================================================
+export function runTradingBotsGridBacktest({ symbol, candles, cfg, exchange, metaOverrides, intervalMinutes }){
+  const c = { levelCount: 20, leverage: 10, investmentUsd: 100, maxLossPct: 20, profitTargetPct: null, minGridScore: 65, ...cfg };
+  const barMin = intervalMinutes || 5;
+  const m15Group = Math.max(1, Math.round(15 / barMin));
+  const h1Group = Math.max(1, Math.round(60 / barMin));
+
+  function aggregate(uptoIndex, groupSize, count){
+    const out = [];
+    for(let end = uptoIndex + 1; end > 0 && out.length < count; end -= groupSize){
+      const start = Math.max(0, end - groupSize);
+      const slice = candles.slice(start, end);
+      if(!slice.length) continue;
+      out.unshift({ t: slice[0].t, o: slice[0].o, h: Math.max(...slice.map(x => x.h)), l: Math.min(...slice.map(x => x.l)), c: slice[slice.length - 1].c, v: slice.reduce((a, x) => a + x.v, 0) });
+    }
+    return out;
+  }
+  function snapshotAt(i){
+    const barsPerDay = 1440 / barMin;
+    return {
+      symbol, price: candles[i].c,
+      m5: candles.slice(Math.max(0, i - 119), i + 1),
+      m15: aggregate(i, m15Group, 120),
+      h1: aggregate(i, h1Group, 60),
+      meta: { ...metaOverrides, exchange, volume24hUsd: (candles[i].v || 0) * barsPerDay * candles[i].c },
+    };
+  }
+
+  const warmup = Math.max(30 * m15Group, 30 * h1Group) + 20;
+  const trades = [];
+  const equityCurve = [];
+  const counters = { deployments: 0, breakoutExits: 0, recalculations: 0, liquidations: 0, maxLossExits: 0, profitTargetExits: 0, openAtEnd: 0 };
+  let bot = null; // { plan, openLegs, filledLevel, realizedUsd, openedAt }
+  let cumulativeNetUsd = 0;
+
+  function recordClose(leg, exitPrice, exitReason, nowMs){
+    const pnl = netCycleProfit({
+      entryPrice: leg.entry, exitPrice, qty: leg.qty, leverage: bot.plan.leverage, direction: leg.direction,
+      exchange, holdMinutes: (nowMs - leg.openedAt) / 60_000, fundingRatePct: (metaOverrides && metaOverrides.fundingRatePct) || 0,
+      slippagePct: (metaOverrides && metaOverrides.spreadPct) || 0.02,
+    });
+    bot.realizedUsd += pnl.netUsd;
+    cumulativeNetUsd += pnl.netUsd;
+    trades.push({
+      closedAtMs: nowMs, openedAtMs: leg.openedAt, exchange, symbol, direction: leg.direction,
+      entry: leg.entry, exit: exitPrice, qty: leg.qty, leverage: bot.plan.leverage,
+      grossUsd: pnl.grossUsd, feesUsd: pnl.feesUsd, fundingUsd: pnl.fundingUsd, slippageUsd: pnl.slippageUsd, netUsd: pnl.netUsd,
+      setupType: 'Trading Bot: Grid', exitReason, durationMin: Math.round((nowMs - leg.openedAt) / 60_000),
+      gridId: bot.id, gridLevel: leg.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
+    });
+  }
+  function closeAllLegs(exitPrice, exitReason, nowMs){
+    for(const leg of bot.openLegs.slice()) recordClose(leg, exitPrice, exitReason, nowMs);
+    bot.openLegs = [];
+  }
+
+  for(let i = warmup; i < candles.length; i++){
+    const nowMs = candles[i].t;
+    const bar = candles[i];
+    const snap = snapshotAt(i);
+    const regime = classifyRegime(snap.h1, snap.m15);
+
+    if(bot){
+      const bo = detectGridBreakout(snap, bot.plan, GRID_DEFAULTS);
+      if(bo.breakout){
+        closeAllLegs(bar.c, 'BREAKOUT_EXIT', nowMs);
+        counters.breakoutExits++;
+        bot = null;
+      }
+    }
+    if(bot){
+      const halfWidth = (bot.plan.upper - bot.plan.lower) / 2;
+      const driftedUp = bar.c > bot.plan.upper + halfWidth * (GRID_DEFAULTS.recalcDriftPct / 100);
+      const driftedDown = bar.c < bot.plan.lower - halfWidth * (GRID_DEFAULTS.recalcDriftPct / 100);
+      if(driftedUp || driftedDown){
+        closeAllLegs(bar.c, 'GRID_RECALCULATION', nowMs);
+        counters.recalculations++;
+        bot = null;
+      }
+    }
+    if(bot){
+      for(const leg of bot.openLegs.slice()){
+        const liqPrice = estimateLiquidationPrice({ entryPrice: leg.entry, leverage: bot.plan.leverage, side: leg.direction, maintenanceMarginRate: 0.5 });
+        const dist = Math.abs(bar.c - liqPrice);
+        const worstCase = Math.abs(leg.entry - (leg.direction === 'LONG' ? bot.plan.lower : bot.plan.upper));
+        if(worstCase > 0 && dist < worstCase * GRID_DEFAULTS.liquidationBufferRatio * 0.35){
+          closeAllLegs(bar.c, 'LIQUIDATION_RISK_EXIT', nowMs);
+          counters.liquidations++;
+          bot = null;
+          break;
+        }
+      }
+    }
+    if(bot){
+      const perLevelUsd = bot.plan.allocationUsd / bot.plan.levelCount;
+      for(let li = 0; li < bot.plan.levels.length; li++){
+        if(bot.filledLevel[li]) continue;
+        const levelPrice = bot.plan.levels[li];
+        if(!(bar.l <= levelPrice && bar.h >= levelPrice)) continue;
+        const isLowerHalf = levelPrice <= bot.plan.mid;
+        const direction = isLowerHalf ? 'LONG' : 'SHORT'; // NEUTRAL, same as the live create form always deploys
+        const qty = (perLevelUsd * bot.plan.leverage) / levelPrice;
+        bot.filledLevel[li] = true;
+        bot.openLegs.push({ levelIndex: li, entry: levelPrice, qty, direction, openedAt: nowMs, targetIndex: isLowerHalf ? li + 1 : li - 1 });
+      }
+      for(const leg of bot.openLegs.slice()){
+        const targetPrice = bot.plan.levels[leg.targetIndex];
+        if(targetPrice == null) continue;
+        const reached = leg.direction === 'LONG' ? bar.h >= targetPrice : bar.l <= targetPrice;
+        if(!reached) continue;
+        recordClose(leg, targetPrice, 'GRID_CYCLE_TP', nowMs);
+        bot.openLegs = bot.openLegs.filter(l => l !== leg);
+        bot.filledLevel[leg.levelIndex] = false;
+      }
+    }
+    if(bot){
+      const lossFloorUsd = c.maxLossPct ? -c.investmentUsd * (c.maxLossPct / 100) : null;
+      const profitCeilUsd = c.profitTargetPct ? c.investmentUsd * (c.profitTargetPct / 100) : null;
+      if(lossFloorUsd != null && bot.realizedUsd <= lossFloorUsd){
+        closeAllLegs(bar.c, 'MAX_LOSS_EXIT', nowMs);
+        counters.maxLossExits++;
+        bot = null;
+      } else if(profitCeilUsd != null && bot.realizedUsd >= profitCeilUsd){
+        closeAllLegs(bar.c, 'PROFIT_TARGET_EXIT', nowMs);
+        counters.profitTargetExits++;
+        bot = null;
+      }
+    }
+    if(!bot){
+      const suitability = scoreGridSuitability(snap, regime, { ...GRID_DEFAULTS, minGridScore: c.minGridScore });
+      if(suitability.regimeOk && suitability.score >= c.minGridScore){
+        const range = suggestGridRange(snap, regime);
+        const plan = buildManualGridPlan({ symbol, direction: 'NEUTRAL', upper: range.upper, lower: range.lower, levelCount: c.levelCount, leverage: c.leverage, investmentUsd: c.investmentUsd });
+        if(plan){
+          counters.deployments++;
+          bot = { id: `TB-${symbol}-${counters.deployments}`, plan, openLegs: [], filledLevel: new Array(plan.levels.length).fill(false), realizedUsd: 0, openedAt: nowMs };
+        }
+      }
+    }
+    equityCurve.push({ t: nowMs, equity: cumulativeNetUsd });
+  }
+
+  if(bot && bot.openLegs.length && candles.length){
+    const last = candles[candles.length - 1];
+    closeAllLegs(last.c, 'OPEN_AT_END', last.t);
+    counters.openAtEnd = trades.filter(t => t.exitReason === 'OPEN_AT_END').length;
+  }
+
+  return { trades, equityCurve, counters, symbol };
+}
+
+// Trading-Bots-specific summary — same net-of-cost methodology as
+// summarizeGridTrades, but with THIS simulator's own exit-reason
+// counters (maxLossExits/profitTargetExits instead of NxTGen Grid's
+// dailyHalted/emergencyExit, since Trading Bots has neither).
+export function summarizeTradingBotsGridTrades(trades, counters){
+  const cycles = trades.length;
+  const wins = trades.filter(t => t.netUsd > 0);
+  const losses = trades.filter(t => t.netUsd <= 0);
+  const netProfit = wins.reduce((a, t) => a + t.netUsd, 0);
+  const netLoss = Math.abs(losses.reduce((a, t) => a + t.netUsd, 0));
+  const netUsd = trades.reduce((a, t) => a + t.netUsd, 0);
+  const feesUsd = trades.reduce((a, t) => a + t.feesUsd, 0);
+  const winRate = cycles ? (wins.length / cycles) * 100 : 0;
+  const profitFactor = netLoss > 0 ? netProfit / netLoss : (netProfit > 0 ? Infinity : 0);
+  const avgWinUsd = wins.length ? netProfit / wins.length : 0;
+  const avgLossUsd = losses.length ? -netLoss / losses.length : 0;
+  const expectancyUsd = cycles ? netUsd / cycles : 0;
+  return {
+    cycles, winRate, netUsd, feesUsd, profitFactor, avgWinUsd, avgLossUsd, expectancyUsd,
+    deployments: counters.deployments, breakoutExits: counters.breakoutExits, recalculations: counters.recalculations,
+    liquidations: counters.liquidations, maxLossExits: counters.maxLossExits, profitTargetExits: counters.profitTargetExits, openAtEnd: counters.openAtEnd,
   };
 }
