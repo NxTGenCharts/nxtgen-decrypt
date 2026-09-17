@@ -432,6 +432,30 @@ export const state = {
     tradingBots: [],       // { id, type:'grid'|'dca', exchange, mode, symbol, direction, investmentUsd, leverage, status, createdAtMs, config, plan, runtime, statusMessage, realizedUsd }
     tradingBotsTimer: null,
     tradingBotsRunning: false,
+    // Cross-bot daily profit/loss cap — separate from any single bot's
+    // own risk settings (DCA's stopLossPct, Grid's per-bot maxLossPct):
+    // this tracks TOTAL realized P&L across every Trading Bot today
+    // against the total capital committed to Trading Bots today, and
+    // once either threshold hits, EVERY active bot is force-stopped and
+    // no new one can be created until the next calendar day — no matter
+    // what any individual bot's own state looks like. See
+    // rollTradingBotsDay/checkTradingBotsDailyLimits in futures-ui.js.
+    tbDailyProfitTargetPct: 20,
+    tbDailyMaxLossPct: 10,
+    tbDayAnchorInvestmentUsd: 0, // sum of investmentUsd for every bot created today
+    tbDayRealizedUsd: 0,         // sum of realized P&L from every bot's closes today
+    tbDayKey: null,
+    tbDailyHalted: false,
+    tbDailyHaltMessage: null,
+    // Futures Grid Auto-Scan — watches GRID_SYMBOLS (the same watchlist
+    // NxTGen Grid uses) and auto-creates new Trading Bots grid deployments
+    // sized with tbAutoScanConfig's fixed investment/leverage the moment a
+    // symbol clears Minimum Grid Score, up to maxConcurrent auto bots at
+    // once. See toggleGridAutoScan/runGridAutoScan in futures-ui.js.
+    tbAutoScanEnabled: false,
+    tbAutoScanExchange: null,
+    tbAutoScanConfig: null,
+    tbAutoScanCursor: 0,
     lastRows: [],
     lastRegimeSummary: null,
     lastExplainIndex: null,

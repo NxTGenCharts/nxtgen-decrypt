@@ -2936,11 +2936,14 @@ function suggestGridRange(snap, regime){
 function renderTradingBotsCreate(){
   if(!els.fuTradingBotsCreate) return;
   const f = fu();
+  rollTradingBotsDay(Date.now());
   const type = f.tbCreateType || 'grid';
   const exchange = f.tbCreateExchange || 'bybit';
   const mode = f.liveModeByExchange[exchange] || 'live';
+  const isAutoScan = type === 'grid' && f.tbGridForm?.autoScan;
   els.fuTradingBotsCreate.innerHTML = `
-    <div class="ov-block" style="padding:12px;margin-bottom:12px;">
+    <div id="tbDailyLimitsBar"></div>
+    <div class="ov-block" id="tbCreateFormBlock" style="padding:12px;margin-bottom:12px;">
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;">
         <label style="font-size:11px;color:var(--dim);">Bot Type
           <select id="tbType" style="display:block;margin-top:3px;min-width:140px;">
@@ -2953,16 +2956,56 @@ function renderTradingBotsCreate(){
           </select>
         </label>
         <div style="font-size:11px;color:var(--dim);align-self:flex-end;padding-bottom:6px;">${mode === 'demo' ? 'Demo' : 'Live'} network (set per-exchange in the Live/Demo controls above)</div>
+        ${isAutoScan ? '' : `
         <label style="font-size:11px;color:var(--dim);">Symbol
           <input id="tbSymbol" type="text" placeholder="e.g. AVAXUSDT" value="${f.tbCreateSymbol || ''}" style="display:block;margin-top:3px;min-width:130px;text-transform:uppercase;">
-        </label>
+        </label>`}
       </div>
       <div id="tbTypeFields"></div>
       <div id="tbCreateStatus" style="font-size:11.5px;color:var(--dim);margin-top:8px;"></div>
-      <button type="button" id="tbCreateBtn" class="primary" style="font-size:12px;padding:6px 16px;margin-top:10px;">Create Now</button>
+      <button type="button" id="tbCreateBtn" class="primary" style="font-size:12px;padding:6px 16px;margin-top:10px;">${isAutoScan ? (f.tbAutoScanEnabled ? 'Stop Auto-Scan' : 'Start Auto-Scan') : 'Create Now'}</button>
     </div>
   `;
   renderTradingBotTypeFields();
+  renderTradingBotsDailyLimits();
+}
+
+// Refreshes ONLY the daily-limits banner (target %, today's progress,
+// paused state) — deliberately separate from renderTradingBotsCreate so
+// updating it (which happens mid-deploy, every cycle, and on every
+// realized close) never wipes out whatever the person is mid-typing in
+// the create form below it.
+function renderTradingBotsDailyLimits(){
+  const host = document.getElementById('tbDailyLimitsBar');
+  if(!host) return;
+  const f = fu();
+  const dayPct = f.tbDayAnchorInvestmentUsd > 0 ? (f.tbDayRealizedUsd / f.tbDayAnchorInvestmentUsd) * 100 : 0;
+  host.innerHTML = `
+    <div class="ov-block" style="padding:12px;margin-bottom:12px;">
+      <strong style="font-size:12.5px;">Daily Risk Limits — ALL Trading Bots combined</strong>
+      <div style="font-size:11px;color:var(--dim);margin:4px 0 8px;line-height:1.5;">
+        Tracked against the total invested across every bot created today (currently ${fmtUsd(f.tbDayAnchorInvestmentUsd)}). The moment either limit is hit, EVERY active bot is force-stopped — no matter what any single bot's own state looks like — and no new bot can be created until the next calendar day.
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
+        <label style="font-size:11px;color:var(--dim);">Daily Profit Target (%)
+          <input id="tbDailyProfitTarget" type="number" min="0.5" step="any" value="${f.tbDailyProfitTargetPct}" style="display:block;margin-top:3px;min-width:100px;">
+        </label>
+        <label style="font-size:11px;color:var(--dim);">Daily Max Loss (%)
+          <input id="tbDailyMaxLoss" type="number" min="0.5" step="any" value="${f.tbDailyMaxLossPct}" style="display:block;margin-top:3px;min-width:100px;">
+        </label>
+        <div style="font-size:12px;">Today: <strong style="color:${dayPct >= 0 ? 'var(--green)' : 'var(--red)'};">${dayPct >= 0 ? '+' : ''}${dayPct.toFixed(2)}%</strong> (${fmtUsd(f.tbDayRealizedUsd)} realized)</div>
+      </div>
+      ${f.tbDailyHalted ? `<div style="margin-top:8px;font-size:12px;color:var(--red);border:1px solid var(--red);border-radius:6px;padding:6px 10px;">⏸ PAUSED for today: ${f.tbDailyHaltMessage || 'daily limit reached'} — resumes automatically at the next UTC day rollover.</div>` : ''}
+    </div>
+  `;
+  const formBlock = document.getElementById('tbCreateFormBlock');
+  if(formBlock){
+    formBlock.style.opacity = f.tbDailyHalted ? '.5' : '';
+    ['tbType', 'tbExchange', 'tbSymbol', 'tbCreateBtn'].forEach(id => {
+      const el = document.getElementById(id);
+      if(el) el.disabled = !!f.tbDailyHalted;
+    });
+  }
 }
 
 function renderTradingBotTypeFields(){
@@ -2971,8 +3014,40 @@ function renderTradingBotTypeFields(){
   const f = fu();
   const type = f.tbCreateType || 'grid';
   if(type === 'grid'){
-    const cfg = f.tbGridForm || (f.tbGridForm = { direction: 'NEUTRAL', upper: '', lower: '', levelCount: 20, leverage: 5, investmentUsd: 100 });
+    const cfg = f.tbGridForm || (f.tbGridForm = { autoScan: false, direction: 'NEUTRAL', upper: '', lower: '', levelCount: 20, leverage: 5, investmentUsd: 100, maxLossPct: 20, profitTargetPct: '', maxConcurrent: 3, minGridScore: 65 });
     host.innerHTML = `
+      <div style="display:flex;gap:10px;margin-bottom:10px;">
+        ${[['manual', 'Manual'], ['auto', 'Auto-Scan Watchlist']].map(([m, label]) => `<button type="button" class="primary ${(cfg.autoScan ? 'auto' : 'manual') === m ? '' : 'ghost'} tb-grid-mode" data-mode="${m}" style="font-size:12px;padding:5px 14px;">${label}</button>`).join('')}
+      </div>
+      ${cfg.autoScan ? `
+        <div style="font-size:11px;color:var(--dim);margin-bottom:8px;line-height:1.5;">
+          Scans the same ${GRID_SYMBOLS.length}-symbol watchlist NxTGen Grid uses, a few at a time each cycle, and deploys a NEW bot — sized with the investment/leverage below, always Neutral (holds both sides) — the moment a symbol clears Minimum Grid Score. Keeps doing this, up to Max Concurrent Auto Bots, until you hit Stop Auto-Scan.
+        </div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
+          <label style="font-size:11px;color:var(--dim);">Investment per bot (USDT)
+            <input id="tbGridInvestment" type="number" min="1" step="any" value="${cfg.investmentUsd}" style="display:block;margin-top:3px;min-width:120px;">
+          </label>
+          <label style="font-size:11px;color:var(--dim);">Leverage
+            <input id="tbGridLeverage" type="number" min="1" max="50" step="1" value="${cfg.leverage}" style="display:block;margin-top:3px;min-width:80px;">
+          </label>
+          <label style="font-size:11px;color:var(--dim);">Grids
+            <input id="tbGridLevels" type="number" min="2" max="150" step="1" value="${cfg.levelCount}" style="display:block;margin-top:3px;min-width:80px;">
+          </label>
+          <label style="font-size:11px;color:var(--dim);">Max Loss (%, per bot)
+            <input id="tbGridMaxLoss" type="number" min="1" step="any" value="${cfg.maxLossPct}" style="display:block;margin-top:3px;min-width:100px;">
+          </label>
+          <label style="font-size:11px;color:var(--dim);">Profit Target (%, per bot, optional)
+            <input id="tbGridProfitTarget" type="number" min="0.5" step="any" value="${cfg.profitTargetPct}" placeholder="none" style="display:block;margin-top:3px;min-width:130px;">
+          </label>
+          <label style="font-size:11px;color:var(--dim);">Minimum Grid Score
+            <input id="tbGridMinScore" type="number" min="1" max="100" step="1" value="${cfg.minGridScore}" style="display:block;margin-top:3px;min-width:100px;">
+          </label>
+          <label style="font-size:11px;color:var(--dim);">Max Concurrent Auto Bots
+            <input id="tbGridMaxConcurrent" type="number" min="1" max="20" step="1" value="${cfg.maxConcurrent}" style="display:block;margin-top:3px;min-width:100px;">
+          </label>
+        </div>
+        <div id="tbAutoScanStatus" style="font-size:11.5px;color:var(--dim);margin-top:10px;"></div>
+      ` : `
       <div style="display:flex;gap:10px;margin-bottom:10px;">
         ${['NEUTRAL', 'LONG', 'SHORT'].map(d => `<button type="button" class="primary ${cfg.direction === d ? '' : 'ghost'} tb-grid-direction" data-dir="${d}" style="font-size:12px;padding:5px 14px;">${d === 'NEUTRAL' ? 'Neutral' : d === 'LONG' ? 'Long' : 'Short'}</button>`).join('')}
       </div>
@@ -2993,7 +3068,15 @@ function renderTradingBotTypeFields(){
         <label style="font-size:11px;color:var(--dim);">Total Investment (USDT)
           <input id="tbGridInvestment" type="number" min="1" step="any" value="${cfg.investmentUsd}" style="display:block;margin-top:3px;min-width:120px;">
         </label>
+        <label style="font-size:11px;color:var(--dim);">Max Loss (%, this bot)
+          <input id="tbGridMaxLoss" type="number" min="1" step="any" value="${cfg.maxLossPct}" style="display:block;margin-top:3px;min-width:100px;">
+        </label>
+        <label style="font-size:11px;color:var(--dim);">Profit Target (%, this bot, optional)
+          <input id="tbGridProfitTarget" type="number" min="0.5" step="any" value="${cfg.profitTargetPct}" placeholder="none" style="display:block;margin-top:3px;min-width:130px;">
+        </label>
       </div>
+      <div style="font-size:11px;color:var(--dim);margin-top:6px;">Max Loss auto-flattens THIS bot once its own realized losses reach that % of its investment. Profit Target (optional) auto-flattens it once its own realized profit reaches that % — leave blank to let it keep cycling until you stop it or the cross-bot daily target above is hit.</div>
+      `}
       <div style="font-size:11px;color:var(--dim);margin-top:8px;">Neutral holds a long AND short leg at once (needs Bybit/Binance hedge mode — this bot switches it on for you on Bybit; on Binance it's account-wide, so you'll be asked to switch it yourself once). Long/Short only takes one side.</div>
     `;
   } else {
@@ -3023,11 +3106,19 @@ function readTradingBotFormNumbers(){
   const type = f.tbCreateType || 'grid';
   if(type === 'grid'){
     const cfg = f.tbGridForm;
-    cfg.upper = parseFloat(document.getElementById('tbGridUpper').value);
-    cfg.lower = parseFloat(document.getElementById('tbGridLower').value);
-    cfg.levelCount = parseInt(document.getElementById('tbGridLevels').value, 10);
     cfg.leverage = parseFloat(document.getElementById('tbGridLeverage').value);
     cfg.investmentUsd = parseFloat(document.getElementById('tbGridInvestment').value);
+    cfg.levelCount = parseInt(document.getElementById('tbGridLevels').value, 10);
+    cfg.maxLossPct = parseFloat(document.getElementById('tbGridMaxLoss').value);
+    const ptRaw = document.getElementById('tbGridProfitTarget').value;
+    cfg.profitTargetPct = ptRaw === '' ? null : parseFloat(ptRaw);
+    if(cfg.autoScan){
+      cfg.minGridScore = parseFloat(document.getElementById('tbGridMinScore').value);
+      cfg.maxConcurrent = parseInt(document.getElementById('tbGridMaxConcurrent').value, 10);
+    } else {
+      cfg.upper = parseFloat(document.getElementById('tbGridUpper').value);
+      cfg.lower = parseFloat(document.getElementById('tbGridLower').value);
+    }
   } else {
     const cfg = f.tbDcaForm;
     cfg.baseOrderUsd = parseFloat(document.getElementById('tbDcaBase').value);
@@ -3057,8 +3148,13 @@ function initTradingBots(){
       if(e.target.id === 'tbType'){ f.tbCreateType = e.target.value; renderTradingBotTypeFields(); }
       else if(e.target.id === 'tbExchange'){ readTradingBotFormNumbers(); f.tbCreateExchange = e.target.value; renderTradingBotsCreate(); }
       else if(e.target.id === 'tbSymbol'){ f.tbCreateSymbol = e.target.value.trim().toUpperCase(); }
+      else if(e.target.id === 'tbDailyProfitTarget'){ f.tbDailyProfitTargetPct = Math.max(0.5, parseFloat(e.target.value) || 20); }
+      else if(e.target.id === 'tbDailyMaxLoss'){ f.tbDailyMaxLossPct = Math.max(0.5, parseFloat(e.target.value) || 10); }
     });
     els.fuTradingBotsCreate.addEventListener('click', async (e) => {
+      if(e.target.classList.contains('tb-grid-mode')){
+        readTradingBotFormNumbers(); fu().tbGridForm.autoScan = e.target.dataset.mode === 'auto'; renderTradingBotTypeFields(); renderTradingBotsCreate(); return;
+      }
       if(e.target.classList.contains('tb-grid-direction')){
         readTradingBotFormNumbers(); fu().tbGridForm.direction = e.target.dataset.dir; renderTradingBotTypeFields(); return;
       }
@@ -3107,15 +3203,23 @@ function initTradingBots(){
 
 async function createTradingBotFromForm(){
   const f = fu();
+  rollTradingBotsDay(Date.now());
+  if(f.tbDailyHalted){ tbCreateStatus(`Paused for today: ${f.tbDailyHaltMessage || 'daily limit reached'} — try again after the next UTC day rollover.`, true); return; }
   const type = f.tbCreateType || 'grid';
   const exchange = f.tbCreateExchange || 'bybit';
-  const symbol = (document.getElementById('tbSymbol').value || '').trim().toUpperCase();
-  if(!symbol){ tbCreateStatus('Enter a symbol.', true); return; }
   if(!GRID_LIVE_EXCHANGES.includes(exchange)){ tbCreateStatus('Trading Bots only support Bybit or Binance.', true); return; }
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);
   if(!cred){ tbCreateStatus(`No verified ${exchange} ${mode} credential — connect it in Autotrade & Balances first.`, true); return; }
   readTradingBotFormNumbers();
+
+  if(type === 'grid' && f.tbGridForm.autoScan){
+    toggleGridAutoScan(exchange);
+    return;
+  }
+
+  const symbol = (document.getElementById('tbSymbol').value || '').trim().toUpperCase();
+  if(!symbol){ tbCreateStatus('Enter a symbol.', true); return; }
 
   const bot = {
     id: newTradingBotId(type), type, exchange, mode, symbol,
@@ -3127,10 +3231,12 @@ async function createTradingBotFromForm(){
     const cfg = f.tbGridForm;
     if(!(cfg.upper > cfg.lower)){ tbCreateStatus('Upper price must be greater than lower price.', true); return; }
     if(!(cfg.investmentUsd > 0)){ tbCreateStatus('Enter a total investment amount.', true); return; }
+    if(!(cfg.maxLossPct > 0)){ tbCreateStatus('Enter a Max Loss % for this bot.', true); return; }
     const plan = buildManualGridPlan({ symbol, direction: cfg.direction, upper: cfg.upper, lower: cfg.lower, levelCount: cfg.levelCount, leverage: cfg.leverage, investmentUsd: cfg.investmentUsd });
     if(!plan){ tbCreateStatus('Check your grid settings — could not build a valid plan from them.', true); return; }
     bot.direction = cfg.direction; bot.investmentUsd = cfg.investmentUsd; bot.leverage = cfg.leverage;
     bot.config = { ...cfg }; bot.plan = plan; bot.runtime = { levels: [], longStopSet: false, shortStopSet: false };
+    f.tbDayAnchorInvestmentUsd += bot.investmentUsd; // known immediately for Grid — DCA adds its own once the plan is built against a real price, see deployDcaBotInstance
   } else {
     const cfg = f.tbDcaForm;
     if(!(cfg.baseOrderUsd > 0)){ tbCreateStatus('Enter a base order size.', true); return; }
@@ -3140,6 +3246,7 @@ async function createTradingBotFromForm(){
 
   f.tradingBots.push(bot);
   renderTradingBotsList();
+  renderTradingBotsCreate();
   tbCreateStatus('');
 
   if(type === 'grid') await deployGridBotInstance(bot, cred);
@@ -3147,6 +3254,36 @@ async function createTradingBotFromForm(){
 
   if(!f.tradingBotsRunning) toggleTradingBotsRunning(); // start the management loop the moment there's a bot to manage
 }
+
+// Flips the Futures Grid Auto-Scan switch on/off. Turning it ON snapshots
+// the current form (investment/leverage/grids/max-loss/profit-target/
+// minGridScore/maxConcurrent) as the config every auto-deployed bot from
+// here on uses — editing the form afterward does NOT retroactively change
+// bots already created, only new ones the scan makes from here. Turning
+// it OFF just stops making NEW bots; bots it already created keep running
+// (and its own Max Loss/Profit Target/the daily cap still manage them) —
+// Stop those individually or via the Daily Risk Limits cap if you want
+// them gone too.
+function toggleGridAutoScan(exchange){
+  const f = fu();
+  f.tbAutoScanEnabled = !f.tbAutoScanEnabled;
+  if(f.tbAutoScanEnabled){
+    f.tbAutoScanExchange = exchange;
+    f.tbAutoScanConfig = { ...f.tbGridForm };
+    tbAutoScanStatus(`Auto-scan started on ${EXCHANGE_DISPLAY_NAMES[exchange] || exchange} — watching the watchlist.`);
+    if(!f.tradingBotsRunning) toggleTradingBotsRunning();
+  } else {
+    tbAutoScanStatus('Auto-scan stopped — bots it already created keep running until you stop them individually.');
+  }
+  renderTradingBotsCreate();
+}
+
+function tbAutoScanStatus(msg){
+  const host = document.getElementById('tbAutoScanStatus');
+  if(host) host.textContent = msg;
+}
+
+
 
 // -------------------------------------------------------------
 // Futures Grid bot — deployment + ongoing management. Reuses the EXACT
@@ -3186,6 +3323,7 @@ async function deployGridBotInstance(bot, cred){
   }
   bot.runtime.levels = levels;
   bot.runtime.openedAtMs = Date.now();
+  bot.runtime.unrealizedUsd = null; // set for real on the first management tick
   bot.status = 'active';
   tradingBotLog(bot, `Grid ACTIVE — ${levels.length}/${plan.levelCount} levels resting.`, false);
 }
@@ -3210,6 +3348,12 @@ async function manageGridBotInstance(bot, cred, nowMs){
   if(!openOrdersResp.ok){ tradingBotLog(bot, `Could not read open orders: ${openOrdersResp.message}`, true); return; }
   const openIds = new Set(openOrdersResp.list.map(o => String(o.orderId)));
 
+  // Real floating P&L on whatever's currently open — separate from
+  // bot.realizedUsd (closed cycles only). Read fresh every cycle so the
+  // card always reflects the exchange's own mark, not a stale snapshot.
+  const posResp = await callProxy('/api/futures/grid/positions', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  bot.runtime.unrealizedUsd = posResp.ok ? (posResp.long?.unrealisedPnl || 0) + (posResp.short?.unrealisedPnl || 0) : null;
+
   for(const level of bot.runtime.levels){
     if(level.status === 'PENDING_ENTRY' && level.entryOrderId != null && !openIds.has(String(level.entryOrderId))){
       const targetPrice = plan.levels[level.targetIndex];
@@ -3231,6 +3375,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
       const qty = (perLevelUsd * plan.leverage) / level.entryPrice;
       const pnl = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: level.targetPrice, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
       bot.realizedUsd += pnl.netUsd;
+      addTradingBotsRealized(pnl.netUsd);
       const record = {
         closedAtMs: nowMs, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
         entry: level.entryPrice, exit: level.targetPrice, qty, leverage: plan.leverage,
@@ -3244,7 +3389,29 @@ async function manageGridBotInstance(bot, cred, nowMs){
       else { level.status = 'IDLE'; level.entryOrderId = null; level.closeOrderId = null; tradingBotLog(bot, `Cycle closed on level ${level.levelIndex} but couldn't re-arm it: ${rePlaced.message}`, true); }
     }
   }
-  tradingBotLog(bot, `Running — ${bot.runtime.levels.filter(l => l.status === 'PENDING_CLOSE').length} leg(s) open, ${fmtUsd(bot.realizedUsd)} realized.`, false);
+  // This bot's OWN Max Loss / Profit Target — separate from, and checked
+  // before, the cross-bot daily cap: this can flatten just THIS bot while
+  // others keep running, unlike the daily cap which stops everything.
+  if(bot.status === 'active'){
+    const maxLossPct = bot.config?.maxLossPct;
+    const profitTargetPct = bot.config?.profitTargetPct;
+    const lossFloorUsd = maxLossPct ? -bot.investmentUsd * (maxLossPct / 100) : null;
+    const profitCeilUsd = profitTargetPct ? bot.investmentUsd * (profitTargetPct / 100) : null;
+    if(lossFloorUsd != null && bot.realizedUsd <= lossFloorUsd){
+      tradingBotLog(bot, `This bot's Max Loss (${maxLossPct}%) reached — flattening.`, true);
+      const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+      if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+      bot.status = 'closed';
+    } else if(profitCeilUsd != null && bot.realizedUsd >= profitCeilUsd){
+      tradingBotLog(bot, `This bot's Profit Target (${profitTargetPct}%) reached — flattening.`, false);
+      const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+      if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+      bot.status = 'closed';
+    }
+  }
+  if(bot.status === 'active'){
+    tradingBotLog(bot, `Running — ${bot.runtime.levels.filter(l => l.status === 'PENDING_CLOSE').length} leg(s) open, ${fmtUsd(bot.realizedUsd)} realized, ${bot.runtime.unrealizedUsd != null ? fmtUsd(bot.runtime.unrealizedUsd) + ' unrealized' : 'unrealized unknown'}.`, false);
+  }
 }
 
 // -------------------------------------------------------------
@@ -3262,6 +3429,8 @@ async function deployDcaBotInstance(bot, cred){
   const plan = buildDcaPlan({ symbol: bot.symbol, direction: bot.direction, anchorPrice: snap.price, cfg: bot.config });
   if(!plan){ bot.status = 'error'; tradingBotLog(bot, 'Could not build a valid DCA plan from these settings.', true); return; }
   bot.plan = plan; bot.investmentUsd = plan.totalInvestmentUsd;
+  fu().tbDayAnchorInvestmentUsd += bot.investmentUsd;
+  renderTradingBotsDailyLimits(); // refresh the daily-limits header now that the anchor total changed
 
   const balResp = await callProxy('/api/futures/balance', proxyArgs).catch(err => ({ ok:false, message: err.message }));
   bot.runtime.balanceBeforeUsd = balResp.ok ? balResp.balance : null;
@@ -3301,6 +3470,8 @@ async function manageDcaBotInstance(bot, cred, nowMs){
   const posResp = await callProxy('/api/futures/position', { ...proxyArgs, openedAtMs: bot.runtime.openedAtMs, balanceBeforeUsd: bot.runtime.balanceBeforeUsd }).catch(err => ({ ok:false, message: err.message }));
   if(!posResp.ok){ tradingBotLog(bot, `Could not read position: ${posResp.message}`, true); return; }
 
+  bot.runtime.unrealizedUsd = posResp.open ? posResp.position.unrealisedPnl : null;
+
   if(!posResp.open){
     // Flat — TP or the hard stop fired (or it was closed manually on the
     // exchange). Cancel anything still resting, log what we can from the
@@ -3320,6 +3491,7 @@ async function manageDcaBotInstance(bot, cred, nowMs){
       setupType: 'Trading Bot: DCA', durationMin: Math.round((nowMs - bot.runtime.openedAtMs) / 60_000), gridId: bot.id,
     };
     bot.realizedUsd = record.netUsd || 0;
+    addTradingBotsRealized(bot.realizedUsd);
     appendPersistentTrade(record);
     bot.status = 'closed';
     tradingBotLog(bot, `Position closed — ${fmtUsd(bot.realizedUsd)} realized.`, false);
@@ -3347,8 +3519,129 @@ async function manageDcaBotInstance(bot, cred, nowMs){
   }
 }
 
+// -------------------------------------------------------------
+// Cross-bot daily profit/loss cap — see the tbDay* fields' comment in
+// state.js. Rolls over at UTC midnight, same day-key convention as
+// NxTGen Grid's own rollGridLiveDay.
+// -------------------------------------------------------------
+function rollTradingBotsDay(nowMs){
+  const f = fu();
+  const key = Math.floor(nowMs / 86_400_000);
+  if(f.tbDayKey === key) return;
+  f.tbDayKey = key;
+  f.tbDayAnchorInvestmentUsd = 0;
+  f.tbDayRealizedUsd = 0;
+  f.tbDailyHalted = false;
+  f.tbDailyHaltMessage = null;
+}
+
+function addTradingBotsRealized(deltaUsd){
+  const f = fu();
+  f.tbDayRealizedUsd += deltaUsd;
+  checkTradingBotsDailyLimits();
+}
+
+function checkTradingBotsDailyLimits(){
+  const f = fu();
+  if(f.tbDailyHalted || !(f.tbDayAnchorInvestmentUsd > 0)) return;
+  const pct = (f.tbDayRealizedUsd / f.tbDayAnchorInvestmentUsd) * 100;
+  if(pct >= f.tbDailyProfitTargetPct){
+    haltTradingBotsForToday(`Daily profit target (${f.tbDailyProfitTargetPct}%) reached — ${pct.toFixed(1)}% realized today across all bots.`);
+  } else if(f.tbDailyMaxLossPct && pct <= -f.tbDailyMaxLossPct){
+    haltTradingBotsForToday(`Daily max loss (${f.tbDailyMaxLossPct}%) reached — ${pct.toFixed(1)}% realized today across all bots.`);
+  }
+}
+
+// Force-stops EVERY active bot immediately, no matter what any single
+// bot's own state looks like — the whole point of a cross-bot cap being
+// separate from each bot's own risk settings. Runs the exact same
+// flatten/stop path the Stop button uses, just for every active bot at
+// once, then blocks new bot creation via tbDailyHalted until the next
+// rollTradingBotsDay resets it.
+async function haltTradingBotsForToday(reason){
+  const f = fu();
+  if(f.tbDailyHalted) return; // already in progress/done — avoid double-flattening if this fires twice in the same tick
+  f.tbDailyHalted = true;
+  f.tbDailyHaltMessage = reason;
+  const activeBots = f.tradingBots.filter(b => b.status === 'active');
+  for(const bot of activeBots){
+    await stopTradingBot(bot.id).catch(() => {});
+  }
+  renderTradingBotsList();
+  renderTradingBotsDailyLimits();
+}
+
+// -------------------------------------------------------------
+// Futures Grid Auto-Scan — probes a bounded, round-robin batch of
+// GRID_SYMBOLS each cycle (same idea, and same GRID_SCAN_BATCH_SIZE
+// constant, as NxTGen Grid's own scanForGridLiveDeployment above; see
+// that function's header comment for why a batch rather than the whole
+// watchlist every tick). The first candidate that clears Minimum Grid
+// Score becomes a brand-new Trading Bots grid deployment — sized with
+// tbAutoScanConfig's FIXED investment/leverage (not equity-%, unlike
+// NxTGen Grid), always Neutral, range from suggestGridRange. One new
+// bot per cycle, same "one deployment per tick" discipline as
+// everything else that places real orders in this app.
+// -------------------------------------------------------------
+async function runGridAutoScan(){
+  const f = fu();
+  if(!f.tbAutoScanEnabled || f.tbDailyHalted) return;
+  const cfg = f.tbAutoScanConfig;
+  const exchange = f.tbAutoScanExchange;
+  const activeAutoCount = f.tradingBots.filter(b => b.status === 'active' && b.type === 'grid' && b.config?.autoScan).length;
+  if(activeAutoCount >= cfg.maxConcurrent){
+    tbAutoScanStatus(`${activeAutoCount}/${cfg.maxConcurrent} auto bot slots in use — waiting for one to close before scanning for the next.`);
+    return;
+  }
+  const mode = f.liveModeByExchange[exchange] || 'live';
+  const cred = liveCred(exchange, mode);
+  if(!cred){ tbAutoScanStatus(`No verified ${exchange} ${mode} credential anymore — pausing auto-scan.`); return; }
+
+  const cursor = f.tbAutoScanCursor % GRID_SYMBOLS.length;
+  const batchSize = Math.min(GRID_SCAN_BATCH_SIZE, GRID_SYMBOLS.length);
+  const candidates = Array.from({ length: batchSize }, (_, i) => GRID_SYMBOLS[(cursor + i) % GRID_SYMBOLS.length]);
+  f.tbAutoScanCursor = (cursor + batchSize) % GRID_SYMBOLS.length;
+
+  // Skip symbols already running as ANY active bot on this exchange —
+  // auto-scan shouldn't pile a second deployment onto a symbol you (or
+  // it) already has open.
+  const busySymbols = new Set(f.tradingBots.filter(b => b.status === 'active' && b.exchange === exchange).map(b => b.symbol));
+
+  let bestReject = null;
+  for(const symbol of candidates){
+    if(busySymbols.has(symbol)) continue;
+    const snap = await fetchLiveSnapshot(exchange, symbol, '5m').catch(() => null);
+    if(!snap) continue;
+    const regime = classifyRegime(snap.h1, snap.m15);
+    const suitability = scoreGridSuitability(snap, regime, { ...GRID_DEFAULTS, minGridScore: cfg.minGridScore });
+    if(!bestReject || suitability.score > bestReject.score) bestReject = { symbol, score: suitability.score, regime: regime.regime };
+    if(!suitability.regimeOk || suitability.score < cfg.minGridScore) continue;
+
+    const range = suggestGridRange(snap, regime);
+    const plan = buildManualGridPlan({ symbol, direction: 'NEUTRAL', upper: range.upper, lower: range.lower, levelCount: cfg.levelCount, leverage: cfg.leverage, investmentUsd: cfg.investmentUsd });
+    if(!plan) continue;
+
+    const bot = {
+      id: newTradingBotId('grid'), type: 'grid', exchange, mode, symbol,
+      createdAtMs: Date.now(), status: 'deploying', statusMessage: 'Deploying (auto-scan)…', statusIsError: false,
+      realizedUsd: 0, direction: 'NEUTRAL', investmentUsd: cfg.investmentUsd, leverage: cfg.leverage,
+      config: { ...cfg, autoScan: true }, plan, runtime: { levels: [], longStopSet: false, shortStopSet: false },
+    };
+    f.tradingBots.push(bot);
+    f.tbDayAnchorInvestmentUsd += bot.investmentUsd;
+    renderTradingBotsList();
+    renderTradingBotsDailyLimits();
+    tbAutoScanStatus(`Found ${symbol} — score ${suitability.score}/100, regime ${regime.regime}. Deploying…`);
+    await deployGridBotInstance(bot, cred);
+    if(!f.tradingBotsRunning) toggleTradingBotsRunning();
+    return;
+  }
+  tbAutoScanStatus(`Scanned ${candidates.join(', ')} — none suitable this cycle${bestReject ? ` (closest: ${bestReject.symbol} at ${bestReject.score}/${cfg.minGridScore}, regime ${bestReject.regime})` : ''}. ${activeAutoCount}/${cfg.maxConcurrent} slots in use.`);
+}
+
 async function runTradingBotsCycle(){
   const f = fu();
+  rollTradingBotsDay(Date.now());
   const activeBots = f.tradingBots.filter(b => b.status === 'active');
   for(const bot of activeBots){
     const cred = liveCred(bot.exchange, bot.mode);
@@ -3360,7 +3653,15 @@ async function runTradingBotsCycle(){
       tradingBotLog(bot, `Unexpected error managing this bot: ${err.message}`, true);
     }
   }
+  if(f.tbAutoScanEnabled){
+    try{ await runGridAutoScan(); }
+    catch(err){ tbAutoScanStatus(`Auto-scan error: ${err.message}`); }
+  }
   renderTradingBotsList();
+  renderTradingBotsDailyLimits();
+  if(!f.tbAutoScanEnabled && f.tradingBots.every(b => b.status !== 'active') && f.tradingBotsRunning){
+    toggleTradingBotsRunning(); // nothing left to manage and not scanning — stop polling until the next bot/scan starts it again
+  }
 }
 
 function toggleTradingBotsRunning(){
@@ -3406,7 +3707,13 @@ function renderTradingBotsList(){
     els.fuTradingBotsList.innerHTML = `<div style="font-size:12px;color:var(--dim);padding:8px 0;">No bots created yet.</div>`;
     return;
   }
-  els.fuTradingBotsList.innerHTML = [...f.tradingBots].reverse().map(bot => `
+  els.fuTradingBotsList.innerHTML = [...f.tradingBots].reverse().map(bot => {
+    const uPnl = bot.runtime?.unrealizedUsd;
+    const pnlLine = `
+      <span style="margin-right:12px;">Realized: <strong style="color:${bot.realizedUsd >= 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(bot.realizedUsd)}</strong></span>
+      <span>Unrealized: <strong style="color:${uPnl == null ? 'var(--dim)' : uPnl >= 0 ? 'var(--green)' : 'var(--red)'};">${uPnl == null ? '—' : fmtUsd(uPnl)}</strong></span>
+    `;
+    return `
     <div class="ov-block" style="padding:10px 12px;margin-bottom:8px;">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
         <div>
@@ -3418,9 +3725,11 @@ function renderTradingBotsList(){
           ${bot.status === 'active' ? `<button type="button" class="primary ghost tb-stop-btn" data-id="${bot.id}" style="font-size:11px;padding:4px 10px;">Stop</button>` : `<button type="button" class="primary ghost tb-delete-btn" data-id="${bot.id}" style="font-size:11px;padding:4px 10px;">Delete</button>`}
         </div>
       </div>
+      <div style="font-size:12px;margin-top:8px;">${pnlLine}</div>
       <div style="font-size:11.5px;color:${bot.statusIsError ? 'var(--red)' : 'var(--dim)'};margin-top:6px;">${bot.statusMessage || ''}</div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 // Resumes MONITORING (never new-order placement — f.liveArmed still
