@@ -181,7 +181,13 @@ async function binanceAssetBalance(mode, apiKey, secretKey, asset){
 }
 
 // ---- Bybit v5: GET /v5/account/wallet-balance, signed with HMAC-SHA256 ----
-async function bybitWalletBalance(mode, apiKey, secretKey){
+// Returns the full per-account object (list[0]) rather than just its coin[]
+// array, since account-level fields like totalAvailableBalance live
+// alongside coin[] in the same response and we now need both: coin[] for
+// per-asset walletBalance (equity/PnL-diff tracking, unchanged behavior),
+// and totalAvailableBalance for a true free-margin check (see
+// bybitAvailableBalance below).
+async function bybitWalletBalanceRaw(mode, apiKey, secretKey){
   const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
   const timestamp = String(Date.now());
   const recvWindow = '5000';
@@ -200,7 +206,11 @@ async function bybitWalletBalance(mode, apiKey, secretKey){
   if(!res.ok || !data || data.retCode !== 0){
     throw new VerifyRejected(data && data.retMsg ? data.retMsg : `HTTP ${res.status}`);
   }
-  return data.result?.list?.[0]?.coin || [];
+  return data.result?.list?.[0] || {};
+}
+async function bybitWalletBalance(mode, apiKey, secretKey){
+  const account = await bybitWalletBalanceRaw(mode, apiKey, secretKey);
+  return account.coin || [];
 }
 async function verifyBybit(mode, apiKey, secretKey){
   const coins = await bybitWalletBalance(mode, apiKey, secretKey);
@@ -211,8 +221,22 @@ async function bybitAssetBalance(mode, apiKey, secretKey, asset){
   const coins = await bybitWalletBalance(mode, apiKey, secretKey);
   const c = coins.find(x => x.coin === asset);
   // walletBalance, not equity — equity includes unrealized PnL on
-  // derivatives that spot can't actually spend.
+  // derivatives that spot can't actually spend. Used for equity/day-anchor
+  // tracking and before/after PnL diffing — NOT for margin pre-checks,
+  // since walletBalance stays put even as other open bots lock it up as
+  // margin (it's still "in the account", just not free to spend). For
+  // "can I actually open a new position right now", use
+  // bybitAvailableBalance instead.
   return c ? parseFloat(c.walletBalance) : 0;
+}
+// Real free/available margin — falls as other open bots/orders lock up
+// margin, rises again the moment a position closes or an order cancels.
+// This is what a pre-deployment "is there enough room" check needs;
+// walletBalance (above) does NOT reflect this and will happily say "yes"
+// even with zero margin free to open anything new.
+async function bybitAvailableBalance(mode, apiKey, secretKey){
+  const account = await bybitWalletBalanceRaw(mode, apiKey, secretKey);
+  return account.totalAvailableBalance != null ? parseFloat(account.totalAvailableBalance) : null;
 }
 
 // ---- MEXC Spot v3: GET /api/v3/account, signed exactly like Binance's
@@ -3356,6 +3380,46 @@ app.post('/api/futures/balance', async (req, res) => {
       return res.json({ ok:false, rejected:true, message: err.message });
     }
     return res.json({ ok:false, rejected:false, message: `Could not read futures balance on ${exchange}: ${err.message}` });
+  }
+});
+
+// Separate from /api/futures/balance on purpose: that endpoint feeds
+// equity/day-anchor tracking and before/after PnL diffing, which legitimately
+// want total wallet balance (Bybit) or the exchange's own available-balance
+// field (the other four, which already report free margin there). This one
+// exists specifically to answer "is there enough free margin to open a NEW
+// position right now" — for Bybit that's a genuinely different number
+// (totalAvailableBalance, not walletBalance) once any other bot has margin
+// locked up; for the other four exchanges it's the same underlying value
+// their balance getter already returns, so they're simply reused here.
+const FUTURES_AVAILABLE_MARGIN_GETTERS = {
+  bybit: bybitAvailableBalance,
+  binance: binanceFuturesBalance,
+  gateio: gateioFuturesBalance,
+  mexc: mexcFuturesBalance,
+  bitget: bitgetFuturesBalance,
+};
+app.post('/api/futures/available-margin', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey and secretKey are all required.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const getter = FUTURES_AVAILABLE_MARGIN_GETTERS[exchange];
+  if(!getter){
+    return res.status(400).json({ ok:false, message:`No available-margin getter for "${exchange}" yet — only bybit, binance, gateio, mexc, and bitget are supported so far.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const available = await getter(netMode, apiKey, secretKey, passphrase);
+    return res.json({ ok:true, available });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not read available margin on ${exchange}: ${err.message}` });
   }
 });
 

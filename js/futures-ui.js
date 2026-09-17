@@ -2997,19 +2997,41 @@ function renderTradingBotTypeFields(){
   const f = fu();
   const type = f.tbCreateType || 'grid';
   if(type === 'grid'){
-    const cfg = f.tbGridForm || (f.tbGridForm = { autoScan: false, direction: 'NEUTRAL', upper: '', lower: '', levelCount: 10, leverage: 5, investmentUsd: 100, maxLossPct: 20, profitTargetPct: '', maxConcurrent: 4, minGridScore: 65 });
+    const cfg = f.tbGridForm || (f.tbGridForm = { autoScan: false, direction: 'NEUTRAL', upper: '', lower: '', levelCount: 10, leverage: 5, investmentUsd: 100, investmentMode: 'usdt', investmentPct: 50, maxLossPct: 20, profitTargetPct: '', maxConcurrent: 4, minGridScore: 65 });
+    // Investment can be a flat USDT figure (as before) OR a % of your
+    // real, current free margin on the exchange — resolved fresh against
+    // live available balance at the moment each bot actually deploys, not
+    // frozen at whatever balance existed when you typed the %. That's what
+    // makes it self-adjusting: it naturally shrinks while other bots have
+    // margin locked up, and grows again the moment one closes or you add
+    // funds, instead of you having to keep retyping a USDT number.
+    const investmentField = cfg.investmentMode === 'pct' ? `
+          <label style="font-size:11px;color:var(--dim);">${cfg.autoScan ? 'Total Budget' : 'Investment'} (% of free balance)
+            <div style="display:flex;align-items:center;gap:8px;margin-top:3px;min-width:170px;">
+              <input id="tbGridInvestmentPctRange" type="range" min="1" max="95" step="1" value="${cfg.investmentPct}" style="flex:1;">
+              <input id="tbGridInvestmentPct" type="number" min="1" max="95" step="1" value="${cfg.investmentPct}" style="width:54px;">
+            </div>
+          </label>` : `
+          <label style="font-size:11px;color:var(--dim);">${cfg.autoScan ? 'Total Budget (USDT)' : 'Total Investment (USDT)'}
+            <input id="tbGridInvestment" type="number" min="1" step="any" value="${cfg.investmentUsd}" style="display:block;margin-top:3px;min-width:120px;">
+          </label>`;
+    const investmentModeToggle = `
+          <label style="font-size:11px;color:var(--dim);">Sizing
+            <div style="display:flex;gap:6px;margin-top:3px;">
+              ${[['usdt', 'Fixed USDT'], ['pct', '% of balance']].map(([m, label]) => `<button type="button" class="primary ${cfg.investmentMode === m ? '' : 'ghost'} tb-grid-invmode" data-invmode="${m}" style="font-size:11px;padding:4px 10px;">${label}</button>`).join('')}
+            </div>
+          </label>`;
     host.innerHTML = `
       <div style="display:flex;gap:10px;margin-bottom:10px;">
         ${[['manual', 'Manual'], ['auto', 'Auto-Scan Watchlist']].map(([m, label]) => `<button type="button" class="primary ${(cfg.autoScan ? 'auto' : 'manual') === m ? '' : 'ghost'} tb-grid-mode" data-mode="${m}" style="font-size:12px;padding:5px 14px;">${label}</button>`).join('')}
       </div>
       ${cfg.autoScan ? `
         <div style="font-size:11px;color:var(--dim);margin-bottom:8px;line-height:1.5;">
-          Scans the same ${GRID_SYMBOLS.length}-symbol watchlist NxTGen Grid uses, a few at a time each cycle, and deploys a NEW bot — always Neutral (holds both sides) — the moment a symbol clears Minimum Grid Score. Keeps doing this, up to Max Concurrent Auto Bots, until you hit Stop Auto-Scan. Total Budget is split evenly across Max Concurrent Auto Bots (e.g. 150 USDT budget ÷ 4 max bots = ~37.50 USDT margin per bot, whether 1 or all 4 slots end up filled) — and each deployment is still checked against your real, current exchange free balance right before it places any orders, so a bot is skipped for that cycle (not force-deployed) if there genuinely isn't enough free margin for it yet.
+          Scans the same ${GRID_SYMBOLS.length}-symbol watchlist NxTGen Grid uses, a few at a time each cycle, and deploys a NEW bot — always Neutral (holds both sides) — the moment a symbol clears Minimum Grid Score. Keeps doing this, up to Max Concurrent Auto Bots, until you hit Stop Auto-Scan. Total Budget is split evenly across Max Concurrent Auto Bots (e.g. 150 USDT budget ÷ 4 max bots = ~37.50 USDT margin per bot, whether 1 or all 4 slots end up filled) — and each deployment is checked against your real, current exchange free margin right before it places any orders, so a bot is skipped for that cycle (not force-deployed, and never left half-created in an Error state) if there genuinely isn't enough free margin for it yet — it'll pick back up on its own once margin frees up, from a bot closing or a deposit.
         </div>
         <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
-          <label style="font-size:11px;color:var(--dim);">Total Budget (USDT)
-            <input id="tbGridInvestment" type="number" min="1" step="any" value="${cfg.investmentUsd}" style="display:block;margin-top:3px;min-width:120px;">
-          </label>
+          ${investmentModeToggle}
+          ${investmentField}
           <label style="font-size:11px;color:var(--dim);">Leverage
             <input id="tbGridLeverage" type="number" min="1" max="50" step="1" value="${cfg.leverage}" style="display:block;margin-top:3px;min-width:80px;">
           </label>
@@ -3048,9 +3070,8 @@ function renderTradingBotTypeFields(){
         <label style="font-size:11px;color:var(--dim);">Leverage
           <input id="tbGridLeverage" type="number" min="1" max="50" step="1" value="${cfg.leverage}" style="display:block;margin-top:3px;min-width:80px;">
         </label>
-        <label style="font-size:11px;color:var(--dim);">Total Investment (USDT)
-          <input id="tbGridInvestment" type="number" min="1" step="any" value="${cfg.investmentUsd}" style="display:block;margin-top:3px;min-width:120px;">
-        </label>
+        ${investmentModeToggle}
+        ${investmentField}
         <label style="font-size:11px;color:var(--dim);">Max Loss (%, this bot)
           <input id="tbGridMaxLoss" type="number" min="1" step="any" value="${cfg.maxLossPct}" style="display:block;margin-top:3px;min-width:100px;">
         </label>
@@ -3113,7 +3134,14 @@ function readTradingBotFormNumbers(){
   if(type === 'grid'){
     const cfg = f.tbGridForm;
     cfg.leverage = parseFloat(document.getElementById('tbGridLeverage').value);
-    cfg.investmentUsd = parseFloat(document.getElementById('tbGridInvestment').value);
+    // Only one of these two inputs actually exists in the DOM at a time
+    // (investmentField renders one or the other based on cfg.investmentMode)
+    // — guard each so reading the form never clobbers the field that isn't
+    // currently shown with a parse of a missing element.
+    const investInput = document.getElementById('tbGridInvestment');
+    const investPctInput = document.getElementById('tbGridInvestmentPct');
+    if(investInput) cfg.investmentUsd = parseFloat(investInput.value);
+    if(investPctInput) cfg.investmentPct = Math.max(1, Math.min(95, parseFloat(investPctInput.value) || cfg.investmentPct));
     cfg.levelCount = parseInt(document.getElementById('tbGridLevels').value, 10);
     cfg.maxLossPct = parseFloat(document.getElementById('tbGridMaxLoss').value);
     const ptRaw = document.getElementById('tbGridProfitTarget').value;
@@ -3160,10 +3188,23 @@ function initTradingBots(){
       else if(e.target.id === 'tbBtTimeframe'){ f.tbBacktestTimeframe = e.target.value; }
       else if(e.target.id === 'tbBtDays'){ f.tbBacktestDays = Math.max(3, Math.min(180, parseInt(e.target.value, 10) || 30)); }
       else if(e.target.id === 'tbBtMinScore'){ f.tbBacktestMinScore = Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0)); }
+      else if(e.target.id === 'tbGridInvestmentPctRange' || e.target.id === 'tbGridInvestmentPct'){
+        // Drag the slider or type the number — either updates the other
+        // live, no re-render needed until the mode itself changes.
+        const v = Math.max(1, Math.min(95, parseInt(e.target.value, 10) || 1));
+        const range = document.getElementById('tbGridInvestmentPctRange');
+        const num = document.getElementById('tbGridInvestmentPct');
+        if(range) range.value = v;
+        if(num) num.value = v;
+        f.tbGridForm.investmentPct = v;
+      }
     });
     els.fuTradingBotsCreate.addEventListener('click', async (e) => {
       if(e.target.classList.contains('tb-grid-mode')){
         readTradingBotFormNumbers(); fu().tbGridForm.autoScan = e.target.dataset.mode === 'auto'; renderTradingBotTypeFields(); renderTradingBotsCreate(); return;
+      }
+      if(e.target.classList.contains('tb-grid-invmode')){
+        readTradingBotFormNumbers(); fu().tbGridForm.investmentMode = e.target.dataset.invmode; renderTradingBotTypeFields(); return;
       }
       if(e.target.classList.contains('tb-grid-direction')){
         readTradingBotFormNumbers(); fu().tbGridForm.direction = e.target.dataset.dir; renderTradingBotTypeFields(); return;
@@ -3214,6 +3255,8 @@ function initTradingBots(){
       else if(e.target.classList.contains('tb-delete-btn')) deleteTradingBot(e.target.dataset.id);
     });
   }
+  const flattenAllBtn = document.getElementById('tbFlattenAllBtn');
+  if(flattenAllBtn) flattenAllBtn.addEventListener('click', flattenAllGridBots);
 }
 
 function tbBacktestResultEl(){ return document.getElementById('tbBacktestResult'); }
@@ -3239,7 +3282,19 @@ async function runTradingBotsGridBacktestFromForm(){
   const TIMEFRAME_TO_MINUTES = { '3m': 3, '5m': 5, '15m': 15, '30m': 30, '1h': 60 };
   const intervalMinutes = TIMEFRAME_TO_MINUTES[timeframe] || 5;
   const days = f.tbBacktestDays || 30;
-  const perBotUsd = cfg.autoScan ? cfg.investmentUsd / Math.max(1, cfg.maxConcurrent) : cfg.investmentUsd;
+  let investmentBase = cfg.investmentUsd;
+  if(cfg.investmentMode === 'pct'){
+    // No live per-cycle margin concept in an offline backtest — resolve %
+    // against your CURRENT free balance once, up front, as a stand-in for
+    // "what would this be sized at if deployed right now."
+    const mode = f.liveModeByExchange[exchange] || 'live';
+    const cred = liveCred(exchange, mode);
+    if(!cred){ tbBacktestStatus(`No verified ${exchange} ${mode} credential — connect it to backtest a % sizing.`, true); return; }
+    const marginProbe = await checkAvailableMarginFor({ exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase }, 0);
+    if(marginProbe.available == null){ tbBacktestStatus(`Could not read free margin on ${exchange} to resolve the % sizing.`, true); return; }
+    investmentBase = marginProbe.available * (cfg.investmentPct / 100);
+  }
+  const perBotUsd = cfg.autoScan ? investmentBase / Math.max(1, cfg.maxConcurrent) : investmentBase;
   const minGridScore = cfg.autoScan ? cfg.minGridScore : (f.tbBacktestMinScore ?? 0);
   if(!(perBotUsd > 0)){ tbBacktestStatus('Set an investment amount first.', true); return; }
   tbBacktestStatus(`Fetching ${days}d of ${symbol} ${timeframe} history…`);
@@ -3311,13 +3366,21 @@ async function createTradingBotFromForm(){
   if(type === 'grid'){
     const cfg = f.tbGridForm;
     if(!(cfg.upper > cfg.lower)){ tbCreateStatus('Upper price must be greater than lower price.', true); return; }
-    if(!(cfg.investmentUsd > 0)){ tbCreateStatus('Enter a total investment amount.', true); return; }
+    if(cfg.investmentMode !== 'pct' && !(cfg.investmentUsd > 0)){ tbCreateStatus('Enter a total investment amount.', true); return; }
     if(!(cfg.maxLossPct > 0)){ tbCreateStatus('Enter a Max Loss % for this bot.', true); return; }
-    const plan = buildManualGridPlan({ symbol, direction: cfg.direction, upper: cfg.upper, lower: cfg.lower, levelCount: cfg.levelCount, leverage: cfg.leverage, investmentUsd: cfg.investmentUsd });
+    const proxyArgsBal = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase };
+    const marginProbe = await checkAvailableMarginFor(proxyArgsBal, 0); // fetch real free margin either way — pct mode sizes off it directly, USDT mode still verifies against it below
+    if(marginProbe.available == null){ tbCreateStatus(`Could not read free margin on ${exchange} right now — try again in a moment.`, true); return; }
+    // % mode resolves against real, current free margin at deploy time —
+    // not whatever balance existed when the % was typed — so it's already
+    // self-limiting (can never ask for more than what's actually free) and
+    // naturally adapts as other bots open/close margin.
+    const investmentUsd = cfg.investmentMode === 'pct' ? marginProbe.available * (cfg.investmentPct / 100) : cfg.investmentUsd;
+    if(!(investmentUsd > 0)){ tbCreateStatus(`Free margin on ${exchange} is effectively 0 — nothing to allocate.`, true); return; }
+    if(investmentUsd > marginProbe.available){ tbCreateStatus(`Not enough free margin on ${exchange} — this bot needs ~${fmtUsd(investmentUsd)} but only ${fmtUsd(marginProbe.available)} is free right now.`, true); return; }
+    const plan = buildManualGridPlan({ symbol, direction: cfg.direction, upper: cfg.upper, lower: cfg.lower, levelCount: cfg.levelCount, leverage: cfg.leverage, investmentUsd });
     if(!plan){ tbCreateStatus('Check your grid settings — could not build a valid plan from them.', true); return; }
-    const marginCheck = await checkAvailableMarginFor({ exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase }, cfg.investmentUsd);
-    if(!marginCheck.ok){ tbCreateStatus(`Not enough free margin on ${exchange} — this bot needs ~${fmtUsd(cfg.investmentUsd)} but only ${marginCheck.available != null ? fmtUsd(marginCheck.available) : 'an unknown amount'} is free right now.`, true); return; }
-    bot.direction = cfg.direction; bot.investmentUsd = cfg.investmentUsd; bot.leverage = cfg.leverage;
+    bot.direction = cfg.direction; bot.investmentUsd = investmentUsd; bot.leverage = cfg.leverage;
     bot.config = { ...cfg }; bot.plan = plan; bot.runtime = { levels: [], longStopSet: false, shortStopSet: false };
     f.tbDayAnchorInvestmentUsd += bot.investmentUsd; // known immediately for Grid — DCA adds its own once the plan is built against a real price, see deployDcaBotInstance
   } else {
@@ -3715,6 +3778,33 @@ async function haltTradingBotsForToday(reason, { flattenActive = true } = {}){
   renderTradingBotsDailyLimits();
 }
 
+// Bulk "Flatten All Grids" — cancels every resting grid limit order
+// (pending entries AND pending exits) and closes any already-open grid
+// position, across every grid bot at once, rather than one Terminate click
+// per card. Reuses stopTradingBot's own flatten call per bot (same
+// /api/futures/grid/flatten endpoint, same "cancel resting orders, close
+// any open position" behavior) so there's exactly one flatten code path
+// for the whole app, not a second bulk-specific one to keep in sync.
+// Scoped to type === 'grid' only — DCA bots have their own Stop button per
+// card and aren't what "grid positions" refers to. Includes 'deploying'
+// bots too: a bot mid-deployment may already have SOME levels resting on
+// the exchange even though the app hasn't marked it 'active' yet — 'error'
+// bots are included as well for safety, though in practice they have
+// nothing resting (deployGridBotInstance only sets 'error' when literally
+// zero levels placed).
+async function flattenAllGridBots(){
+  const f = fu();
+  const targets = f.tradingBots.filter(b => b.type === 'grid' && (b.status === 'active' || b.status === 'deploying' || b.status === 'error'));
+  if(targets.length === 0){ tbCreateStatus('No grid bots with pending or open positions right now.'); return; }
+  if(!confirm(`Flatten ${targets.length} grid bot${targets.length === 1 ? '' : 's'}? This cancels every resting grid order and closes any open position on ${targets.length === 1 ? 'it' : 'each of them'} — can't be undone.`)) return;
+  const host = document.getElementById('tbFlattenAllStatus');
+  for(let i = 0; i < targets.length; i++){
+    if(host) host.textContent = `Flattening ${i + 1}/${targets.length} (${targets[i].symbol})…`;
+    await stopTradingBot(targets[i].id).catch(() => {});
+  }
+  if(host) host.textContent = `Flattened ${targets.length} grid bot${targets.length === 1 ? '' : 's'}.`;
+}
+
 // Reads the real, current exchange available balance and checks whether
 // there's room for a bot that wants to commit ~neededUsd of margin.
 // Used before every grid deployment (auto-scan and manual) so a bot's
@@ -3723,9 +3813,16 @@ async function haltTradingBotsForToday(reason, { flattenActive = true } = {}){
 // placed, even before anything fills, so "the config says $X" isn't
 // enough on its own to know $X is actually free right now.
 async function checkAvailableMarginFor(proxyArgs, neededUsd){
-  const balResp = await callProxy('/api/futures/balance', proxyArgs).catch(err => ({ ok:false, message: err.message }));
-  if(!balResp.ok || balResp.balance == null) return { ok:false, available:null };
-  return { ok: balResp.balance >= neededUsd, available: balResp.balance };
+  // /api/futures/available-margin, not /api/futures/balance: the latter is
+  // Bybit's total wallet balance, which stays the same even once other
+  // running bots have locked most of it up as margin — checking against it
+  // kept saying "enough margin" right up until real order placement failed
+  // on the exchange. This checks actual free/available margin instead, so
+  // it accurately blocks a new deployment before it's created (rather than
+  // creating it and having it fail with grid levels rejected one by one).
+  const balResp = await callProxy('/api/futures/available-margin', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  if(!balResp.ok || balResp.available == null) return { ok:false, available:null };
+  return { ok: balResp.available >= neededUsd, available: balResp.available };
 }
 
 // -------------------------------------------------------------
@@ -3776,11 +3873,20 @@ async function runGridAutoScan(){
   const cred = liveCred(exchange, mode);
   if(!cred){ tbAutoScanStatus(`No verified ${exchange} ${mode} credential anymore — pausing auto-scan.`); return; }
 
-  const perBotUsd = cfg.investmentUsd / Math.max(1, cfg.maxConcurrent);
   const proxyArgsBal = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase };
-  const marginCheck = await checkAvailableMarginFor(proxyArgsBal, perBotUsd);
-  if(!marginCheck.ok){
-    tbAutoScanStatus(`Waiting on free margin — this bot needs ~${fmtUsd(perBotUsd)} but only ${marginCheck.available != null ? fmtUsd(marginCheck.available) : 'an unknown amount'} is free on ${exchange} right now.`);
+  const marginProbe = await checkAvailableMarginFor(proxyArgsBal, 0); // always fetch real free margin first — pct mode needs it to size perBotUsd at all, USDT mode still needs it to verify
+  if(marginProbe.available == null){
+    tbAutoScanStatus(`Could not read free margin on ${exchange} right now — will retry next cycle.`);
+    return;
+  }
+  // Same self-resolving logic as the manual-deploy path: % mode sizes the
+  // total budget off real, current free margin, so it automatically shrinks
+  // while other auto bots have margin locked up and grows again the moment
+  // one closes or you add funds — no manual re-entry needed either way.
+  const totalBudget = cfg.investmentMode === 'pct' ? marginProbe.available * (cfg.investmentPct / 100) : cfg.investmentUsd;
+  const perBotUsd = totalBudget / Math.max(1, cfg.maxConcurrent);
+  if(!(perBotUsd > 0) || perBotUsd > marginProbe.available){
+    tbAutoScanStatus(`Waiting on free margin — this bot needs ~${fmtUsd(perBotUsd)} but only ${fmtUsd(marginProbe.available)} is free on ${exchange} right now.`);
     return;
   }
 
