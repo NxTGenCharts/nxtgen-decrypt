@@ -3014,17 +3014,17 @@ function renderTradingBotTypeFields(){
   const f = fu();
   const type = f.tbCreateType || 'grid';
   if(type === 'grid'){
-    const cfg = f.tbGridForm || (f.tbGridForm = { autoScan: false, direction: 'NEUTRAL', upper: '', lower: '', levelCount: 20, leverage: 5, investmentUsd: 100, maxLossPct: 20, profitTargetPct: '', maxConcurrent: 3, minGridScore: 65 });
+    const cfg = f.tbGridForm || (f.tbGridForm = { autoScan: false, direction: 'NEUTRAL', upper: '', lower: '', levelCount: 20, leverage: 5, investmentUsd: 100, maxLossPct: 20, profitTargetPct: '', maxConcurrent: 4, minGridScore: 65 });
     host.innerHTML = `
       <div style="display:flex;gap:10px;margin-bottom:10px;">
         ${[['manual', 'Manual'], ['auto', 'Auto-Scan Watchlist']].map(([m, label]) => `<button type="button" class="primary ${(cfg.autoScan ? 'auto' : 'manual') === m ? '' : 'ghost'} tb-grid-mode" data-mode="${m}" style="font-size:12px;padding:5px 14px;">${label}</button>`).join('')}
       </div>
       ${cfg.autoScan ? `
         <div style="font-size:11px;color:var(--dim);margin-bottom:8px;line-height:1.5;">
-          Scans the same ${GRID_SYMBOLS.length}-symbol watchlist NxTGen Grid uses, a few at a time each cycle, and deploys a NEW bot — sized with the investment/leverage below, always Neutral (holds both sides) — the moment a symbol clears Minimum Grid Score. Keeps doing this, up to Max Concurrent Auto Bots, until you hit Stop Auto-Scan.
+          Scans the same ${GRID_SYMBOLS.length}-symbol watchlist NxTGen Grid uses, a few at a time each cycle, and deploys a NEW bot — always Neutral (holds both sides) — the moment a symbol clears Minimum Grid Score. Keeps doing this, up to Max Concurrent Auto Bots, until you hit Stop Auto-Scan. Total Budget is split evenly across Max Concurrent Auto Bots (e.g. 150 USDT budget ÷ 4 max bots = ~37.50 USDT margin per bot, whether 1 or all 4 slots end up filled) — and each deployment is still checked against your real, current exchange free balance right before it places any orders, so a bot is skipped for that cycle (not force-deployed) if there genuinely isn't enough free margin for it yet.
         </div>
         <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
-          <label style="font-size:11px;color:var(--dim);">Investment per bot (USDT)
+          <label style="font-size:11px;color:var(--dim);">Total Budget (USDT)
             <input id="tbGridInvestment" type="number" min="1" step="any" value="${cfg.investmentUsd}" style="display:block;margin-top:3px;min-width:120px;">
           </label>
           <label style="font-size:11px;color:var(--dim);">Leverage
@@ -3234,6 +3234,8 @@ async function createTradingBotFromForm(){
     if(!(cfg.maxLossPct > 0)){ tbCreateStatus('Enter a Max Loss % for this bot.', true); return; }
     const plan = buildManualGridPlan({ symbol, direction: cfg.direction, upper: cfg.upper, lower: cfg.lower, levelCount: cfg.levelCount, leverage: cfg.leverage, investmentUsd: cfg.investmentUsd });
     if(!plan){ tbCreateStatus('Check your grid settings — could not build a valid plan from them.', true); return; }
+    const marginCheck = await checkAvailableMarginFor({ exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase }, cfg.investmentUsd);
+    if(!marginCheck.ok){ tbCreateStatus(`Not enough free margin on ${exchange} — this bot needs ~${fmtUsd(cfg.investmentUsd)} but only ${marginCheck.available != null ? fmtUsd(marginCheck.available) : 'an unknown amount'} is free right now.`, true); return; }
     bot.direction = cfg.direction; bot.investmentUsd = cfg.investmentUsd; bot.leverage = cfg.leverage;
     bot.config = { ...cfg }; bot.plan = plan; bot.runtime = { levels: [], longStopSet: false, shortStopSet: false };
     f.tbDayAnchorInvestmentUsd += bot.investmentUsd; // known immediately for Grid — DCA adds its own once the plan is built against a real price, see deployDcaBotInstance
@@ -3546,29 +3548,56 @@ function checkTradingBotsDailyLimits(){
   if(f.tbDailyHalted || !(f.tbDayAnchorInvestmentUsd > 0)) return;
   const pct = (f.tbDayRealizedUsd / f.tbDayAnchorInvestmentUsd) * 100;
   if(pct >= f.tbDailyProfitTargetPct){
-    haltTradingBotsForToday(`Daily profit target (${f.tbDailyProfitTargetPct}%) reached — ${pct.toFixed(1)}% realized today across all bots.`);
+    // Profit target: stop opening NEW bots/grids for the rest of the day,
+    // but don't force-close bots that are already running — they keep
+    // going and exit on their own TP/SL/grid logic, same as NxTGen
+    // Grid's own single-deployment daily-target behavior (line ~503-509).
+    haltTradingBotsForToday(`Daily profit target (${f.tbDailyProfitTargetPct}%) reached — ${pct.toFixed(1)}% realized today across all bots. No new bots/grids until tomorrow — bots already running are left alone.`, { flattenActive: false });
   } else if(f.tbDailyMaxLossPct && pct <= -f.tbDailyMaxLossPct){
-    haltTradingBotsForToday(`Daily max loss (${f.tbDailyMaxLossPct}%) reached — ${pct.toFixed(1)}% realized today across all bots.`);
+    // Max loss: this IS a safety cutoff, so it still force-flattens
+    // everything immediately, unchanged from before.
+    haltTradingBotsForToday(`Daily max loss (${f.tbDailyMaxLossPct}%) reached — ${pct.toFixed(1)}% realized today across all bots.`, { flattenActive: true });
   }
 }
 
-// Force-stops EVERY active bot immediately, no matter what any single
-// bot's own state looks like — the whole point of a cross-bot cap being
-// separate from each bot's own risk settings. Runs the exact same
-// flatten/stop path the Stop button uses, just for every active bot at
-// once, then blocks new bot creation via tbDailyHalted until the next
-// rollTradingBotsDay resets it.
-async function haltTradingBotsForToday(reason){
+// Blocks new bot/auto-scan creation for the rest of the day via
+// tbDailyHalted (checked by runGridAutoScan and createTradingBotFromForm)
+// until the next rollTradingBotsDay resets it. flattenActive controls
+// whether bots already running get force-stopped right now:
+//  - profit target reached -> flattenActive:false — already-open bots
+//    (including auto-scan grids) are left running and close naturally;
+//    runGridAutoScan's maxConcurrent slot frees up when they do, but new
+//    scanning stays paused since tbDailyHalted is still true today.
+//  - max loss reached -> flattenActive:true — force-stops EVERY active
+//    bot immediately (the exact same flatten/stop path the Stop button
+//    uses), since this is a hard risk cutoff, not just a "stop looking
+//    for more" signal.
+async function haltTradingBotsForToday(reason, { flattenActive = true } = {}){
   const f = fu();
   if(f.tbDailyHalted) return; // already in progress/done — avoid double-flattening if this fires twice in the same tick
   f.tbDailyHalted = true;
   f.tbDailyHaltMessage = reason;
-  const activeBots = f.tradingBots.filter(b => b.status === 'active');
-  for(const bot of activeBots){
-    await stopTradingBot(bot.id).catch(() => {});
+  if(flattenActive){
+    const activeBots = f.tradingBots.filter(b => b.status === 'active');
+    for(const bot of activeBots){
+      await stopTradingBot(bot.id).catch(() => {});
+    }
   }
   renderTradingBotsList();
   renderTradingBotsDailyLimits();
+}
+
+// Reads the real, current exchange available balance and checks whether
+// there's room for a bot that wants to commit ~neededUsd of margin.
+// Used before every grid deployment (auto-scan and manual) so a bot's
+// configured size is never just blindly trusted against the account —
+// resting grid limit orders reserve exchange margin the moment they're
+// placed, even before anything fills, so "the config says $X" isn't
+// enough on its own to know $X is actually free right now.
+async function checkAvailableMarginFor(proxyArgs, neededUsd){
+  const balResp = await callProxy('/api/futures/balance', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  if(!balResp.ok || balResp.balance == null) return { ok:false, available:null };
+  return { ok: balResp.balance >= neededUsd, available: balResp.balance };
 }
 
 // -------------------------------------------------------------
@@ -3577,11 +3606,22 @@ async function haltTradingBotsForToday(reason){
 // constant, as NxTGen Grid's own scanForGridLiveDeployment above; see
 // that function's header comment for why a batch rather than the whole
 // watchlist every tick). The first candidate that clears Minimum Grid
-// Score becomes a brand-new Trading Bots grid deployment — sized with
-// tbAutoScanConfig's FIXED investment/leverage (not equity-%, unlike
-// NxTGen Grid), always Neutral, range from suggestGridRange. One new
-// bot per cycle, same "one deployment per tick" discipline as
-// everything else that places real orders in this app.
+// Score becomes a brand-new Trading Bots grid deployment — always
+// Neutral, range from suggestGridRange. One new bot per cycle, same
+// "one deployment per tick" discipline as everything else that places
+// real orders in this app.
+//
+// Sizing: cfg.investmentUsd in Auto-Scan mode is the TOTAL budget the
+// user wants committed across every concurrent auto bot combined, not
+// a per-bot amount — e.g. "150 USDT total, up to 4 bots" — so each new
+// bot gets perBotUsd = totalBudget / maxConcurrent, which by
+// construction never lets the sum of all slots exceed the budget
+// regardless of whether 1, 2, 3 or 4 of them end up running at once.
+// On top of that, the real exchange available balance is checked right
+// before placing this bot's orders (see checkAvailableMarginFor below)
+// — resting grid limit orders reserve exchange margin even before they
+// fill, so a purely config-based budget isn't enough on its own to
+// avoid over-committing real funds.
 // -------------------------------------------------------------
 async function runGridAutoScan(){
   const f = fu();
@@ -3596,6 +3636,14 @@ async function runGridAutoScan(){
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);
   if(!cred){ tbAutoScanStatus(`No verified ${exchange} ${mode} credential anymore — pausing auto-scan.`); return; }
+
+  const perBotUsd = cfg.investmentUsd / Math.max(1, cfg.maxConcurrent);
+  const proxyArgsBal = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase };
+  const marginCheck = await checkAvailableMarginFor(proxyArgsBal, perBotUsd);
+  if(!marginCheck.ok){
+    tbAutoScanStatus(`Waiting on free margin — this bot needs ~${fmtUsd(perBotUsd)} but only ${marginCheck.available != null ? fmtUsd(marginCheck.available) : 'an unknown amount'} is free on ${exchange} right now.`);
+    return;
+  }
 
   const cursor = f.tbAutoScanCursor % GRID_SYMBOLS.length;
   const batchSize = Math.min(GRID_SCAN_BATCH_SIZE, GRID_SYMBOLS.length);
@@ -3618,13 +3666,13 @@ async function runGridAutoScan(){
     if(!suitability.regimeOk || suitability.score < cfg.minGridScore) continue;
 
     const range = suggestGridRange(snap, regime);
-    const plan = buildManualGridPlan({ symbol, direction: 'NEUTRAL', upper: range.upper, lower: range.lower, levelCount: cfg.levelCount, leverage: cfg.leverage, investmentUsd: cfg.investmentUsd });
+    const plan = buildManualGridPlan({ symbol, direction: 'NEUTRAL', upper: range.upper, lower: range.lower, levelCount: cfg.levelCount, leverage: cfg.leverage, investmentUsd: perBotUsd });
     if(!plan) continue;
 
     const bot = {
       id: newTradingBotId('grid'), type: 'grid', exchange, mode, symbol,
       createdAtMs: Date.now(), status: 'deploying', statusMessage: 'Deploying (auto-scan)…', statusIsError: false,
-      realizedUsd: 0, direction: 'NEUTRAL', investmentUsd: cfg.investmentUsd, leverage: cfg.leverage,
+      realizedUsd: 0, direction: 'NEUTRAL', investmentUsd: perBotUsd, leverage: cfg.leverage,
       config: { ...cfg, autoScan: true }, plan, runtime: { levels: [], longStopSet: false, shortStopSet: false },
     };
     f.tradingBots.push(bot);
