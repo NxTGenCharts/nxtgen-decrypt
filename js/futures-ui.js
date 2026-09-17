@@ -3195,7 +3195,8 @@ function initTradingBots(){
     // Delegate the same click handling to the list container too, since
     // Stop/Delete buttons live there, not in the create form's container.
     els.fuTradingBotsList.addEventListener('click', async (e) => {
-      if(e.target.classList.contains('tb-stop-btn')) await stopTradingBot(e.target.dataset.id);
+      if(e.target.classList.contains('tb-details-btn')) openTradingBotDetails(e.target.dataset.id);
+      else if(e.target.classList.contains('tb-stop-btn')) await stopTradingBot(e.target.dataset.id);
       else if(e.target.classList.contains('tb-delete-btn')) deleteTradingBot(e.target.dataset.id);
     });
   }
@@ -3335,6 +3336,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
   const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
   const snap = await fetchLiveSnapshot(bot.exchange, bot.symbol, '5m').catch(err => { tradingBotLog(bot, `Snapshot fetch failed: ${err.message}`, true); return null; });
   if(!snap) return;
+  bot.runtime.markPrice = snap.price; // last known mark, for the Details view's Parameters block
 
   const bo = detectGridBreakout(snap, plan, GRID_DEFAULTS);
   if(bo.breakout){
@@ -3626,9 +3628,20 @@ async function checkAvailableMarginFor(proxyArgs, neededUsd){
 async function runGridAutoScan(){
   const f = fu();
   if(!f.tbAutoScanEnabled || f.tbDailyHalted) return;
+  // Re-entrancy guard: a grid deployment places its levels one sequential,
+  // awaited API call at a time (can take well over one TRADING_BOTS_CYCLE_MS
+  // tick for a large grid), but setInterval doesn't wait for that to finish
+  // before firing the next cycle. Without this guard, a second cycle could
+  // start scanning/deploying while the first bot is still mid-deployment,
+  // which is how Max Concurrent Auto Bots got bypassed.
+  if(f.tbDeployInProgress) return;
   const cfg = f.tbAutoScanConfig;
   const exchange = f.tbAutoScanExchange;
-  const activeAutoCount = f.tradingBots.filter(b => b.status === 'active' && b.type === 'grid' && b.config?.autoScan).length;
+  // Count 'deploying' bots (orders still being placed) alongside 'active'
+  // ones — a bot must reserve its slot the moment it's created, not only
+  // once every level has posted, or two overlapping cycles can each think
+  // a slot is free and deploy their own bot for the same slot.
+  const activeAutoCount = f.tradingBots.filter(b => (b.status === 'active' || b.status === 'deploying') && b.type === 'grid' && b.config?.autoScan).length;
   if(activeAutoCount >= cfg.maxConcurrent){
     tbAutoScanStatus(`${activeAutoCount}/${cfg.maxConcurrent} auto bot slots in use — waiting for one to close before scanning for the next.`);
     return;
@@ -3653,7 +3666,7 @@ async function runGridAutoScan(){
   // Skip symbols already running as ANY active bot on this exchange —
   // auto-scan shouldn't pile a second deployment onto a symbol you (or
   // it) already has open.
-  const busySymbols = new Set(f.tradingBots.filter(b => b.status === 'active' && b.exchange === exchange).map(b => b.symbol));
+  const busySymbols = new Set(f.tradingBots.filter(b => (b.status === 'active' || b.status === 'deploying') && b.exchange === exchange).map(b => b.symbol));
 
   let bestReject = null;
   for(const symbol of candidates){
@@ -3680,7 +3693,12 @@ async function runGridAutoScan(){
     renderTradingBotsList();
     renderTradingBotsDailyLimits();
     tbAutoScanStatus(`Found ${symbol} — score ${suitability.score}/100, regime ${regime.regime}. Deploying…`);
-    await deployGridBotInstance(bot, cred);
+    f.tbDeployInProgress = true;
+    try{
+      await deployGridBotInstance(bot, cred);
+    } finally {
+      f.tbDeployInProgress = false;
+    }
     if(!f.tradingBotsRunning) toggleTradingBotsRunning();
     return;
   }
@@ -3747,37 +3765,250 @@ function deleteTradingBot(id){
   renderTradingBotsList();
 }
 
+// -------------------------------------------------------------
+// Trading Bots list + Details view — styled after the native
+// Bybit "My Bots" card / bot-details layout the person asked to match:
+// a card per bot (icon, symbol, type/direction badges, status dot,
+// Details/Stop/Delete), and a Details overlay with Status/Orders/
+// History tabs, a metrics grid and a Parameters block.
+//
+// Every value shown here comes from data this app actually tracks
+// (bot.realizedUsd, bot.runtime.unrealizedUsd/markPrice, the plan
+// object, and the per-cycle records in the persistent trade log
+// filtered by gridId === bot.id). Fields the app has no real source
+// for yet (exchange margin rates, taker/maker fees paid, withdrawals —
+// there's no Withdraw feature) are shown as "—" rather than invented,
+// same convention Bybit's own UI uses for an unset TP/SL ("--").
+// -------------------------------------------------------------
+
+function fmtBotUptime(startMs){
+  if(!startMs) return '0D 0h 0m';
+  const ms = Math.max(0, Date.now() - startMs);
+  const totalMin = Math.floor(ms / 60000);
+  const d = Math.floor(totalMin / 1440), h = Math.floor((totalMin % 1440) / 60), m = totalMin % 60;
+  return `${d}D ${h}h ${m}m`;
+}
+
+function fmtBotDateTime(ms){
+  if(!ms) return '—';
+  const d = new Date(ms);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// This bot's own closed cycles — appendPersistentTrade tags every record
+// with gridId: bot.id, so filtering the shared log by that is the real
+// per-bot order/history feed, not a separate store to keep in sync.
+function getBotTradeRecords(bot){
+  return loadPersistentTradeLog().filter(t => t.gridId === bot.id);
+}
+
+function computeBotMetrics(bot){
+  const records = getBotTradeRecords(bot);
+  const wins = records.filter(r => (r.netUsd || 0) > 0).length;
+  const uPnl = bot.runtime?.unrealizedUsd;
+  const totalPnl = bot.realizedUsd + (uPnl || 0);
+  const equity = (bot.investmentUsd || 0) + totalPnl;
+  const elapsedMs = bot.runtime?.openedAtMs ? Math.max(1, Date.now() - bot.runtime.openedAtMs) : null;
+  const aprPct = elapsedMs && bot.investmentUsd ? (totalPnl / bot.investmentUsd) * (31536000000 / elapsedMs) * 100 : null;
+  return {
+    records, wins, uPnl, totalPnl, equity, aprPct,
+    pctOfInvestment: bot.investmentUsd ? (totalPnl / bot.investmentUsd) * 100 : null,
+  };
+}
+
+function pnlSpan(usd, pct){
+  if(usd == null) return `<span style="color:var(--dim);">—</span>`;
+  const color = usd > 0 ? 'var(--green)' : usd < 0 ? 'var(--red)' : 'var(--dim)';
+  const pctBadge = pct != null ? `<span style="font-size:10.5px;padding:1px 6px;border-radius:5px;background:${usd >= 0 ? 'var(--green-soft)' : 'var(--red-soft)'};color:${color};margin-left:6px;">${usd >= 0 ? '+' : ''}${pct.toFixed(2)}%</span>` : '';
+  return `<strong style="color:${color};">${fmtUsd(usd)}</strong>${pctBadge}`;
+}
+
+function tbTypeBadgeLabel(bot){ return bot.type === 'grid' ? 'Futures Grid Bot' : 'DCA Bot'; }
+function tbDirBadgeLabel(bot){ return `${bot.direction === 'NEUTRAL' ? 'Neutral' : bot.direction === 'LONG' ? 'Long' : 'Short'} ${bot.leverage}x`; }
+
 function renderTradingBotsList(){
   if(!els.fuTradingBotsList) return;
   const f = fu();
   if(els.fuTradingBotsBadge) els.fuTradingBotsBadge.textContent = `${f.tradingBots.filter(b => b.status === 'active').length} active`;
   if(f.tradingBots.length === 0){
     els.fuTradingBotsList.innerHTML = `<div style="font-size:12px;color:var(--dim);padding:8px 0;">No bots created yet.</div>`;
-    return;
-  }
-  els.fuTradingBotsList.innerHTML = [...f.tradingBots].reverse().map(bot => {
-    const uPnl = bot.runtime?.unrealizedUsd;
-    const pnlLine = `
-      <span style="margin-right:12px;">Realized: <strong style="color:${bot.realizedUsd >= 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(bot.realizedUsd)}</strong></span>
-      <span>Unrealized: <strong style="color:${uPnl == null ? 'var(--dim)' : uPnl >= 0 ? 'var(--green)' : 'var(--red)'};">${uPnl == null ? '—' : fmtUsd(uPnl)}</strong></span>
-    `;
-    return `
-    <div class="ov-block" style="padding:10px 12px;margin-bottom:8px;">
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
-        <div>
-          <strong>${TRADING_BOT_TYPES[bot.type]}</strong> — ${bot.symbol} on ${EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange} (${bot.mode})
-          <span style="font-size:11px;color:var(--dim);margin-left:8px;">${bot.direction || ''} · ${bot.investmentUsd != null ? fmtUsd(bot.investmentUsd) + ' invested' : ''} · ${bot.leverage}x</span>
+  } else {
+    els.fuTradingBotsList.innerHTML = [...f.tradingBots].reverse().map(bot => {
+      const m = computeBotMetrics(bot);
+      const statusColor = bot.status === 'active' ? 'var(--green)' : bot.status === 'error' ? 'var(--red)' : 'var(--dim)';
+      const priceRange = bot.plan && bot.plan.lower != null ? `${bot.plan.lower.toLocaleString()} - ${bot.plan.upper.toLocaleString()}` : '—';
+      return `
+      <div class="tb-card">
+        <div class="tb-card-head">
+          <div class="tb-card-id">
+            <div class="tb-icon">${bot.type === 'grid' ? '▤' : '↻'}</div>
+            <div>
+              <div class="tb-card-title">
+                <strong>${bot.symbol}</strong>
+                <span class="tb-badge">${tbTypeBadgeLabel(bot)}</span>
+                <span class="tb-badge tb-badge-dir">${tbDirBadgeLabel(bot)}</span>
+              </div>
+              <div class="tb-card-sub">
+                <span class="dot ${bot.status === 'active' ? 'live' : bot.status === 'error' ? 'err' : ''}" style="${bot.status !== 'active' && bot.status !== 'error' ? 'background:var(--dim2);' : ''}"></span>
+                <span style="color:${statusColor};text-transform:capitalize;">${bot.status}</span>
+                <span style="color:var(--dim2);">· ${fmtBotUptime(bot.createdAtMs)} · ${EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange} (${bot.mode})</span>
+              </div>
+            </div>
+          </div>
+          <div class="tb-card-actions">
+            <button type="button" class="primary ghost tb-details-btn" data-id="${bot.id}">Details</button>
+            ${bot.status === 'active' ? `<button type="button" class="primary ghost tb-stop-btn" data-id="${bot.id}">Terminate</button>` : `<button type="button" class="primary ghost tb-delete-btn" data-id="${bot.id}">Delete</button>`}
+          </div>
         </div>
-        <div style="display:flex;gap:8px;align-items:center;">
-          <span style="font-size:11px;padding:2px 8px;border-radius:6px;border:1px solid var(--line);color:${bot.status === 'active' ? 'var(--green)' : bot.status === 'error' ? 'var(--red)' : 'var(--dim)'};">${bot.status}</span>
-          ${bot.status === 'active' ? `<button type="button" class="primary ghost tb-stop-btn" data-id="${bot.id}" style="font-size:11px;padding:4px 10px;">Stop</button>` : `<button type="button" class="primary ghost tb-delete-btn" data-id="${bot.id}" style="font-size:11px;padding:4px 10px;">Delete</button>`}
+        <div class="tb-stats-row">
+          <div class="tb-stat"><span class="l">Investment (USDT)</span><span class="n">${bot.investmentUsd != null ? bot.investmentUsd.toFixed(2) : '—'}</span></div>
+          <div class="tb-stat"><span class="l">Total P&amp;L (USDT)</span><span class="n">${pnlSpan(m.totalPnl, m.pctOfInvestment)}</span></div>
+          <div class="tb-stat"><span class="l">Price Range (USDT)</span><span class="n" style="font-size:13px;">${priceRange}</span></div>
+          <div class="tb-stat"><span class="l">Grids</span><span class="n">${bot.plan?.levelCount ?? '—'}</span></div>
+          <div class="tb-stat"><span class="l">Profitable Trades</span><span class="n">${m.wins}</span></div>
         </div>
+        <div class="tb-card-log">${bot.statusMessage || ''}</div>
       </div>
-      <div style="font-size:12px;margin-top:8px;">${pnlLine}</div>
-      <div style="font-size:11.5px;color:${bot.statusIsError ? 'var(--red)' : 'var(--dim)'};margin-top:6px;">${bot.statusMessage || ''}</div>
+    `;
+    }).join('');
+  }
+  renderTradingBotDetailsModal();
+}
+
+// -------------------------------------------------------------
+// Details overlay — one root div, appended to <body> once, re-rendered
+// on every renderTradingBotsList() so it stays live while open (same
+// data source as the cards, just laid out like Bybit's bot-details page).
+// -------------------------------------------------------------
+function ensureTradingBotDetailsRoot(){
+  let root = document.getElementById('tbDetailsRoot');
+  if(root) return root;
+  root = document.createElement('div');
+  root.id = 'tbDetailsRoot';
+  document.body.appendChild(root);
+  root.addEventListener('click', async (e) => {
+    if(e.target.classList.contains('tb-modal-overlay') || e.target.classList.contains('tb-modal-close')){
+      closeTradingBotDetails(); return;
+    }
+    if(e.target.classList.contains('tb-modal-tab')){
+      fu().tbDetailsTab = e.target.dataset.tab; renderTradingBotDetailsModal(); return;
+    }
+    if(e.target.classList.contains('tb-stop-btn')){ await stopTradingBot(e.target.dataset.id); return; }
+    if(e.target.classList.contains('tb-delete-btn')){ deleteTradingBot(e.target.dataset.id); closeTradingBotDetails(); return; }
+  });
+  return root;
+}
+
+function openTradingBotDetails(id){
+  const f = fu();
+  f.tbDetailsOpenId = id;
+  f.tbDetailsTab = 'status';
+  renderTradingBotDetailsModal();
+}
+
+function closeTradingBotDetails(){
+  const f = fu();
+  f.tbDetailsOpenId = null;
+  renderTradingBotDetailsModal();
+}
+
+function renderTradingBotDetailsModal(){
+  const root = ensureTradingBotDetailsRoot();
+  const f = fu();
+  const bot = f.tradingBots.find(b => b.id === f.tbDetailsOpenId);
+  if(!bot){ root.innerHTML = ''; return; }
+  const tab = f.tbDetailsTab || 'status';
+  const m = computeBotMetrics(bot);
+  const statusColor = bot.status === 'active' ? 'var(--green)' : bot.status === 'error' ? 'var(--red)' : 'var(--dim)';
+  const isGrid = bot.type === 'grid';
+  const openLegs = isGrid ? (bot.runtime?.levels || []).filter(l => l.status === 'PENDING_CLOSE' || l.status === 'PENDING_ENTRY') : [];
+
+  const metric = (label, value) => `<div class="tb-metric"><span class="l">${label}</span><span class="v">${value}</span></div>`;
+  const statusTabHtml = `
+    <div class="tb-metrics-grid">
+      ${metric('Investment (USDT)', bot.investmentUsd != null ? bot.investmentUsd.toFixed(2) : '—')}
+      ${metric('Equity (USDT)', m.equity != null ? m.equity.toFixed(2) : '—')}
+      ${metric('Total P&L (USDT)', pnlSpan(m.totalPnl, m.pctOfInvestment))}
+      ${metric('Current P&L (USDT)', m.uPnl == null ? '<span style="color:var(--dim);">—</span>' : pnlSpan(m.uPnl, bot.investmentUsd ? (m.uPnl / bot.investmentUsd) * 100 : null))}
+      ${metric('Grid Profit (USDT)', bot.realizedUsd != null ? bot.realizedUsd.toFixed(2) : '—')}
+      ${metric('Grid APR', m.aprPct != null ? `${m.aprPct.toFixed(2)}%` : '—')}
+      ${metric('Profitable Trades', m.wins)}
+      ${metric('Previously Withdrawn Amount (USDT)', '0')}
+      ${metric('Taker/Maker Fees', '—')}
+      ${metric('Bot ID', bot.id)}
+      ${metric('Start-up time', fmtBotDateTime(bot.createdAtMs))}
+    </div>
+    <div class="tb-params-head">Parameters</div>
+    <div class="tb-metrics-grid">
+      ${isGrid ? `
+        ${metric('Original price range (USDT)', bot.plan?.lower != null ? `${bot.plan.lower.toLocaleString()} - ${bot.plan.upper.toLocaleString()}` : '—')}
+        ${metric('Price Range (USDT)', bot.plan?.lower != null ? `${bot.plan.lower.toLocaleString()} - ${bot.plan.upper.toLocaleString()}` : '—')}
+        ${metric('Grids', bot.plan?.levelCount != null ? `${bot.plan.levelCount} (Arithmetic)` : '—')}
+        ${metric('Mark Price (USDT)', bot.runtime?.markPrice != null ? bot.runtime.markPrice.toLocaleString() : '—')}
+        ${metric('Entry price', '—')}
+        ${metric('TP/SL', '--/--')}
+        ${metric('Current position', '—')}
+        ${metric('Initial Margin Rate', '—')}
+        ${metric('Maintenance Margin Rate', '—')}
+      ` : `
+        ${metric('Base / Safety Order (USDT)', `${bot.plan?.baseOrderUsd ?? '—'} / ${bot.plan?.safetyOrderUsd ?? '—'}`)}
+        ${metric('Safety Orders Filled', `${(bot.runtime?.safetyOrders || []).filter(s => s.status === 'FILLED').length}/${bot.plan?.safetyLevels?.length ?? '—'}`)}
+        ${metric('Mark Price (USDT)', '—')}
+        ${metric('Entry price (avg)', bot.runtime?.avgEntryPrice != null ? bot.runtime.avgEntryPrice.toLocaleString() : '—')}
+        ${metric('TP/SL', `${bot.plan?.takeProfitPct ?? '--'}% / ${bot.plan?.stopLossPct || '--'}%`)}
+        ${metric('Current position', bot.runtime?.totalQty != null ? bot.runtime.totalQty : '—')}
+        ${metric('Initial Margin Rate', '—')}
+        ${metric('Maintenance Margin Rate', '—')}
+      `}
     </div>
   `;
-  }).join('');
+
+  const ordersTabHtml = isGrid && openLegs.length ? `
+    <table class="tb-orders-table"><thead><tr><th>Level</th><th>Direction</th><th>Status</th><th>Entry</th><th>Target</th></tr></thead>
+    <tbody>${openLegs.map(l => `<tr><td>${l.levelIndex}</td><td>${l.direction}</td><td>${l.status}</td><td>${l.price != null ? l.price.toLocaleString() : '—'}</td><td>${l.targetPrice != null ? l.targetPrice.toLocaleString() : '—'}</td></tr>`).join('')}</tbody></table>
+  ` : `<div style="font-size:12px;color:var(--dim);padding:20px 0;text-align:center;">No open legs right now.</div>`;
+
+  const historyTabHtml = m.records.length ? `
+    <table class="tb-orders-table"><thead><tr><th>Closed</th><th>Side</th><th>Entry</th><th>Exit</th><th>Net (USDT)</th></tr></thead>
+    <tbody>${m.records.slice(0, 50).map(r => `<tr><td>${fmtBotDateTime(r.closedAtMs)}</td><td>${r.side || r.direction || '—'}</td><td>${r.entry != null ? r.entry.toLocaleString() : '—'}</td><td>${r.exit != null ? r.exit.toLocaleString() : '—'}</td><td style="color:${(r.netUsd || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(r.netUsd || 0)}</td></tr>`).join('')}</tbody></table>
+  ` : `<div style="font-size:12px;color:var(--dim);padding:20px 0;text-align:center;">No closed cycles yet.</div>`;
+
+  root.innerHTML = `
+    <div class="tb-modal-overlay">
+      <div class="tb-modal">
+        <div class="tb-modal-head">
+          <div class="tb-card-id">
+            <div class="tb-icon">${isGrid ? '▤' : '↻'}</div>
+            <div>
+              <div class="tb-card-title">
+                <strong>${bot.symbol}</strong>
+                <span class="tb-badge">${tbTypeBadgeLabel(bot)}</span>
+                <span class="tb-badge tb-badge-dir">${tbDirBadgeLabel(bot)}</span>
+              </div>
+              <div class="tb-card-sub">
+                <span class="dot ${bot.status === 'active' ? 'live' : bot.status === 'error' ? 'err' : ''}" style="${bot.status !== 'active' && bot.status !== 'error' ? 'background:var(--dim2);' : ''}"></span>
+                <span style="color:${statusColor};text-transform:capitalize;">${bot.status}</span>
+                <span style="color:var(--dim2);">· ${fmtBotUptime(bot.createdAtMs)}</span>
+              </div>
+            </div>
+          </div>
+          <div class="tb-card-actions">
+            ${bot.status === 'active' ? `<button type="button" class="primary ghost tb-stop-btn" data-id="${bot.id}">Terminate</button>` : `<button type="button" class="primary ghost tb-delete-btn" data-id="${bot.id}">Delete</button>`}
+            <button type="button" class="tb-modal-close" title="Close">✕</button>
+          </div>
+        </div>
+        <div class="tb-tabs">
+          <div class="tb-tab tb-modal-tab ${tab === 'status' ? 'on' : ''}" data-tab="status">Status</div>
+          <div class="tb-tab tb-modal-tab ${tab === 'orders' ? 'on' : ''}" data-tab="orders">Orders</div>
+          <div class="tb-tab tb-modal-tab ${tab === 'history' ? 'on' : ''}" data-tab="history">History</div>
+        </div>
+        <div class="tb-modal-body">
+          ${tab === 'status' ? statusTabHtml : tab === 'orders' ? ordersTabHtml : historyTabHtml}
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 // Resumes MONITORING (never new-order placement — f.liveArmed still

@@ -135,3 +135,72 @@
   #panelFutures .fu-live-exch-row > :nth-child(3){ grid-area:mode; }
   #panelFutures .fu-live-exch-note{ grid-area:note; text-align:left !important; white-space:normal; }
 }
+
+/* -------------------- Trading Bots — cards + Details view -------------------- */
+/* Layout modeled on Bybit's own "My Bots" card and bot-details page,
+   using this app's existing dark palette/vars rather than Bybit's light one. */
+.tb-card{
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
+  padding:14px 16px; margin-bottom:10px;
+}
+.tb-card-head{ display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px; }
+.tb-card-id{ display:flex; gap:10px; align-items:flex-start; }
+.tb-icon{
+  width:34px; height:34px; border-radius:var(--r-sm); background:var(--panel2); border:1px solid var(--line);
+  display:flex; align-items:center; justify-content:center; font-size:16px; color:var(--amber); flex:none;
+}
+.tb-card-title{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:13.5px; }
+.tb-card-sub{ font-size:11px; color:var(--dim); margin-top:3px; display:flex; align-items:center; gap:5px; }
+.tb-badge{
+  font-size:10.5px; color:var(--dim); border:1px solid var(--line-soft); border-radius:var(--r-sm);
+  padding:2px 8px; background:var(--panel2); white-space:nowrap;
+}
+.tb-badge-dir{ color:var(--green); border-color:var(--green-line); background:var(--green-soft); }
+.tb-card-actions{ display:flex; gap:8px; align-items:center; }
+.tb-card-actions button{ font-size:11px; padding:5px 12px; min-height:auto; }
+.tb-stats-row{
+  display:flex; gap:26px; flex-wrap:wrap; margin-top:14px; padding-top:12px; border-top:1px solid var(--line-soft);
+}
+.tb-stat{ display:flex; flex-direction:column; gap:3px; min-width:90px; }
+.tb-stat .l{ font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+.tb-stat .n{ font-size:13.5px; font-variant-numeric:tabular-nums; }
+.tb-card-log{ font-size:11px; color:var(--dim); margin-top:8px; }
+
+/* Details overlay */
+.tb-modal-overlay{
+  position:fixed; inset:0; background:rgba(4,5,4,.66); z-index:200;
+  display:flex; align-items:flex-start; justify-content:center; padding:5vh 16px; overflow-y:auto;
+}
+.tb-modal{
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
+  width:100%; max-width:760px; padding:18px 20px 22px;
+}
+.tb-modal-head{ display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px; }
+.tb-modal-close{
+  background:transparent; border:1px solid var(--line); color:var(--dim); border-radius:var(--r-sm);
+  width:28px; height:28px; cursor:pointer; font-size:13px; line-height:1;
+}
+.tb-modal-close:hover{ color:var(--ink); border-color:var(--dim2); }
+.tb-tabs{ display:flex; gap:20px; border-bottom:1px solid var(--line-soft); margin:16px 0 16px; }
+.tb-tab{ font-size:12.5px; color:var(--dim); padding-bottom:9px; cursor:pointer; border-bottom:2px solid transparent; }
+.tb-tab.on{ color:var(--ink); border-bottom-color:var(--amber); }
+.tb-metrics-grid{
+  display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:16px 18px;
+}
+.tb-metric{ display:flex; flex-direction:column; gap:4px; min-width:0; }
+.tb-metric .l{ font-size:10.5px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+.tb-metric .v{ font-size:13.5px; font-variant-numeric:tabular-nums; word-break:break-word; }
+.tb-params-head{
+  font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+  border-left:2px solid var(--amber); padding-left:8px; margin:20px 0 14px;
+}
+.tb-orders-table{ width:100%; border-collapse:collapse; font-size:12px; }
+.tb-orders-table th{ text-align:left; color:var(--dim); font-weight:500; font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; padding:6px 8px; border-bottom:1px solid var(--line); }
+.tb-orders-table td{ padding:7px 8px; border-bottom:1px solid var(--line-soft); font-variant-numeric:tabular-nums; }
+
+@media (max-width:640px){
+  .tb-card-actions{ width:100%; }
+  .tb-card-actions button{ flex:1; }
+  .tb-stats-row{ gap:16px; }
+  .tb-modal{ padding:16px; }
+}
