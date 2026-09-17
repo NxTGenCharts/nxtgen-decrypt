@@ -2997,7 +2997,7 @@ function renderTradingBotTypeFields(){
   const f = fu();
   const type = f.tbCreateType || 'grid';
   if(type === 'grid'){
-    const cfg = f.tbGridForm || (f.tbGridForm = { autoScan: false, direction: 'NEUTRAL', upper: '', lower: '', levelCount: 20, leverage: 5, investmentUsd: 100, maxLossPct: 20, profitTargetPct: '', maxConcurrent: 4, minGridScore: 65 });
+    const cfg = f.tbGridForm || (f.tbGridForm = { autoScan: false, direction: 'NEUTRAL', upper: '', lower: '', levelCount: 10, leverage: 5, investmentUsd: 100, maxLossPct: 20, profitTargetPct: '', maxConcurrent: 4, minGridScore: 65 });
     host.innerHTML = `
       <div style="display:flex;gap:10px;margin-bottom:10px;">
         ${[['manual', 'Manual'], ['auto', 'Auto-Scan Watchlist']].map(([m, label]) => `<button type="button" class="primary ${(cfg.autoScan ? 'auto' : 'manual') === m ? '' : 'ghost'} tb-grid-mode" data-mode="${m}" style="font-size:12px;padding:5px 14px;">${label}</button>`).join('')}
@@ -3250,7 +3250,7 @@ async function runTradingBotsGridBacktestFromForm(){
   tbBacktestStatus(`Simulating ${data.candles.length.toLocaleString()} candles…`);
   await new Promise(resolve => setTimeout(resolve, 0)); // let the status above paint before the sync simulation loop below runs
   const backtestCfg = {
-    levelCount: Number.isFinite(cfg.levelCount) ? cfg.levelCount : 20,
+    levelCount: Number.isFinite(cfg.levelCount) ? cfg.levelCount : 10,
     leverage: Number.isFinite(cfg.leverage) ? cfg.leverage : 10,
     investmentUsd: perBotUsd,
     maxLossPct: Number.isFinite(cfg.maxLossPct) ? cfg.maxLossPct : 20,
