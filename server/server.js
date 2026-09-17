@@ -1769,11 +1769,20 @@ const BACKTEST_KLINE_FETCHERS = {
 
 app.post('/api/backtest/klines', async (req, res) => {
   const { exchange, symbol, startMs, endMs } = req.body || {};
-  // LOCKED TO 5m for the same reason as resolveSnapshotTimeframe above —
-  // every strategy's entry decision runs on 5m everywhere, so the base
-  // timeframe backtests are run against can't drift from that either,
-  // even if a caller's request body asked for something else.
-  const interval = '5m';
+  // Was hard-locked to 5m outright (every strategy's entry decision runs
+  // on 5m everywhere, so backtests couldn't silently drift from that).
+  // Still the default, and the six-strategy Backtest tab never sends
+  // anything else, so nothing changes for it. Trading Bots Grid's own
+  // backtest (runTradingBotsGridBacktest) is a genuinely different case
+  // though: its multi-timeframe context (m15/h1) is aggregated straight
+  // from whatever base candles it's given, not fetched separately at a
+  // fixed interval the way the live snapshot builders above do — so,
+  // unlike live Grid trading, there's no architectural reason its
+  // backtest has to stay on 5m specifically. An explicit, validated
+  // interval in the request body is now honored; anything missing or
+  // not in the allowed set still falls back to 5m exactly as before.
+  const ALLOWED_BACKTEST_INTERVALS = new Set(['3m', '5m', '15m', '30m', '1h']);
+  const interval = ALLOWED_BACKTEST_INTERVALS.has(req.body?.interval) ? req.body.interval : '5m';
   const fetcher = BACKTEST_KLINE_FETCHERS[exchange];
   if(!fetcher) return res.json({ ok: false, message: `Historical data isn't wired up for "${exchange}" yet — ${Object.keys(BACKTEST_KLINE_FETCHERS).join('/')} are supported.` });
   if(!symbol || !startMs || !endMs || endMs <= startMs){

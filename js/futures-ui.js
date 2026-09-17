@@ -3064,10 +3064,14 @@ function renderTradingBotTypeFields(){
       <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line-soft);">
         <div style="font-size:11px;color:var(--dim);margin-bottom:8px;line-height:1.5;">
           Backtests THIS Trading Bots grid code specifically (breakout / drift-recalculation / liquidation-buffer / your own Max Loss &amp; Profit Target above) against real historical candles — not NxTGen Grid's separate, more-gated engine. ${cfg.autoScan ? `Uses ${cfg.minGridScore}/100 as the redeploy gate, matching Auto-Scan.` : `Manual mode has no score gate, so this deploys as soon as a valid range exists — set a Minimum Grid Score below to approximate how Auto-Scan would have behaved instead.`}
+          Backtest-only for now: live Trading Bots Grid still runs on 5m (its breakout/regime context is fetched at fixed 15m/1h alongside it — picking anything but 5m live would mismatch that context, not just change granularity, so it isn't offered as a live option yet).
         </div>
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;">
           <label style="font-size:11px;color:var(--dim);">Symbol
             <select id="tbBtSymbol" style="display:block;margin-top:3px;min-width:120px;">${GRID_SYMBOLS.map(s => `<option value="${s}" ${(f.tbBacktestSymbol || GRID_SYMBOLS[0]) === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+          </label>
+          <label style="font-size:11px;color:var(--dim);">Timeframe
+            <select id="tbBtTimeframe" style="display:block;margin-top:3px;min-width:80px;">${['3m', '5m', '15m', '30m', '1h'].map(tfOpt => `<option value="${tfOpt}" ${(f.tbBacktestTimeframe || '5m') === tfOpt ? 'selected' : ''}>${tfOpt}</option>`).join('')}</select>
           </label>
           <label style="font-size:11px;color:var(--dim);">Days
             <input id="tbBtDays" type="number" min="3" max="180" step="1" value="${f.tbBacktestDays || 30}" style="display:block;margin-top:3px;min-width:70px;">
@@ -3153,6 +3157,7 @@ function initTradingBots(){
       else if(e.target.id === 'tbDailyProfitTarget'){ f.tbDailyProfitTargetPct = Math.max(0.5, parseFloat(e.target.value) || 20); }
       else if(e.target.id === 'tbDailyMaxLoss'){ f.tbDailyMaxLossPct = Math.max(0.5, parseFloat(e.target.value) || 10); }
       else if(e.target.id === 'tbBtSymbol'){ f.tbBacktestSymbol = e.target.value; }
+      else if(e.target.id === 'tbBtTimeframe'){ f.tbBacktestTimeframe = e.target.value; }
       else if(e.target.id === 'tbBtDays'){ f.tbBacktestDays = Math.max(3, Math.min(180, parseInt(e.target.value, 10) || 30)); }
       else if(e.target.id === 'tbBtMinScore'){ f.tbBacktestMinScore = Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0)); }
     });
@@ -3230,15 +3235,18 @@ async function runTradingBotsGridBacktestFromForm(){
   const cfg = f.tbGridForm;
   const exchange = f.tbCreateExchange || 'bybit';
   const symbol = f.tbBacktestSymbol || GRID_SYMBOLS[0];
+  const timeframe = f.tbBacktestTimeframe || '5m';
+  const TIMEFRAME_TO_MINUTES = { '3m': 3, '5m': 5, '15m': 15, '30m': 30, '1h': 60 };
+  const intervalMinutes = TIMEFRAME_TO_MINUTES[timeframe] || 5;
   const days = f.tbBacktestDays || 30;
   const perBotUsd = cfg.autoScan ? cfg.investmentUsd / Math.max(1, cfg.maxConcurrent) : cfg.investmentUsd;
   const minGridScore = cfg.autoScan ? cfg.minGridScore : (f.tbBacktestMinScore ?? 0);
   if(!(perBotUsd > 0)){ tbBacktestStatus('Set an investment amount first.', true); return; }
-  tbBacktestStatus(`Fetching ${days}d of ${symbol} history…`);
+  tbBacktestStatus(`Fetching ${days}d of ${symbol} ${timeframe} history…`);
   const endMs = Date.now();
   const startMs = endMs - days * 86_400_000;
-  const data = await callProxy('/api/backtest/klines', { exchange, symbol, interval: '5m', startMs, endMs }).catch(err => ({ ok:false, message: err.message }));
-  if(!data.ok || !data.candles || !data.candles.length){ tbBacktestStatus(`Could not fetch ${symbol} history: ${data.message || 'no candles returned'}.`, true); return; }
+  const data = await callProxy('/api/backtest/klines', { exchange, symbol, interval: timeframe, startMs, endMs }).catch(err => ({ ok:false, message: err.message }));
+  if(!data.ok || !data.candles || !data.candles.length){ tbBacktestStatus(`Could not fetch ${symbol} ${timeframe} history: ${data.message || 'no candles returned'}.`, true); return; }
   tbBacktestStatus(`Simulating ${data.candles.length.toLocaleString()} candles…`);
   await new Promise(resolve => setTimeout(resolve, 0)); // let the status above paint before the sync simulation loop below runs
   const backtestCfg = {
@@ -3251,7 +3259,7 @@ async function runTradingBotsGridBacktestFromForm(){
   };
   const result = runTradingBotsGridBacktest({
     symbol, candles: data.candles, exchange, cfg: backtestCfg,
-    metaOverrides: { spreadPct: 0.02, fundingRatePct: 0.01 }, intervalMinutes: 5,
+    metaOverrides: { spreadPct: 0.02, fundingRatePct: 0.01 }, intervalMinutes,
   });
   const summary = summarizeTradingBotsGridTrades(result.trades, result.counters);
   const host = tbBacktestResultEl();
@@ -3270,7 +3278,7 @@ async function runTradingBotsGridBacktestFromForm(){
       <div><span style="color:var(--dim);">Profit factor</span> <strong>${summary.profitFactor === Infinity ? '∞' : summary.profitFactor.toFixed(2)}</strong></div>
     </div>
     <div style="color:var(--dim);font-size:11px;">Exits — breakout: ${summary.breakoutExits} · drift-recalc: ${summary.recalculations} · liquidation-risk: ${summary.liquidations} · max loss: ${summary.maxLossExits} · profit target: ${summary.profitTargetExits} · still open at window end: ${summary.openAtEnd}</div>
-    <div style="color:var(--dim);font-size:11px;margin-top:6px;">Simulated over ${data.candles.length.toLocaleString()} real ${symbol} 5m candles (~${days}d), ${fmtUsd(perBotUsd)} per deployment — same code path as the live bot, not a separate model. Past performance on this window is not a guarantee of future results.</div>
+    <div style="color:var(--dim);font-size:11px;margin-top:6px;">Simulated over ${data.candles.length.toLocaleString()} real ${symbol} ${timeframe} candles (~${days}d), ${fmtUsd(perBotUsd)} per deployment — same code path as the live bot (which still runs on 5m — see note above), not a separate model. Past performance on this window is not a guarantee of future results.</div>
   `;
 }
 

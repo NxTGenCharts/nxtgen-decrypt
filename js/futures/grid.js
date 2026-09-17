@@ -203,7 +203,18 @@ export function buildGridPlan(symbol, snap, regime, cfg, accountEquity){
   if(!s.regimeOk || s.score < c.minGridScore) return null;
 
   const price = snap.price;
-  const mid = s.vwapM15 || price;
+  // Center on the CURRENT live price, not the M15 VWAP. vwapM15 is a
+  // volume-weighted average over the last 60 M15 bars (~15 hours) — in
+  // a real range it can sit meaningfully away from where price actually
+  // is right now, especially after any drift within that window. Since
+  // upper/lower are built symmetrically around `mid`, an off-price mid
+  // silently shifts the whole grid to one side of the market: every
+  // level ends up on the same side of current price, so the "nearest"
+  // resting order can be a large % away instead of a few ticks — this
+  // was the root cause of live/demo grids placing orders that then sat
+  // unfilled for hours. Anchoring to snap.price keeps the grid centered
+  // on where price actually is at deploy time.
+  const mid = price;
   // Blend three independent range estimates (ATR-based, Bollinger-based,
   // swing-structure-based) rather than trusting any single one — a
   // single wide-outlier ATR reading or a single stale swing level
@@ -293,7 +304,8 @@ export function buildManualGridPlan({ symbol, direction, upper, lower, levelCoun
 // wants that gate).
 export function suggestGridRange(snap, regime){
   const s = scoreGridSuitability(snap, regime, GRID_DEFAULTS);
-  const mid = s.vwapM15 || snap.price;
+  // Same fix as buildGridPlan above: center on live price, not vwapM15.
+  const mid = snap.price;
   const atrHalfWidth = (s.atrM15 || 0) * 2.2;
   const bbHalfWidth = s.bb ? (s.bb.upper - s.bb.lower) / 2 : atrHalfWidth;
   const swingHalfWidth = (s.resistance - s.support) / 2 || atrHalfWidth;
@@ -438,23 +450,12 @@ export function stepGridSymbol(session, { symbol, snap, regime, bar, nowMs, cfg,
   }
 
   if(grid){
-    const perLevelUsd = grid.allocationUsd / grid.levelCount;
-    for(let li = 0; li < grid.levels.length; li++){
-      if(grid.filledLevel[li]) continue;
-      const levelPrice = grid.levels[li];
-      const crossed = bar.l <= levelPrice && bar.h >= levelPrice;
-      if(!crossed) continue;
-      const isLowerHalf = levelPrice <= grid.mid;
-      const wantLong = (grid.direction === 'LONG' || grid.direction === 'NEUTRAL') && isLowerHalf;
-      const wantShort = (grid.direction === 'SHORT' || grid.direction === 'NEUTRAL') && !isLowerHalf;
-      if(!wantLong && !wantShort) continue;
-      if(grid.openLegs.length >= c.maxGridLevels) continue;
-      const direction = wantLong ? 'LONG' : 'SHORT';
-      const qty = perLevelUsd * grid.leverage / levelPrice;
-      grid.filledLevel[li] = true;
-      grid.openLegs.push({ levelIndex: li, entry: levelPrice, qty, direction, openedAt: nowMs, targetIndex: wantLong ? li + 1 : li - 1 });
-    }
-
+    // Exits checked BEFORE this bar's new entries are added — same
+    // same-bar-lookahead fix as runTradingBotsGridBacktest below (see
+    // that function's comment): a leg can only reach its target on a
+    // LATER bar than the one it opened on, never the one it just filled
+    // in, since real resting orders can't be known to have filled both
+    // legs within one candle's unknown intrabar path.
     for(const leg of grid.openLegs.slice()){
       const targetPrice = grid.levels[leg.targetIndex];
       if(targetPrice == null) continue;
@@ -471,6 +472,23 @@ export function stepGridSymbol(session, { symbol, snap, regime, bar, nowMs, cfg,
       grid.openLegs = grid.openLegs.filter(l => l !== leg);
       grid.filledLevel[leg.levelIndex] = false;
       session.counters.gridCyclesOpened++;
+    }
+
+    const perLevelUsd = grid.allocationUsd / grid.levelCount;
+    for(let li = 0; li < grid.levels.length; li++){
+      if(grid.filledLevel[li]) continue;
+      const levelPrice = grid.levels[li];
+      const crossed = bar.l <= levelPrice && bar.h >= levelPrice;
+      if(!crossed) continue;
+      const isLowerHalf = levelPrice <= grid.mid;
+      const wantLong = (grid.direction === 'LONG' || grid.direction === 'NEUTRAL') && isLowerHalf;
+      const wantShort = (grid.direction === 'SHORT' || grid.direction === 'NEUTRAL') && !isLowerHalf;
+      if(!wantLong && !wantShort) continue;
+      if(grid.openLegs.length >= c.maxGridLevels) continue;
+      const direction = wantLong ? 'LONG' : 'SHORT';
+      const qty = perLevelUsd * grid.leverage / levelPrice;
+      grid.filledLevel[li] = true;
+      grid.openLegs.push({ levelIndex: li, entry: levelPrice, qty, direction, openedAt: nowMs, targetIndex: wantLong ? li + 1 : li - 1 });
     }
 
     const halfWidth = (grid.upper - grid.lower) / 2;
@@ -789,6 +807,26 @@ export function runTradingBotsGridBacktest({ symbol, candles, cfg, exchange, met
       }
     }
     if(bot){
+      // Exits FIRST, entries second — deliberately, not incidentally.
+      // Checking exits against openLegs BEFORE this bar's new fills are
+      // added means a leg can only close on a LATER bar than the one it
+      // opened on, never the same 5m candle it just filled in. Doing it
+      // the other way around (entries, then exits against the resulting
+      // list) let a level open and hit its target within the same
+      // candle purely because that candle's high/low span happened to
+      // cover both prices — impossible to actually know the intrabar
+      // path from OHLC alone, and it was quietly inflating both the
+      // trade count and the win rate with same-bar "free" round trips
+      // that a real resting order couldn't reliably reproduce.
+      for(const leg of bot.openLegs.slice()){
+        const targetPrice = bot.plan.levels[leg.targetIndex];
+        if(targetPrice == null) continue;
+        const reached = leg.direction === 'LONG' ? bar.h >= targetPrice : bar.l <= targetPrice;
+        if(!reached) continue;
+        recordClose(leg, targetPrice, 'GRID_CYCLE_TP', nowMs);
+        bot.openLegs = bot.openLegs.filter(l => l !== leg);
+        bot.filledLevel[leg.levelIndex] = false;
+      }
       const perLevelUsd = bot.plan.allocationUsd / bot.plan.levelCount;
       for(let li = 0; li < bot.plan.levels.length; li++){
         if(bot.filledLevel[li]) continue;
@@ -799,15 +837,6 @@ export function runTradingBotsGridBacktest({ symbol, candles, cfg, exchange, met
         const qty = (perLevelUsd * bot.plan.leverage) / levelPrice;
         bot.filledLevel[li] = true;
         bot.openLegs.push({ levelIndex: li, entry: levelPrice, qty, direction, openedAt: nowMs, targetIndex: isLowerHalf ? li + 1 : li - 1 });
-      }
-      for(const leg of bot.openLegs.slice()){
-        const targetPrice = bot.plan.levels[leg.targetIndex];
-        if(targetPrice == null) continue;
-        const reached = leg.direction === 'LONG' ? bar.h >= targetPrice : bar.l <= targetPrice;
-        if(!reached) continue;
-        recordClose(leg, targetPrice, 'GRID_CYCLE_TP', nowMs);
-        bot.openLegs = bot.openLegs.filter(l => l !== leg);
-        bot.filledLevel[leg.levelIndex] = false;
       }
     }
     if(bot){
