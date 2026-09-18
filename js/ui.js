@@ -28,6 +28,21 @@ export function updateExchangeBadge(key, badgeState){
 }
 
 export function renderOverview(){
+  // Only the Overview page's HTML actually has these elements — every
+  // other page (Triangular, Cross-Exchange, Autotrade, API Keys) is its
+  // own separate document since the site was split into multiple pages,
+  // so els.ovExchanges etc. are null there. This function is still called
+  // from triangular.js/cross-exchange.js after every scan (correctly —
+  // state.lastTri/lastX need updating no matter which page you scanned
+  // from, so Overview shows fresh numbers whenever you do visit it); it
+  // just has no DOM to write to on those other pages, so it returns early
+  // instead of throwing. Before this guard, that throw was caught by the
+  // scan's own try/catch and mis-reported as "Could not reach the exchange
+  // API(s)" even on a scan that actually succeeded — the status badge got
+  // set to 'error' by the catch block after already briefly being set to
+  // 'live' moments earlier, and the exact same crash refired on every page
+  // load and every tab click, since a scan (and this call) auto-runs then.
+  if(!els.ovExchanges) return;
   const connected = Object.values(state.exchangeState).filter(s => s === 'up').length;
   els.ovExchanges.textContent = connected + ' / 3';
 
