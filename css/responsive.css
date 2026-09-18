@@ -66,9 +66,10 @@
   .exchange-badges{ justify-content:flex-start; }
   .last-update{ flex-basis:100%; order:3; }
 
-  /* --- nav: keep labels intact, allow horizontal scroll instead of wrap --- */
-  .term-nav{ gap:18px; margin-bottom:18px; }
-  .navtab{ font-size:12px; padding:10px 2px 11px; }
+  /* --- nav: mobile hamburger — slide-down panel instead of horizontal
+     scroll, see .nav-toggle/.term-nav rules below --- */
+  .term-nav{ margin-bottom:18px; }
+  .navtab{ font-size:13px; }
 
   /* --- controls: deliberate two-column grid, stacked full-width actions --- */
   .controls{ grid-template-columns:repeat(2, 1fr); gap:12px 14px; padding:14px; }
@@ -130,7 +131,57 @@
   .xdetail{ grid-template-columns:1fr; }
 }
 
-/* -------------------- <= 480px: small mobile -------------------- */
+/* -------------------- nav-toggle (hamburger): hidden on desktop -------------------- */
+.nav-toggle{
+  display:none;
+  appearance:none; cursor:pointer;
+  width:var(--touch-target); height:var(--touch-target);
+  align-items:center; justify-content:center;
+  background:var(--panel2); border:1px solid var(--line); border-radius:var(--r-md);
+  padding:0;
+}
+.nav-toggle:focus-visible{ outline:2px solid var(--amber); outline-offset:2px; }
+.nav-toggle .bar,
+.nav-toggle .bar::before,
+.nav-toggle .bar::after{
+  display:block; width:18px; height:2px; background:var(--ink-dim); border-radius:2px;
+  transition:transform .18s ease, opacity .18s ease, background .18s ease;
+}
+.nav-toggle .bar{ position:relative; }
+.nav-toggle .bar::before,
+.nav-toggle .bar::after{ content:''; position:absolute; left:0; }
+.nav-toggle .bar::before{ top:-6px; }
+.nav-toggle .bar::after{ top:6px; }
+/* hamburger -> X when open, driven purely by aria-expanded so no extra JS-toggled class is needed for the icon itself */
+.nav-toggle[aria-expanded="true"] .bar{ background:transparent; }
+.nav-toggle[aria-expanded="true"] .bar::before{ top:0; transform:rotate(45deg); background:var(--ink); }
+.nav-toggle[aria-expanded="true"] .bar::after{ top:0; transform:rotate(-45deg); background:var(--ink); }
+
+/* -------------------- <= 768px: hamburger becomes visible, nav becomes a collapsible slide-down panel -------------------- */
+@media (max-width:768px){
+  .term-header{ position:relative; }
+  .nav-toggle{ display:inline-flex; position:absolute; top:0; right:0; }
+  /* Room for the button so it never overlaps brand-copy text on narrow screens */
+  .brand-block{ padding-right:calc(var(--touch-target) + 12px); }
+
+  .term-nav{
+    display:none;
+    flex-direction:column; gap:2px;
+    overflow-x:visible;
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
+    padding:6px; margin-bottom:18px;
+  }
+  .term-nav.open{ display:flex; animation:navPanelIn .16s ease-out; }
+  @keyframes navPanelIn{ from{ opacity:0; transform:translateY(-6px); } to{ opacity:1; transform:translateY(0); } }
+  .navtab{
+    width:100%; justify-content:flex-start;
+    padding:12px 10px; border-bottom:none; border-radius:var(--r-md);
+  }
+  .navtab.active{ background:var(--panel-hi); border-bottom-color:transparent; }
+  .navtab:active{ background:var(--panel2); }
+}
+
+
 @media (max-width:480px){
   .wrap{ padding-left:16px; padding-right:16px; }
 
