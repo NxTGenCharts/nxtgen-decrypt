@@ -89,6 +89,10 @@
     </div>
     <div class="xfilters" id="xFiltersPanel" hidden>
       <div class="field">
+        <label for="xFilterMinVolume">Min 24h volume (quote ccy)</label>
+        <input id="xFilterMinVolume" type="number" min="0" step="1000" value="20000" title="Drops any match where either leg's 24h quote volume is below this — the usual reason a huge % gap turns out to be unfillable noise on a thin market">
+      </div>
+      <div class="field">
         <label for="xFilterLiquidity">Min liquidity</label>
         <select id="xFilterLiquidity" title="Only show rows at or above this liquidity level">
           <option value="any">Any</option>

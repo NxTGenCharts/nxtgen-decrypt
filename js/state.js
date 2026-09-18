@@ -59,6 +59,7 @@ export const els = {
   xFiltersPanel: document.getElementById('xFiltersPanel'),
   xFiltersSummary: document.getElementById('xFiltersSummary'),
   xFilterLiquidity: document.getElementById('xFilterLiquidity'),
+  xFilterMinVolume: document.getElementById('xFilterMinVolume'),
   xFilterWindow: document.getElementById('xFilterWindow'),
   xFilterQuote: document.getElementById('xFilterQuote'),
   xFilterDwVerified: document.getElementById('xFilterDwVerified'),

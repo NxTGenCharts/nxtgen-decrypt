@@ -265,6 +265,7 @@ if(els.xResults){
 // toggling a checkbox is instant. ----
 function currentFilterSelections(){
   return {
+    minVolume: els.xFilterMinVolume ? (parseFloat(els.xFilterMinVolume.value) || 0) : 0, // 24h quote-currency volume, both legs — 0/blank = off
     minLiquidity: els.xFilterLiquidity ? els.xFilterLiquidity.value : 'any',   // 'any' | 'medium' | 'high'
     window: els.xFilterWindow ? els.xFilterWindow.value : 'any',                // 'any' | 'fresh' | 'aged'
     quote: els.xFilterQuote ? els.xFilterQuote.value : 'any',                   // 'any' | 'usdt'
@@ -282,6 +283,12 @@ function currentFilterSelections(){
 function passesAdvancedFilters(o, f, amount){
   if(f.quote === 'usdt' && o.quote !== 'USDT') return false;
   if(!f.exchanges[o.buyEntry.exchange] || !f.exchanges[o.sellEntry.exchange]) return false;
+  if(f.minVolume > 0){
+    // Same "thinner of the two legs" logic liquidityPill already uses — a
+    // route is only as liquid as its worse-covered side.
+    const vol = Math.min(o.buyEntry.quoteVolume24h || 0, o.sellEntry.quoteVolume24h || 0);
+    if(vol < f.minVolume) return false;
+  }
   if(f.minLiquidity !== 'any'){
     const liq = liquidityPill(o, amount);
     if(f.minLiquidity === 'high' && liq.cls !== 'liq-high') return false;
@@ -324,8 +331,11 @@ function initXFilters(){
     els.xFiltersToggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
     els.xFiltersToggleBtn.textContent = open ? 'Advanced Filters ▴' : 'Advanced Filters ▾';
   });
-  const controls = [els.xFilterLiquidity, els.xFilterWindow, els.xFilterQuote, els.xFilterDwVerified, els.xFilterExBitget, els.xFilterExBinance, els.xFilterExBybit];
-  controls.forEach(el => { if(el) el.addEventListener('change', applyAdvancedFiltersAndRender); });
+  const changeControls = [els.xFilterLiquidity, els.xFilterWindow, els.xFilterQuote, els.xFilterDwVerified, els.xFilterExBitget, els.xFilterExBinance, els.xFilterExBybit, els.xFilterExMexc, els.xFilterExGateio];
+  changeControls.forEach(el => { if(el) el.addEventListener('change', applyAdvancedFiltersAndRender); });
+  // Min volume is a number input, not a select/checkbox — 'input' so it
+  // re-filters live as you type/adjust, not only once it loses focus.
+  if(els.xFilterMinVolume) els.xFilterMinVolume.addEventListener('input', applyAdvancedFiltersAndRender);
 }
 initXFilters();
 
