@@ -35,7 +35,14 @@ import { buildGraph, findCycles } from './triangular.js';
 import { fmtPct, coinIconHtml } from './utils.js';
 
 const LS_KEY = 'nxtgen_autotrade_v1';
-const MIN_PROFIT_FLOOR = 0.8; // hard floor — autotrade never fires below this, regardless of the field value
+// Absolute sanity floor, NOT the user-facing minimum — this only guards
+// against a blank/zero/negative value in the field (e.g. an empty input on
+// load) ever being read as "fire on anything, including a net loss". The
+// real floor is now whatever "Min profit to autotrade (%)" is set to; it
+// used to be hard-clamped to 0.8 regardless of that field (see git history)
+// which silently overrode any lower value someone actually configured —
+// removed at the person's request so the field means what it says.
+const MIN_PROFIT_SANITY_FLOOR = 0.05;
 
 // No longer used by any exchange — Bitget (the only one that ever needed
 // this) now has real verification via the proxy, see verifyBitget in
@@ -846,7 +853,7 @@ async function tick(){
   const feePct = parseFloat(els.atFee.value) || 0;
   const minVolume = parseFloat(els.atMinVolume.value) || 0;
   const configuredFloor = parseFloat(els.atMinProfit.value);
-  const minProfitPct = Math.max(MIN_PROFIT_FLOOR, isFinite(configuredFloor) ? configuredFloor : MIN_PROFIT_FLOOR);
+  const minProfitPct = isFinite(configuredFloor) && configuredFloor > 0 ? configuredFloor : MIN_PROFIT_SANITY_FLOOR;
   const dailyTarget = parseFloat(els.atDailyTarget.value) || 11;
   const netLabel = at.mode === 'demo' ? ' (demo)' : '';
 
@@ -1209,7 +1216,7 @@ async function executeAtPendingCycle(){
     // fall back to whatever's best right now if it isn't.
     const fresh = ranked.find(r => r.canonicalKey === pending.cycle.canonicalKey) || ranked[0];
     const configuredFloor = parseFloat(els.atMinProfit.value);
-    const minProfitPct = Math.max(MIN_PROFIT_FLOOR, isFinite(configuredFloor) ? configuredFloor : MIN_PROFIT_FLOOR);
+    const minProfitPct = isFinite(configuredFloor) && configuredFloor > 0 ? configuredFloor : MIN_PROFIT_SANITY_FLOOR;
     const stillQualifies = fresh && (pending.testMode || pending.forcedRealDemoTest || fresh.profitPct >= minProfitPct);
     if(!stillQualifies){
       showAtMessage(`This cycle no longer qualifies as of this moment (best right now is ${fresh ? fmtPct(fresh.profitPct) : 'none found'}, below your ${minProfitPct.toFixed(2)}% floor) — not executing. Clearing this pending opportunity; it'll reappear if it (or another) qualifies again.`, 'error');
@@ -1292,7 +1299,7 @@ function startAutotrade(){
   const netLabel = mode === 'demo' ? ' (demo)' : '';
   const floorNote = at.testMode
     ? `⚠ TEST MODE is ON — it will execute the best cycle every scan regardless of profitability, including losses, to exercise the trade/log/balance path. It will NOT stop at the daily target automatically; use Stop Autotrade when you're done testing.`
-    : `Will only act on cycles ≥ ${Math.max(MIN_PROFIT_FLOOR, parseFloat(els.atMinProfit.value)||MIN_PROFIT_FLOOR).toFixed(2)}%, and stops automatically at +${els.atDailyTarget.value}% for the day.`;
+    : `Will only act on cycles ≥ ${(parseFloat(els.atMinProfit.value) > 0 ? parseFloat(els.atMinProfit.value) : MIN_PROFIT_SANITY_FLOOR).toFixed(2)}%, and stops automatically at +${els.atDailyTarget.value}% for the day.`;
   showAtMessage(`Autotrade started on ${EXCHANGES[key].label}${netLabel} — Triangular only, Spot only. ${floorNote}`, at.testMode ? 'error' : 'info');
   persist();
   renderAutotradeStatus();
