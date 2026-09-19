@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>NxTGen DeCrypt — Arbitrage Terminal</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -12,11 +12,18 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192">
 <link rel="icon" href="/icon-512.png" type="image/png" sizes="512x512">
-<meta name="theme-color" content="#08090a">
+<meta name="theme-color" content="#f0b429">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NxTGen">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/css/main.css">
 <link rel="stylesheet" href="/css/components.css">
 <link rel="stylesheet" href="/css/responsive.css">
 <link rel="stylesheet" href="/css/futures.css">
+<link rel="stylesheet" href="/css/mobile-app.css">
 </head>
 <body>
 <div class="wrap">
@@ -69,6 +76,20 @@
       <div class="ov-card ov-highlight"><span class="ov-label">Best Opportunity</span><span class="ov-value" id="ovBest">—</span></div>
       <div class="ov-card"><span class="ov-label">Scanner Status</span><span class="ov-value" id="ovStatus">IDLE</span></div>
     </div>
+    <!-- Mobile-only Home widgets (hidden on desktop; see css/mobile-app.css).
+         Icons are filled in by js/mobile-shell.js from the data-icon names. -->
+    <div class="m-only m-quick" role="navigation" aria-label="Quick actions">
+      <a class="m-qa" href="/triangular-arbitrage/"><span class="m-qa-ic" data-icon="triangle"></span><span>Triangular</span></a>
+      <a class="m-qa" href="/cross-arbitrage/"><span class="m-qa-ic" data-icon="swap"></span><span>Cross-Exchange</span></a>
+      <a class="m-qa" href="/autotrade-futures/#auto"><span class="m-qa-ic" data-icon="wallet"></span><span>Autotrade</span></a>
+      <a class="m-qa" href="/autotrade-futures/#futures"><span class="m-qa-ic" data-icon="diamond"></span><span>AI Futures</span></a>
+      <a class="m-qa" href="/autotrade-futures/#bots"><span class="m-qa-ic" data-icon="bot"></span><span>Trading Bots</span></a>
+      <a class="m-qa" href="/api-keys/"><span class="m-qa-ic" data-icon="key"></span><span>API Keys</span></a>
+      <button class="m-qa is-green" type="button" data-m-action="scan"><span class="m-qa-ic" data-icon="refresh"></span><span>Run Scan</span></button>
+      <button class="m-qa" type="button" data-m-install><span class="m-qa-ic" data-icon="download"></span><span>Install App</span></button>
+    </div>
+    <div class="m-only m-ticker" id="mTicker" hidden aria-label="Market ticker"><div class="m-ticker-track" id="mTickerTrack"></div></div>
+
     <div class="ov-summary">
       <div class="ov-block">
         <div class="ov-block-title">Triangular Arbitrage</div>
@@ -79,6 +100,10 @@
         <div class="ov-block-body" id="ovXSummary">No scan run yet. Open the Cross-Exchange tab and click Scan Markets, or use Run Full Scan above.</div>
       </div>
     </div>
+    <section class="m-only m-movers" id="mMovers" aria-label="Market movers">
+      <div class="m-movers-head"><h3>Market Movers</h3><small>Spot · 24h</small></div>
+      <div id="mMoversList"><div class="m-skel"></div><div class="m-skel"></div><div class="m-skel"></div></div>
+    </section>
   </div>
 
   <!-- Hidden helper copies: not shown, but give runScan()/runXScan() the
@@ -245,6 +270,8 @@
 </div>
 
 <script type="module" src="/js/app.js"></script>
+
+<script type="module" src="/js/mobile-shell.js"></script>
 
 </body>
 </html>
