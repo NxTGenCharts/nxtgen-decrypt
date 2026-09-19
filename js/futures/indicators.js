@@ -293,6 +293,97 @@ export function awesomeOscillator(candles){
   return { values, colors };
 }
 
+// MetaTrader-style MACD "main" line: EMA(fast) - EMA(slow) of close, one value
+// per bar. In MT5 the MACD histogram you see on the chart IS this main
+// line (not main-minus-signal), and "MACD above zero" means main > 0 — so
+// that's what Nova Scalp's zero-line gate reads. (macdHistogram() above
+// returns the main-minus-signal histogram, which is a different thing.)
+export function macdLineSeries(candles, fast, slow){
+  fast = fast || 12; slow = slow || 26;
+  const c = closes(candles);
+  const f = emaSeries(c, fast), s = emaSeries(c, slow);
+  return f.map((v, i) => v - s[i]);
+}
+
+// How many consecutive bars, counting back from `idx` inclusive, satisfy
+// `pred(series[k])`. Null/undefined values end the streak.
+export function streakBack(series, idx, pred){
+  let n = 0;
+  for(let k = idx; k >= 0; k--){
+    const v = series[k];
+    if(v == null || !pred(v)) break;
+    n++;
+  }
+  return n;
+}
+
+// Confirmed fractal swing points (default: 2 bars each side, strict) inside
+// [fromIdx, toIdx]. Returns [{ index, price }], oldest first. A swing at
+// bar j needs `right` bars after it to confirm, so callers should pass a
+// toIdx of at most (lastIdx - right).
+export function swingLowPoints(candles, fromIdx, toIdx, left, right){
+  left = left || 2; right = right || 2;
+  const out = [];
+  for(let j = Math.max(left, fromIdx); j <= Math.min(candles.length - 1 - right, toIdx); j++){
+    let ok = true;
+    for(let k = 1; k <= left && ok; k++) if(!(candles[j].l < candles[j - k].l)) ok = false;
+    for(let k = 1; k <= right && ok; k++) if(!(candles[j].l < candles[j + k].l)) ok = false;
+    if(ok) out.push({ index: j, price: candles[j].l });
+  }
+  return out;
+}
+export function swingHighPoints(candles, fromIdx, toIdx, left, right){
+  left = left || 2; right = right || 2;
+  const out = [];
+  for(let j = Math.max(left, fromIdx); j <= Math.min(candles.length - 1 - right, toIdx); j++){
+    let ok = true;
+    for(let k = 1; k <= left && ok; k++) if(!(candles[j].h > candles[j - k].h)) ok = false;
+    for(let k = 1; k <= right && ok; k++) if(!(candles[j].h > candles[j + k].h)) ok = false;
+    if(ok) out.push({ index: j, price: candles[j].h });
+  }
+  return out;
+}
+
+// Kaufman Efficiency Ratio: net close-to-close move over `period` bars
+// divided by the sum of every bar-to-bar move in that window. ~1 = a clean
+// one-directional trend, ~0 = price went nowhere despite lots of movement
+// (i.e. chop / range). Returns null without enough history.
+export function efficiencyRatio(values, period){
+  if(values.length < period + 1) return null;
+  const end = values.length - 1;
+  const net = Math.abs(values[end] - values[end - period]);
+  let path = 0;
+  for(let k = end - period + 1; k <= end; k++) path += Math.abs(values[k] - values[k - 1]);
+  return path > 0 ? net / path : 0;
+}
+
+// Number of Parabolic SAR trend flips (dot jumping from one side of price
+// to the other) across the last `lookback` bars. Lots of flips in a short
+// window is the classic signature of a ranging / whipsawing market.
+export function sarFlipCount(psar, candles, lookback){
+  let flips = 0, prevUp = null;
+  for(let k = Math.max(0, candles.length - lookback); k < candles.length; k++){
+    if(psar[k] == null) continue;
+    const up = psar[k] < candles[k].c;
+    if(prevUp !== null && up !== prevUp) flips++;
+    prevUp = up;
+  }
+  return flips;
+}
+
+// How many times close crossed the given series (e.g. EMA50) in the last
+// `lookback` bars — another whipsaw measure.
+export function closeCrossCount(candles, series, lookback){
+  let n = 0, prevSide = null;
+  for(let k = Math.max(0, candles.length - lookback); k < candles.length; k++){
+    if(series[k] == null) continue;
+    const side = candles[k].c >= series[k];
+    if(prevSide !== null && side !== prevSide) n++;
+    prevSide = side;
+  }
+  return n;
+}
+
 export function pctChange(from, to){
   return from ? ((to - from) / from) * 100 : 0;
 }

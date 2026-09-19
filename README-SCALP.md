@@ -955,3 +955,41 @@ a passing stress test are not a measured win rate. Run it through the
 Backtest tab against real historical data before sizing anything real
 behind it.
 
+
+## Update: Nova Scalp rewritten — PSAR x EMA50/100 cross, AO + MACD zero-line, Smart Range Filter, fixed 1:2
+
+Nova Scalp's old VWAP-reclaim detector is gone. `detectNovaScalp` in
+`setups.js` now trades this (5m only; every tunable lives in the exported
+`NOVA_SCALP` object at the top of that section):
+
+**Buy**: the Parabolic SAR dots cross UP through the whole EMA50/EMA100 band
+(SAR clearly below both, then clearly above both, dots under price, cross no
+older than 3 bars) while the Awesome Oscillator and the MACD main line are
+both above zero. "2+ preferred" is implemented as 2+ consecutive bars above
+zero on both — a confidence bonus, not a hard rule (`minZeroBars: 1` is the
+hard minimum; set it to 2 to make 2+ mandatory). **Sell** is the exact mirror.
+
+**Stop**: the most recent confirmed swing low (2-left/2-right fractal) inside
+the current SAR run — the swing sitting next to the lowest SAR dots — or the
+run's lowest dot if no swing formed, minus 0.1 ATR. Sells mirror it. This
+stop is structural, so it is not clamped to the fee floors the other scalps
+use: stops wider than 1.5% are skipped, stops too tight for fees are
+rejected by the existing fee-to-stop gate.
+
+**Target**: one exit at exactly 2R. No 30/30/40 partials, no breakeven move,
+no fee-bump of the target (`attachSingleTargetLevels` in `engine.js`). Paper,
+Backtest and Live/Demo all treat it as a single-exit trade (`singleTp`); the
+Live path places one native SL + one native TP. The time stop is only a 24h
+safety valve so trades resolve at stop or target like real exchange orders.
+
+**Smart Range Filter** (`rangeFilter.js`): an M5-only trend-quality score
+from ADX, efficiency ratio, EMA50/100 separation and slope, SAR flip count,
+EMA50 close-crosses and an ATR squeeze. Below 55/100 the entry is vetoed and
+the scanner row says which measurements voted "range". This is a rules-based
+score, not a trained model. If the optional AI second opinion (API Keys tab)
+is on, Nova Scalp signals also hand it these numbers and it is told to reject
+range/whipsaw conditions.
+
+**Not measured.** Synthetic-data runs confirm the mechanics (exact 1:2 on
+every winner, filter on/off changes the trade mix as intended) but say
+nothing about live edge. Run it through the Backtest tab on real 5m history.

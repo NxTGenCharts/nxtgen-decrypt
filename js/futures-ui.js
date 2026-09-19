@@ -1221,6 +1221,7 @@ async function runLiveCycleInner(){
       regime: approved.regime, confidence: approved.confidence, entry: approved.entry, stop: approved.stop,
       tp1: approved.tp1, riskRewardRatio: approved.riskReward, expectedNetPct: approved.expectedNetPct,
       liquidityScore: approved.liquidityScore, reasons: approved.reasons,
+      rangeFilter: approved.rangeFilter || null, // Nova Scalp only — the AI reviewer is asked to reject range conditions using these M5 metrics
     });
     if(verdict && verdict.ok && verdict.approve === false){
       showLiveMessage(`AI signal check rejected ${approved.symbol} ${approved.direction} despite the engine's approval: "${verdict.reason||'no reason given'}" — no order placed this cycle.`, 'error');
@@ -1265,7 +1266,10 @@ const DURATION_TRACKED_EXCHANGES = ['binance', 'bybit'];
 async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, equity){
   const f = fu();
   const openedAtMs = Date.now();
-  const usePartialTp = PARTIAL_TP_EXCHANGES.includes(exchange) && approved.tpFractions;
+  // Nova Scalp (approved.singleTp) is one fixed 2R exit — it deliberately
+  // skips the 30/30/40 partial structure and the breakeven move, and goes
+  // through the single take-profit order path below instead.
+  const usePartialTp = PARTIAL_TP_EXCHANGES.includes(exchange) && approved.tpFractions && !approved.singleTp;
   try{
     showLiveMessage(`Placing a real ${mode} order on ${exchange}: ${approved.symbol} ${side} @ ~${approved.entry}…`);
     const orderBody = {

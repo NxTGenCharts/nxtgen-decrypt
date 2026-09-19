@@ -20,7 +20,7 @@
 // =============================================================
 import { mockMarket, FUTURES_SYMBOLS } from './mockMarket.js';
 import { classifyRegime, REGIMES } from './regime.js';
-import { detectAllSetups } from './setups.js';
+import { detectAllSetups, NOVA_SCALP } from './setups.js';
 import { computeFactorScores, weightedScore, DEFAULT_WEIGHTS } from './scoring.js';
 import { decideExecution, estimateCosts, DEFAULT_FEE_CONFIG, DEFAULT_MIN_NET_PROFIT_PCT, buildTpLevels, feeAdjustedBreakevenPrice } from './costs.js';
 import { positionSize, checkLiquidationSafety, RISK_DEFAULTS } from './risk.js';
@@ -75,7 +75,7 @@ export function combineEnsemble(signals){
 // round-trip costs. Every setup's own stop-distance math below is
 // UNCHANGED from before; only the TP part of what buildLevels used to
 // return has moved out.
-function buildLevels(snap, direction, setupType){
+function buildLevels(snap, direction, setupType, signalMeta){
   const entry = snap.price;
   const atrM15 = atr(snap.m15, 14) || entry * 0.003;
   const atrPct = (atrM15 / entry) * 100;
@@ -106,17 +106,20 @@ function buildLevels(snap, direction, setupType){
   }
 
   if(setupType === 'Nova Scalp'){
-    // Same reasoning and same-sized floor bump as NxTGen Scalp just above
-    // (0.35% -> 0.45%) — a VWAP-reclaim scalp is exactly as exposed to
-    // the fee$-scales-with-notional problem described there, and this
-    // codebase's real measured numbers (see NxTGen Scalp's comment) don't
-    // distinguish between the two setups on that front; both get the
-    // identical fix.
+    // Nova Scalp's stop is STRUCTURAL: the most recent swing low/high next
+    // to the SAR dots (computed in setups.js's detectNovaScalp and handed
+    // over via signal.meta.stopPrice), not an ATR-scaled distance with fee
+    // floors like the other scalps. So it is deliberately not clamped here —
+    // clamping would move the stop off the structure the strategy is defined
+    // by. Stops that are unusably tight are caught by the existing
+    // fee-to-stop gate (noTradeEngine.js), unusably wide ones by
+    // NOVA_SCALP.maxStopPct in evaluateSymbol below. If meta is somehow
+    // missing, stopPrice is null and evaluateSymbol rejects the row.
     const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
     const atrPct5 = (atrM5 / entry) * 100;
-    const distPct = clamp(atrPct5 * 1.0, 0.45, 0.95);
-    const stopPrice = direction === 'LONG' ? entry * (1 - distPct / 100) : entry * (1 + distPct / 100);
-    return { entry, stopPrice, stopDistancePct: distPct, atrPct: atrPct5 };
+    const stopPrice = signalMeta && signalMeta.stopPrice != null ? signalMeta.stopPrice : null;
+    const stopDistancePct = stopPrice != null ? Math.abs(entry - stopPrice) / entry * 100 : 0;
+    return { entry, stopPrice, stopDistancePct, atrPct: atrPct5, structural: true };
   }
 
   if(setupType === 'Range Scalp'){
@@ -176,6 +179,25 @@ function attachTpLevels(levels, direction, feeInputs){
   };
 }
 
+// Nova Scalp exit structure: ONE take-profit at exactly rewardRisk x the
+// stop distance (fixed 1:2 by default), no partial closes, no breakeven
+// move. Unlike attachTpLevels, TP1 is NOT bumped out for fees — the ratio
+// is meant to be exactly 1:2. Fee viability is still enforced, just at the
+// approval gate (min net profit + fee-to-stop cap) rather than by moving
+// the target. tpFractions is {1,0,0} and singleTp:true so every consumer
+// (Paper, Backtest, Live order placement) can tell this is a single exit.
+function attachSingleTargetLevels(levels, direction, rewardRisk){
+  const sign = direction === 'LONG' ? 1 : -1;
+  const pct = levels.stopDistancePct * rewardRisk;
+  return {
+    ...levels,
+    tp1: levels.entry * (1 + sign * pct / 100), tp2: null, tp3: null,
+    tp1Pct: pct, tp2Pct: 0, tp3Pct: 0,
+    tpFractions: { tp1: 1, tp2: 0, tp3: 0 },
+    singleTp: true,
+  };
+}
+
 // Produces one row per symbol: APPROVED opportunities plus REJECTED
 // ones (kept so the scanner table can show "why not" transparently,
 // matching the No-Trade Engine's job of explaining a pass).
@@ -212,11 +234,18 @@ export function runScanCycle(cfg, dayState, opts){
 // controls the data source and "now" entirely) and returns one scanner
 // row, APPROVED or REJECTED, same shape either way.
 export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, nowMs){
-  const setups = detectAllSetups(snap, regime, cfg.strategies);
+  const detected = detectAllSetups(snap, regime, cfg.strategies);
+  // A detector can hand back a genuine trigger that one of ITS OWN filters
+  // vetoed (Nova Scalp's Smart Range Filter / structural-stop checks). Those
+  // never take part in the ensemble — they can't create a conflict or lend
+  // confidence — but their reasons are surfaced if nothing else qualified,
+  // so the scanner says "ranging market" instead of a blank "no setup".
+  const vetoed = detected.filter(sg => sg.vetoes && sg.vetoes.length);
+  const setups = detected.filter(sg => !(sg.vetoes && sg.vetoes.length));
   const ensemble = combineEnsemble(setups);
 
   if(!ensemble){
-    return baseRow(symbol, snap, regime, 'REJECTED', ['No qualifying setup detected this cycle']);
+    return baseRow(symbol, snap, regime, 'REJECTED', vetoed.length ? vetoed.flatMap(sg => sg.vetoes) : ['No qualifying setup detected this cycle']);
   }
   if(ensemble.conflict){
     return baseRow(symbol, snap, regime, 'REJECTED', ['Setups disagree on direction — ensemble requires agreement']);
@@ -236,10 +265,20 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   // are now ALWAYS built at the fixed 1.0R/1.5R/2.25R structure below,
   // the same for every strategy, per an explicit request that
   // superseded the old per-strategy reward:risk target.
-  const levelsStopOnly = buildLevels(snap, direction, primary.type);
+  const levelsStopOnly = buildLevels(snap, direction, primary.type, primary.meta);
+  const isNova = primary.type === 'Nova Scalp';
+  if(isNova){
+    // Re-validate the structural stop against the price actually being
+    // entered at (live feeds use the ticker's last price, which can differ
+    // from the last candle close the detector measured against).
+    const sp = levelsStopOnly.stopPrice;
+    const wrongSide = sp == null || (direction === 'LONG' ? sp >= levelsStopOnly.entry : sp <= levelsStopOnly.entry);
+    if(wrongSide) return baseRow(symbol, snap, regime, 'REJECTED', ['Nova Scalp: price has already moved through the structural stop — signal is stale']);
+    if(levelsStopOnly.stopDistancePct > NOVA_SCALP.maxStopPct) return baseRow(symbol, snap, regime, 'REJECTED', [`Nova Scalp: structural stop ${levelsStopOnly.stopDistancePct.toFixed(2)}% from entry exceeds the ${NOVA_SCALP.maxStopPct}% cap`]);
+  }
   const volExp = volumeExpansion(snap.m5, 10);
   const execution = decideExecution({ setupType: primary.type, volExpansionRatio: volExp });
-  const holdMinutes = primary.type === 'NxTGen Scalp' ? 12 : primary.type === 'Nova Scalp' ? 12 : primary.type === 'Range Scalp' ? 20 : 90; // scalp strategies are meant to resolve fast; used for funding-cost estimation
+  const holdMinutes = primary.type === 'NxTGen Scalp' ? 12 : primary.type === 'Nova Scalp' ? 45 : primary.type === 'Range Scalp' ? 20 : 90; // scalp strategies are meant to resolve fast; used for funding-cost estimation
 
   // Fees/spread/slippage have to be known BEFORE the TP levels are
   // built (not after, like the old single-target flow) — TP1 has to
@@ -249,9 +288,11 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   const entryFeePct = execution === 'MAKER' ? feeLookup.makerPct : feeLookup.takerPct;
   const exitFeePct = feeLookup.takerPct; // exits (SL/TP) conservatively assumed taker unless stated otherwise
   const slippagePct = clamp(snap.meta.spreadPct * 0.6, 0.005, 0.05);
-  const levels = attachTpLevels(levelsStopOnly, direction, {
-    entryFeePct, exitFeePct, spreadPct: snap.meta.spreadPct, slippagePct,
-  });
+  const levels = isNova
+    ? attachSingleTargetLevels(levelsStopOnly, direction, NOVA_SCALP.rewardRisk)
+    : attachTpLevels(levelsStopOnly, direction, {
+      entryFeePct, exitFeePct, spreadPct: snap.meta.spreadPct, slippagePct,
+    });
 
   const costs = estimateCosts({
     exchange: cfg.exchange || 'binance',
@@ -292,7 +333,7 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   // control is left in place but is currently a no-op; worth removing
   // from the UI in a follow-up if it shouldn't linger there looking
   // live.
-  const minRR = 2.0;
+  const minRR = isNova ? 2.0 - 1e-9 : 2.0; // Nova's single target is exactly 2R by construction; the epsilon only guards against float rounding
   // This floor is unrelated to R:R — it's still true that both scalp
   // strategies' gross targets are comparatively small in absolute %
   // terms, so the default 0.30% net-profit floor (sized for the
@@ -343,7 +384,10 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
     // TP1 — see requirements #4-#7), so both Paper's managePositions
     // and the real Live/Demo order placer read the exact same numbers.
     tpFractions: levels.tpFractions,
-    breakevenStopPrice: feeAdjustedBreakevenPrice({ entry: levels.entry, direction, entryFeePct, exitFeePct, spreadPct: snap.meta.spreadPct, slippagePct }),
+    // Nova Scalp: single fixed 2R target, no partials and no breakeven move.
+    breakevenStopPrice: isNova ? null : feeAdjustedBreakevenPrice({ entry: levels.entry, direction, entryFeePct, exitFeePct, spreadPct: snap.meta.spreadPct, slippagePct }),
+    singleTp: !!levels.singleTp,
+    rangeFilter: (primary.meta && primary.meta.rangeFilter) || null,
     expectedGrossPct: levels.tp1Pct, estFeesPct: costs.entryFeePct + costs.exitFeePct,
     estSlippagePct: costs.slippageCostPct, estFundingPct: costs.fundingCostPct,
     expectedNetPct: costs.netTargetPct, riskReward: riskRewardRatio,
@@ -399,6 +443,7 @@ export function openPosition(row, dayState){
     // otherwise left exactly as it was set at entry.
     tpFractions: row.tpFractions || { tp1: 0.30, tp2: 0.30, tp3: 0.40 },
     breakevenStopPrice: row.breakevenStopPrice,
+    singleTp: !!row.singleTp, // Nova Scalp: one fixed 2R exit, see managePositions
     qty, notionalUsd: row.sizing ? row.sizing.notionalUsd : 0,
     leverage: row.leverage, execution: row.execution,
     entryFeePct: row.costsBreakdown.entryFeePct, exitFeePct: row.costsBreakdown.exitFeePct,
@@ -476,7 +521,7 @@ export function managePositions(dayState, tradeHistory, cfg){
     const hitSL = candle.h !== undefined && (dir === 1 ? candle.l <= pos.stop : candle.h >= pos.stop);
     const ageMinutes = (mockMarket.now() - pos.openedAt) / 60_000;
     const timeStopMinutes = pos.setup === 'NxTGen Scalp' ? (cfg.aiScalpTimeStopMinutes || 40)
-      : pos.setup === 'Nova Scalp' ? (cfg.novaScalpTimeStopMinutes || 20)
+      : pos.setup === 'Nova Scalp' ? (cfg.novaScalpTimeStopMinutes || 1440)
       : pos.setup === 'Range Scalp' ? (cfg.scalpTimeStopMinutes || 45)
       : (cfg.timeStopMinutes || 240);
 
@@ -487,6 +532,29 @@ export function managePositions(dayState, tradeHistory, cfg){
       const pnl = netPnlForFraction(pos, pos.stop, pos.remainingFraction, dayState, false);
       closeTrade(pos, pos.stop, pnl, 'STOP_LOSS', dayState, tradeHistory);
       setSymbolCooldown(dayState, pos.symbol);
+      continue;
+    }
+
+    // Nova Scalp: one fixed 2R target for the whole position. No partials,
+    // no breakeven move — the stop stays where the structure put it. The
+    // time stop below is only a safety valve (24h default, 1440 min) so a
+    // trade always resolves at its stop or its 1:2 target, the way the real
+    // exchange-side SL/TP orders do in Live/Demo (which have no time stop).
+    if(pos.singleTp){
+      if(hitTP(pos.tp1)){
+        const pnl = netPnlForFraction(pos, pos.tp1, pos.remainingFraction, dayState, true);
+        closeTrade(pos, pos.tp1, pnl, 'TAKE_PROFIT_2R', dayState, tradeHistory, ['Fixed 2R target hit']);
+        setSymbolCooldown(dayState, pos.symbol);
+        continue;
+      }
+      if(ageMinutes > timeStopMinutes){
+        const pnl = netPnlForFraction(pos, snap.price, pos.remainingFraction, dayState, false);
+        closeTrade(pos, snap.price, pnl, 'TIME_STOP', dayState, tradeHistory, events);
+        setSymbolCooldown(dayState, pos.symbol);
+        continue;
+      }
+      pos.lastEvents = events;
+      stillOpen.push(pos);
       continue;
     }
 

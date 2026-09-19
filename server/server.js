@@ -4097,20 +4097,28 @@ function withTimeout(promise, ms, label){
   return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
 }
 
+function fmtNum(v){ return Number.isFinite(v) ? Number(v).toFixed(2) : 'n/a'; }
+
 function buildAiPrompt(signal){
   const {
     symbol, exchange, direction, setup, regime, confidence,
-    entry, stop, tp1, riskRewardRatio, expectedNetPct, liquidityScore, reasons,
+    entry, stop, tp1, riskRewardRatio, expectedNetPct, liquidityScore, reasons, rangeFilter,
   } = signal || {};
   const system = 'You are a second, independent reviewer for a futures scalping bot\'s trade signals. '
     + 'Every signal you see has ALREADY passed the bot\'s own confidence, risk, liquidity, and no-trade filters — those thresholds are not yours to re-litigate, and a metric merely sitting on the lower end of what the bot already approved (e.g. "modest confidence", "low-ish liquidity") is NOT by itself a reason to reject. '
     + 'APPROVE BY DEFAULT. Only reject when there is a specific, concrete, disqualifying problem a reasonable trader would actually act on — for example the setup\'s direction flatly contradicts the stated market regime, the numbers given are internally inconsistent, or something about the setup itself (not just its score) looks structurally broken. General caution, hedging language, or restating an already-passed metric in more cautious words is not a valid reason to reject. '
+    + (rangeFilter
+      ? 'EXCEPTION for this signal: it carries M5 trend-quality metrics from the bot\'s Smart Range Filter (below). Ranging/choppy markets are explicitly unwanted for this strategy, so in ADDITION to the rules above, REJECT if those metrics clearly describe a range or whipsaw (for example low ADX together with a low efficiency ratio, tangled or flat EMA50/EMA100, many SAR flips or EMA50 crosses, or a volatility squeeze) even though the bot\'s own score cleared its threshold. Do not reject merely because one metric is mediocre when the others show a clean trend. '
+      : '')
     + 'Reply with ONLY a compact JSON object and nothing else, no markdown fence, no prose outside it: {"approve": true or false, "confidence": a number 0-100, "reason": "one short, specific sentence"}.';
   const user = [
     `Exchange: ${exchange}`, `Symbol: ${symbol}`, `Direction: ${direction}`, `Setup: ${setup}`,
     `Market regime: ${regime}`, `Bot confidence: ${confidence}/100`, `Entry: ${entry}`, `Stop: ${stop}`,
     `Target (TP1): ${tp1}`, `Risk:Reward: ${riskRewardRatio}`, `Expected net return: ${expectedNetPct}%`,
     `Liquidity score (0-100): ${liquidityScore}`, `Bot's stated reasons: ${(reasons||[]).join('; ') || 'none given'}`,
+    ...(rangeFilter ? [
+      `Smart Range Filter (M5): trend score ${rangeFilter.score}/100 (bot requires 55+), ADX ${fmtNum(rangeFilter.adx)}, efficiency ratio ${fmtNum(rangeFilter.efficiencyRatio)}, EMA50/EMA100 separation ${fmtNum(rangeFilter.emaSeparationAtr)} ATR, EMA100 slope ${fmtNum(rangeFilter.ema100SlopeAtr)} ATR/10 bars, SAR flips in 40 bars ${rangeFilter.sarFlips40}, EMA50 crosses in 30 bars ${rangeFilter.ema50Crosses30}, ATR14/ATR50 ${fmtNum(rangeFilter.atrRatio)}`,
+    ] : []),
     '', 'Should this specific trade be taken right now? Respond with ONLY the JSON object described.',
   ].join('\n');
   return { system, user };

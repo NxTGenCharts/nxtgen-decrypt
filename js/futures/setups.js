@@ -5,7 +5,8 @@
 // reasons[] }. The ensemble in engine.js combines whichever of
 // these fire on a given symbol/cycle.
 // =============================================================
-import { ema, emaSeries, atr, rsi, macdHistogram, vwap, swingLevels, volumeExpansion, relativeVolumePercentile, closes, clamp, parabolicSar, awesomeOscillator } from './indicators.js';
+import { ema, emaSeries, atr, rsi, macdHistogram, vwap, swingLevels, volumeExpansion, relativeVolumePercentile, closes, clamp, parabolicSar, awesomeOscillator, macdLineSeries, streakBack, swingLowPoints, swingHighPoints } from './indicators.js';
+import { assessMarketState, RANGE_FILTER_DEFAULTS } from './rangeFilter.js';
 import { REGIMES } from './regime.js';
 
 const TREND_REGIMES = new Set([REGIMES.STRONG_BULL, REGIMES.WEAK_BULL, REGIMES.STRONG_BEAR, REGIMES.WEAK_BEAR]);
@@ -266,7 +267,7 @@ export const STRATEGY_REGISTRY = [
   {
     id: 'novaScalp', type: 'Nova Scalp', detector: 'detectNovaScalp', defaultRR: 2.0, defaultEnabled: true,
     label: 'Nova Scalp',
-    description: '5m VWAP-reclaim scalp: price sits on one side of its rolling VWAP for 2+ bars, then reclaims it with a push candle and a volume expansion behind it. A genuinely different trigger from NxTGen Scalp (VWAP reclaim vs. PSAR/EMA-band cross), not a re-parameterized copy — see its own comment in setups.js for the honesty note on measuring this before sizing real risk behind it.',
+    description: '5m Parabolic SAR / EMA50+EMA100 cross with AO + MACD zero-line confirmation. Buy: SAR dots cross up through the EMA50 & EMA100 band (dots under price), with AO and MACD both above zero (2+ bars preferred); Sell is the exact mirror. Stop at the most recent swing low/high near the SAR dots, target fixed at 2R (1:2), no partials. A Smart Range Filter (ADX, efficiency ratio, EMA separation/slope, SAR whipsaw, EMA crosses, ATR squeeze) vetoes entries in ranging markets.',
   },
   {
     id: 'trendContinuation', type: 'Trend Continuation', detector: 'detectTrendContinuation', defaultRR: 2.5, defaultEnabled: true,
@@ -445,97 +446,173 @@ export function detectAiScalp(snap, regime){
   return { type: 'NxTGen Scalp', direction: dir, rawConfidence: Math.round(conf), reasons, meta: { psarDistPct, aoStreak, emaTrendAligned } };
 }
 
-// ---- SETUP G: Nova Scalp (VWAP reclaim continuation) ----
-// A second, independently-triggered 5m scalp — a genuinely different
-// trigger mechanism from NxTGen Scalp's PSAR/EMA-band cross above:
-// instead of watching the SAR flip sides of the EMA50/EMA100 band, this
-// watches for price crossing back
-// over its own rolling VWAP after sitting on the OTHER side for the
-// prior two bars — a "reclaim" — confirmed by a push candle in the
-// reclaim direction and a volume expansion behind it. VWAP reclaims are
-// a standard, well-documented intraday scalping trigger (institutional
-// flow frequently reacts around VWAP), which is why this is offered as
-// a second, differently-shaped 5m scalp rather than a re-parameterized
-// copy of NxTGen Scalp — enabling both genuinely diversifies the signal
-// source, it isn't the same detector twice.
+// ---- SETUP G: Nova Scalp (PSAR x EMA50/100 cross + AO/MACD zero-line, range-filtered) ----
+// Strategy logic rewritten on direct request. Replaces the earlier VWAP-
+// reclaim detector entirely (that history is in README-SCALP.md).
 //
-// Same honesty standard this whole file holds every other setup to
-// (see NxTGen Scalp's own comment, and detectAllSetups' note below): this
-// detector's LOGIC is sound and grounded in a real, widely-used scalping
-// technique, but that is not the same claim as a measured win rate. It
-// has not been backtested against real historical klines from within
-// this codebase — do that yourself via the Backtest tab (Strategies
-// panel — this shows up there automatically, see STRATEGY_REGISTRY
-// below) against the real symbols/timeframe/exchange you actually
-// intend to trade before sizing anything real behind it. A strategy's
-// name, its presence in this registry, or a plausible-sounding
-// mechanism are none of them evidence of a particular win rate — only a
-// real backtest run against real historical data is, exactly the
-// standard NxTGen Scalp's own history above (69-73%, then 65-76%, then
-// "averaging close to breakeven" once a measurement bug was fixed) is a
-// cautionary example of.
+// Indicators: Awesome Oscillator, EMA 50 / EMA 100, MACD (12,26,9),
+// Parabolic SAR (0.02 / 0.2). Entry timeframe: 5m only — nothing here
+// reads M15/H1.
+//
+// BUY
+//   1. Parabolic SAR dots cross the EMA50 AND EMA100 from BELOW: the SAR
+//      value was clearly under the whole EMA50/EMA100 band and is now
+//      clearly above it, with the dot sitting UNDER price (a bullish SAR).
+//      "Fresh" = the cross completed within NOVA_SCALP.crossMaxAgeBars.
+//   2. AO > 0 and MACD main line > 0 (MetaTrader convention — see
+//      macdLineSeries). NOVA_SCALP.minZeroBars is the hard minimum number of
+//      consecutive bars both must have been above zero (default 1 = just
+//      "above zero now"); NOVA_SCALP.preferredZeroBars (default 2) is the
+//      "2+ preferred" part — hitting it raises confidence instead of being
+//      required, matching "preferably 2+". Set minZeroBars to 2 to make it a
+//      hard rule.
+//   3. Smart Range Filter (rangeFilter.js) says the M5 market is trending.
+// SELL is the exact mirror: SAR dots (above price) cross DOWN through the
+// band from above, AO < 0 and MACD < 0.
+//
+// STOP: the most recent confirmed swing low (2-left/2-right fractal) inside
+// the current SAR run — i.e. the swing low sitting next to the lowest SAR
+// dots — falling back to the run's lowest dot itself if no swing low formed
+// in the run, less a small ATR buffer so a wick to the pivot doesn't tag it.
+// Sells use the swing high / highest dot, plus the buffer. The stop is
+// structural, so it is NOT clamped to the fee-driven floors the other
+// scalps use: too-wide stops are vetoed here (maxStopPct) and too-tight ones
+// are rejected by the existing fee-to-stop gate in noTradeEngine.js.
+// TARGET: fixed 2R from that stop, single exit, no partials (engine.js).
+//
+// Honesty note, same standard as every detector in this file: this is a
+// precisely-specified pattern, not a measured win rate. It has not been
+// backtested from within this codebase. Run it in the Backtest tab against
+// real 5m history before sizing anything real behind it. Like the other
+// detectors it evaluates the latest M5 candle, which on live feeds can be
+// the still-forming one, so a cross can appear and disappear intra-bar.
+export const NOVA_SCALP = {
+  minBars: 110,
+  crossMaxAgeBars: 3,
+  minZeroBars: 1,
+  preferredZeroBars: 2,
+  swingLeft: 2, swingRight: 2,
+  stopBufferAtr: 0.10,
+  maxStopPct: 1.5,        // structural stop further than this from entry = skip (also re-checked against live price in engine.js)
+  minStopPct: 0.03,       // sanity floor only; real fee-driven rejection is noTradeEngine's fee-to-stop gate
+  rewardRisk: 2.0,        // fixed 1:2
+  rangeFilter: { ...RANGE_FILTER_DEFAULTS },
+};
+
+// Was there a fresh cross of the SAR through the whole EMA50/EMA100 band?
+// want = 'up' (below -> above) or 'down' (above -> below). Bars where SAR
+// sits inside the band are transitional and skipped, not treated as either
+// side. Returns { crossBar, originBar, age } or null.
+function findSarBandCross(psar, ema50, ema100, i, want){
+  const sideAt = (idx) => {
+    const v = psar[idx];
+    if(v == null) return null;
+    const hi = Math.max(ema50[idx], ema100[idx]), lo = Math.min(ema50[idx], ema100[idx]);
+    return v > hi ? 'above' : v < lo ? 'below' : 'inside';
+  };
+  const target = want === 'up' ? 'above' : 'below';
+  const origin = want === 'up' ? 'below' : 'above';
+  if(sideAt(i) !== target) return null;
+  let crossBar = i;
+  for(let k = i - 1; k >= Math.max(1, i - 40); k--){
+    const s2 = sideAt(k);
+    if(s2 === origin) return { crossBar, originBar: k, age: i - crossBar };
+    if(s2 === target) crossBar = k;
+  }
+  return null; // never found the origin side within the window — not a cross
+}
+
 export function detectNovaScalp(snap, regime){
+  const P = NOVA_SCALP;
   const m5 = snap.m5;
-  if(m5.length < 30) return null;
+  if(!m5 || m5.length < P.minBars) return null;
 
+  const i = m5.length - 1;
+  const last = m5[i];
   const c = closes(m5);
-  const ema9 = ema(c, 9);
-  const atr5 = atr(m5, 14);
-  if(!ema9 || !atr5) return null;
+  const psar = parabolicSar(m5);
+  const ema50 = emaSeries(c, 50);
+  const ema100 = emaSeries(c, 100);
+  if(psar[i] == null) return null;
 
-  // Rolling 40-bar VWAP, not session-anchored — this pipeline is
-  // exchange-agnostic and has no reliable session-open boundary to
-  // anchor to (see vwap() in indicators.js), so a rolling window is
-  // used the same way Trend Continuation's own vwap5 already does.
-  const vwapVal = vwap(m5.slice(-40));
-  if(!vwapVal) return null;
+  // 1. Trigger: SAR crossing the EMA band, dots on the correct side of price.
+  const up = findSarBandCross(psar, ema50, ema100, i, 'up');
+  const down = findSarBandCross(psar, ema50, ema100, i, 'down');
+  const buy = up && psar[i] < last.c;
+  const sell = down && psar[i] > last.c;
+  if(!buy && !sell) return null;
+  const cross = buy ? up : down;
+  if(cross.age > P.crossMaxAgeBars) return null;
+  const dir = buy ? 'LONG' : 'SHORT';
 
-  const last = m5[m5.length - 1];
-  const prev1 = m5[m5.length - 2];
-  const prev2 = m5[m5.length - 3];
-  if(!prev1 || !prev2) return null;
+  // 2. AO + MACD on the right side of zero.
+  const ao = awesomeOscillator(m5).values;
+  const macd = macdLineSeries(m5, 12, 26);
+  const onSide = dir === 'LONG' ? (v => v > 0) : (v => v < 0);
+  const aoBars = streakBack(ao, i, onSide);
+  const macdBars = streakBack(macd, i, onSide);
+  const word = dir === 'LONG' ? 'above' : 'below';
+  if(aoBars < P.minZeroBars || macdBars < P.minZeroBars) return null; // momentum not confirming yet — may still fire on a later bar inside the cross window
 
-  // Reclaim = the prior TWO bars closed on one side of VWAP, and the
-  // current bar just closed back on the other side of it.
-  const wasBelow = prev1.c < vwapVal && prev2.c < vwapVal;
-  const wasAbove = prev1.c > vwapVal && prev2.c > vwapVal;
-  const reclaimedUp = wasBelow && last.c > vwapVal;
-  const reclaimedDown = wasAbove && last.c < vwapVal;
-  if(!reclaimedUp && !reclaimedDown) return null;
+  // 3. Smart Range Filter (M5 only). Vetoes are returned, not swallowed, so
+  // the scanner can show WHY a genuine trigger was skipped (engine.js
+  // routes any signal carrying vetoes[] to a REJECTED row with those reasons).
+  const vetoes = [];
+  const state = assessMarketState(m5, P.rangeFilter, { psar, ema50, ema100 });
+  if(!state.trending) vetoes.push(...state.reasons);
 
-  const dir = reclaimedUp ? 'LONG' : 'SHORT';
-  const pushCandle = dir === 'LONG' ? last.c > last.o : last.c < last.o;
-  if(!pushCandle) return null; // want a genuine push through VWAP, not a weak wick close right on it
+  // Structural stop.
+  const atr5 = atr(m5, 14) || last.c * 0.0015;
+  let runStart = i;
+  for(let k = i; k >= Math.max(0, i - 80); k--){
+    const inRun = psar[k] != null && (dir === 'LONG' ? psar[k] < m5[k].c : psar[k] > m5[k].c);
+    if(!inRun) break;
+    runStart = k;
+  }
+  let sarExtreme = dir === 'LONG' ? Infinity : -Infinity; // lowest dot (buy) / highest dot (sell) of the run
+  for(let k = runStart; k <= i; k++){
+    if(psar[k] == null) continue;
+    sarExtreme = dir === 'LONG' ? Math.min(sarExtreme, psar[k]) : Math.max(sarExtreme, psar[k]);
+  }
+  const from = Math.max(0, runStart - P.swingLeft), to = i - P.swingRight;
+  const swings = dir === 'LONG' ? swingLowPoints(m5, from, to, P.swingLeft, P.swingRight) : swingHighPoints(m5, from, to, P.swingLeft, P.swingRight);
+  const validSwings = swings.filter(sw => dir === 'LONG' ? sw.price < last.c : sw.price > last.c);
+  const swing = validSwings.length ? validSwings[validSwings.length - 1] : null; // most recent
+  const anchor = swing ? swing.price : sarExtreme;
+  const stopBasis = swing ? 'swing' : 'sar';
+  const buffer = atr5 * P.stopBufferAtr;
+  const stopPrice = dir === 'LONG' ? anchor - buffer : anchor + buffer;
+  const stopDistPct = Math.abs(last.c - stopPrice) / last.c * 100;
 
-  // Don't chase a VWAP reclaim straight into a strong OPPOSING HTF trend
-  // — identical discipline to NxTGen Scalp, for the identical reason (see
-  // that detector's comment on what happened when this kind of gate was
-  // tested wider against the synthetic feed: turned a working strategy
-  // into a losing one).
-  if(dir === 'LONG' && regime.regime === REGIMES.STRONG_BEAR) return null;
-  if(dir === 'SHORT' && regime.regime === REGIMES.STRONG_BULL) return null;
+  if(!(stopDistPct > 0) || (dir === 'LONG' ? stopPrice >= last.c : stopPrice <= last.c)) return null;
+  if(stopDistPct < P.minStopPct) vetoes.push(`Structural stop only ${stopDistPct.toFixed(3)}% from entry — too tight to be meaningful`);
+  if(stopDistPct > P.maxStopPct) vetoes.push(`Structural stop ${stopDistPct.toFixed(2)}% from entry exceeds the ${P.maxStopPct}% cap — entry too far from the swing`);
 
-  const volExp = volumeExpansion(m5, 10);
-  if(volExp < 1.1) return null; // a reclaim with no volume behind it is exactly the low-quality case this filters out
-
-  const distFromVwapPct = Math.abs((last.c - vwapVal) / vwapVal) * 100;
-  const emaAligned = dir === 'LONG' ? last.c > ema9 : last.c < ema9;
-  const rsiVal = rsi(m5, 14);
-  const rsiOk = dir === 'LONG' ? (rsiVal !== null && rsiVal > 45 && rsiVal < 75) : (rsiVal !== null && rsiVal < 55 && rsiVal > 25);
+  const emaAligned = dir === 'LONG' ? ema50[i] > ema100[i] : ema50[i] < ema100[i];
+  const twoPlus = aoBars >= P.preferredZeroBars && macdBars >= P.preferredZeroBars;
 
   const reasons = [
-    `Price reclaimed VWAP to the ${dir === 'LONG' ? 'upside' : 'downside'} after 2+ bars on the other side`,
-    `Volume ${volExp.toFixed(2)}x average behind the reclaim`,
+    `Parabolic SAR crossed ${dir === 'LONG' ? 'up' : 'down'} through the EMA50/EMA100 band ${cross.age === 0 ? 'on this bar' : cross.age + ' bar(s) ago'}, dots ${dir === 'LONG' ? 'under' : 'over'} price`,
+    `AO ${word} zero for ${aoBars} bar(s), MACD ${word} zero for ${macdBars} bar(s)${twoPlus ? ' (2+ preferred: met)' : ' (2+ preferred: not yet)'}`,
+    `Stop at ${stopBasis === 'swing' ? 'most recent swing ' + (dir === 'LONG' ? 'low' : 'high') : 'SAR ' + (dir === 'LONG' ? 'low' : 'high')} ${stopPrice.toPrecision(6)} (${stopDistPct.toFixed(2)}% risk), target fixed at ${P.rewardRisk}R`,
+    ...state.reasons,
   ];
-  if(emaAligned) reasons.push('EMA9 confirms the same side as the reclaim');
-  if(rsiOk) reasons.push(`RSI ${rsiVal.toFixed(0)} supports continuation, not yet exhausted`);
+  if(emaAligned) reasons.push(`EMA50 ${dir === 'LONG' ? 'above' : 'below'} EMA100 confirms the ${dir === 'LONG' ? 'up' : 'down'}trend`);
 
-  let conf = 54;
-  conf += volExp > 1.5 ? 12 : 6;
-  conf += emaAligned ? 10 : 0;
-  conf += rsiOk ? 10 : 0;
-  conf += distFromVwapPct > 0.15 ? 6 : 0; // a clean break away from VWAP, not sitting right back on the line
-  conf = clamp(conf, 0, 88);
+  let conf = 60;
+  conf += aoBars >= P.preferredZeroBars ? 6 : 0;
+  conf += macdBars >= P.preferredZeroBars ? 6 : 0;
+  conf += state.score >= 75 ? 10 : state.score >= 65 ? 6 : 2;
+  conf += emaAligned ? 6 : 0;
+  conf += cross.age <= 1 ? 4 : 0;
+  conf = clamp(conf, 0, 92);
 
-  return { type: 'Nova Scalp', direction: dir, rawConfidence: Math.round(conf), reasons, meta: { distFromVwapPct } };
+  return {
+    type: 'Nova Scalp', direction: dir, rawConfidence: Math.round(conf), reasons,
+    vetoes: vetoes.length ? vetoes : undefined,
+    meta: {
+      stopPrice, stopBasis, stopDistPct, crossAge: cross.age, aoBars, macdBars,
+      rangeFilter: { score: state.score, ...state.metrics },
+    },
+  };
 }

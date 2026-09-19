@@ -162,6 +162,7 @@ function openBacktestPosition(row, dayState, nowMs){
     tp1: row.tp1, tp2: row.tp2, tp3: row.tp3,
     tpFractions: row.tpFractions || { tp1: 0.30, tp2: 0.30, tp3: 0.40 },
     breakevenStopPrice: row.breakevenStopPrice,
+    singleTp: !!row.singleTp, // Nova Scalp: one fixed 2R exit, mirrors engine.js's managePositions
     qty, notionalUsd: row.sizing ? row.sizing.notionalUsd : 0,
     leverage: row.leverage, execution: row.execution,
     entryFeePct: row.costsBreakdown.entryFeePct, exitFeePct: row.costsBreakdown.exitFeePct,
@@ -229,6 +230,26 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
       continue;
     }
 
+    // Nova Scalp: single fixed 2R target, no partials/breakeven — identical
+    // to engine.js's managePositions. SL is checked first above (a bar that
+    // touches both is conservatively a loss).
+    if(pos.singleTp){
+      if(hitTP(pos.tp1)){
+        const pnl = netPnlForFraction(pos, pos.tp1, pos.remainingFraction, dayState, true);
+        closeBacktestTrade(pos, pos.tp1, pnl, 'TAKE_PROFIT_2R', dayState, closedTrades, nowMs);
+        dayState.cooldownUntilBySymbol[pos.symbol] = nowMs + 30 * 60_000;
+        continue;
+      }
+      if(ageMinutes > timeStopMinutes){
+        const pnl = netPnlForFraction(pos, candle.c, pos.remainingFraction, dayState, false);
+        closeBacktestTrade(pos, candle.c, pnl, 'TIME_STOP', dayState, closedTrades, nowMs);
+        dayState.cooldownUntilBySymbol[pos.symbol] = nowMs + 30 * 60_000;
+        continue;
+      }
+      stillOpen.push(pos);
+      continue;
+    }
+
     const tp1Fraction = pos.tpFractions.tp1, tp2Fraction = pos.tpFractions.tp2;
 
     if(!pos.partialsTaken.includes('tp1') && hitTP(pos.tp1)){
@@ -274,7 +295,7 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
 }
 
 function timeStopMinutesFor(setupType){
-  return setupType === 'NxTGen Scalp' ? 40 : setupType === 'Nova Scalp' ? 20 : setupType === 'Range Scalp' ? 45 : 240;
+  return setupType === 'NxTGen Scalp' ? 40 : setupType === 'Nova Scalp' ? 1440 : setupType === 'Range Scalp' ? 45 : 240;
 }
 
 // candlesBySymbol: { [symbol]: [{t,o,h,l,c,v}, ...] } — 5-minute candles,

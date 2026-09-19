@@ -48,6 +48,7 @@ const PRECACHE = [
   "/js/futures/indicators.js",
   "/js/futures/mockMarket.js",
   "/js/futures/noTradeEngine.js",
+  "/js/futures/rangeFilter.js",
   "/js/futures/regime.js",
   "/js/futures/risk.js",
   "/js/futures/scoring.js",
