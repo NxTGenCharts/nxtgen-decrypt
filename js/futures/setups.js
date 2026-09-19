@@ -5,9 +5,9 @@
 // reasons[] }. The ensemble in engine.js combines whichever of
 // these fire on a given symbol/cycle.
 // =============================================================
-import { ema, emaSeries, atr, rsi, macdHistogram, vwap, swingLevels, volumeExpansion, relativeVolumePercentile, closes, clamp, parabolicSar, awesomeOscillator, macdLineSeries, streakBack, swingLowPoints, swingHighPoints } from './indicators.js';
-import { assessMarketState, RANGE_FILTER_DEFAULTS } from './rangeFilter.js';
+import { ema, emaSeries, atr, rsi, macdHistogram, vwap, swingLevels, volumeExpansion, relativeVolumePercentile, closes, clamp, parabolicSar, awesomeOscillator, macdSeries } from './indicators.js';
 import { REGIMES } from './regime.js';
+import { smartRangeFilter } from './rangeFilter.js';
 
 const TREND_REGIMES = new Set([REGIMES.STRONG_BULL, REGIMES.WEAK_BULL, REGIMES.STRONG_BEAR, REGIMES.WEAK_BEAR]);
 const BULL_REGIMES = new Set([REGIMES.STRONG_BULL, REGIMES.WEAK_BULL]);
@@ -267,7 +267,7 @@ export const STRATEGY_REGISTRY = [
   {
     id: 'novaScalp', type: 'Nova Scalp', detector: 'detectNovaScalp', defaultRR: 2.0, defaultEnabled: true,
     label: 'Nova Scalp',
-    description: '5m Parabolic SAR / EMA50+EMA100 cross with AO + MACD zero-line confirmation. Buy: SAR dots cross up through the EMA50 & EMA100 band (dots under price), with AO and MACD both above zero (2+ bars preferred); Sell is the exact mirror. Stop at the most recent swing low/high near the SAR dots, target fixed at 2R (1:2), no partials. A Smart Range Filter (ADX, efficiency ratio, EMA separation/slope, SAR whipsaw, EMA crosses, ATR squeeze) vetoes entries in ranging markets.',
+    description: '5m only. Parabolic SAR dots break through the EMA50/EMA100 band (up through it for a Buy, down through it for a Sell) with MACD and the Awesome Oscillator both on the trade side of zero (2+ bars preferred). Stop at the recent swing low/high near the SAR dots, single 2R target, and a Smart Range Filter (ADX, efficiency ratio, EMA slope/spread, SAR whipsaw, chop) that blocks entries in ranging markets. Overlaps NxTGen Scalp — see the detector comment.',
   },
   {
     id: 'trendContinuation', type: 'Trend Continuation', detector: 'detectTrendContinuation', defaultRR: 2.5, defaultEnabled: true,
@@ -446,173 +446,177 @@ export function detectAiScalp(snap, regime){
   return { type: 'NxTGen Scalp', direction: dir, rawConfidence: Math.round(conf), reasons, meta: { psarDistPct, aoStreak, emaTrendAligned } };
 }
 
-// ---- SETUP G: Nova Scalp (PSAR x EMA50/100 cross + AO/MACD zero-line, range-filtered) ----
-// Strategy logic rewritten on direct request. Replaces the earlier VWAP-
-// reclaim detector entirely (that history is in README-SCALP.md).
+// ---- SETUP G: Nova Scalp (PSAR / EMA50+100 break, MACD + AO confirmed, range-filtered) ----
+// Rebuilt on direct request — replaces the earlier 5m VWAP-reclaim trigger
+// (its history is in git; this is no longer what the detector does).
+// Indicators: Parabolic SAR, EMA50 + EMA100, MACD(12,26,9), Awesome
+// Oscillator. Entry logic runs ONLY on the 5-minute candles.
 //
-// Indicators: Awesome Oscillator, EMA 50 / EMA 100, MACD (12,26,9),
-// Parabolic SAR (0.02 / 0.2). Entry timeframe: 5m only — nothing here
-// reads M15/H1.
+// BUY:
+//   1. The Parabolic SAR dots break up through the EMA50/EMA100 band —
+//      they were BELOW the band and have now cleared the TOP of it, with
+//      SAR still trailing under price (a live bullish SAR the whole way,
+//      no flip back in between). The cross must be fresh (completed within
+//      the last few bars) so this is an entry trigger, not a late chase.
+//   2. MACD (the 12-26 line, i.e. the grey bars MetaTrader draws) AND the
+//      Awesome Oscillator are both ABOVE ZERO. Held for 2+ consecutive
+//      bars is preferred — it scores higher — and one bar is the minimum
+//      (NOVA_MIN_CONFIRM_BARS; set it to 2 to make two bars mandatory).
+//   3. The Smart Range Filter (rangeFilter.js) says the market is actually
+//      trending. Ranging markets are vetoed.
+// SELL is the exact mirror: dots break DOWN through the band from above,
+// with SAR still above price, MACD and AO both BELOW zero.
 //
-// BUY
-//   1. Parabolic SAR dots cross the EMA50 AND EMA100 from BELOW: the SAR
-//      value was clearly under the whole EMA50/EMA100 band and is now
-//      clearly above it, with the dot sitting UNDER price (a bullish SAR).
-//      "Fresh" = the cross completed within NOVA_SCALP.crossMaxAgeBars.
-//   2. AO > 0 and MACD main line > 0 (MetaTrader convention — see
-//      macdLineSeries). NOVA_SCALP.minZeroBars is the hard minimum number of
-//      consecutive bars both must have been above zero (default 1 = just
-//      "above zero now"); NOVA_SCALP.preferredZeroBars (default 2) is the
-//      "2+ preferred" part — hitting it raises confidence instead of being
-//      required, matching "preferably 2+". Set minZeroBars to 2 to make it a
-//      hard rule.
-//   3. Smart Range Filter (rangeFilter.js) says the M5 market is trending.
-// SELL is the exact mirror: SAR dots (above price) cross DOWN through the
-// band from above, AO < 0 and MACD < 0.
+// RISK: stop-loss sits at the most recent confirmed swing low (swing HIGH
+// for a sell) that is close to the extreme of the SAR dots in the current
+// run — the SAR's first dot after a flip is the prior swing extreme, so
+// this is the level whose break means the SAR trend itself has failed —
+// plus a small ATR buffer so a wick that just tags the level doesn't stop
+// it out. Target is a single 2R exit (engine.js applies it: full position
+// closes at 2R, no partials).
 //
-// STOP: the most recent confirmed swing low (2-left/2-right fractal) inside
-// the current SAR run — i.e. the swing low sitting next to the lowest SAR
-// dots — falling back to the run's lowest dot itself if no swing low formed
-// in the run, less a small ATR buffer so a wick to the pivot doesn't tag it.
-// Sells use the swing high / highest dot, plus the buffer. The stop is
-// structural, so it is NOT clamped to the fee-driven floors the other
-// scalps use: too-wide stops are vetoed here (maxStopPct) and too-tight ones
-// are rejected by the existing fee-to-stop gate in noTradeEngine.js.
-// TARGET: fixed 2R from that stop, single exit, no partials (engine.js).
-//
-// Honesty note, same standard as every detector in this file: this is a
-// precisely-specified pattern, not a measured win rate. It has not been
-// backtested from within this codebase. Run it in the Backtest tab against
-// real 5m history before sizing anything real behind it. Like the other
-// detectors it evaluates the latest M5 candle, which on live feeds can be
-// the still-forming one, so a cross can appear and disappear intra-bar.
-export const NOVA_SCALP = {
-  minBars: 110,
-  crossMaxAgeBars: 3,
-  minZeroBars: 1,
-  preferredZeroBars: 2,
-  swingLeft: 2, swingRight: 2,
-  stopBufferAtr: 0.10,
-  maxStopPct: 1.5,        // structural stop further than this from entry = skip (also re-checked against live price in engine.js)
-  minStopPct: 0.03,       // sanity floor only; real fee-driven rejection is noTradeEngine's fee-to-stop gate
-  rewardRisk: 2.0,        // fixed 1:2
-  rangeFilter: { ...RANGE_FILTER_DEFAULTS },
-};
+// Same honesty standard as the rest of this file: a well-defined pattern
+// with a clear mechanism, NOT a measured win rate. Run it in the Backtest
+// tab on your real symbols/exchange before sizing real risk behind it.
+// Note it overlaps NxTGen Scalp (also PSAR-vs-EMA-band) — different
+// direction convention and different confirmation, but both will often
+// fire on the same move, so results will be correlated if both are on.
+export const NOVA_MIN_CONFIRM_BARS = 1;       // MACD+AO must agree for at least this many bars (gate)
+export const NOVA_PREFERRED_CONFIRM_BARS = 2; // ...and 2+ earns the confidence bonus
+const NOVA_CROSS_MAX_AGE = 2;                 // dots cleared the band within the last 3 bars (0 = this bar)
+// Widest stop still treated as a scalp, scaled to the symbol's own 5m volatility (7 ATRs, kept
+// between 1% and 3%): a swing low far behind price means the move already ran — skip the chase.
+const NOVA_MAX_STOP_ATRS = 7, NOVA_MAX_STOP_FLOOR_PCT = 1.0, NOVA_MAX_STOP_CEIL_PCT = 3.0;
+const NOVA_MIN_STOP_PCT = 0.10;               // degenerate stop guard (the fee-to-stop gate does the real work)
+const NOVA_TARGET_R = 2;
+const NOVA_STOP_ATR_BUFFER = 0.15;
 
-// Was there a fresh cross of the SAR through the whole EMA50/EMA100 band?
-// want = 'up' (below -> above) or 'down' (above -> below). Bars where SAR
-// sits inside the band are transitional and skipped, not treated as either
-// side. Returns { crossBar, originBar, age } or null.
-function findSarBandCross(psar, ema50, ema100, i, want){
-  const sideAt = (idx) => {
-    const v = psar[idx];
-    if(v == null) return null;
-    const hi = Math.max(ema50[idx], ema100[idx]), lo = Math.min(ema50[idx], ema100[idx]);
-    return v > hi ? 'above' : v < lo ? 'below' : 'inside';
-  };
-  const target = want === 'up' ? 'above' : 'below';
-  const origin = want === 'up' ? 'below' : 'above';
-  if(sideAt(i) !== target) return null;
-  let crossBar = i;
-  for(let k = i - 1; k >= Math.max(1, i - 40); k--){
-    const s2 = sideAt(k);
-    if(s2 === origin) return { crossBar, originBar: k, age: i - crossBar };
-    if(s2 === target) crossBar = k;
+// Confirmed 5-bar fractal swing points (2 bars each side) — a swing is only
+// "confirmed" once two later bars exist, so the newest candidate is i-2.
+function fractalSwings(m5, from, to, kind){
+  const out = [];
+  for(let k = Math.max(2, from); k <= Math.min(to, m5.length - 3); k++){
+    const v = kind === 'low' ? m5[k].l : m5[k].h;
+    const cmp = (j) => kind === 'low' ? v < m5[j].l : v > m5[j].h;
+    if(cmp(k - 1) && cmp(k - 2) && cmp(k + 1) && cmp(k + 2)) out.push({ idx: k, price: v });
   }
-  return null; // never found the origin side within the window — not a cross
+  return out;
 }
 
-export function detectNovaScalp(snap, regime){
-  const P = NOVA_SCALP;
+// `trace` is an optional out-parameter (used by tests/diagnostics): when passed,
+// it records which stage stopped the signal. Production callers omit it.
+export function detectNovaScalp(snap, regime, trace){
+  const stop = (why) => { if(trace) trace.blockedAt = why; return null; };
   const m5 = snap.m5;
-  if(!m5 || m5.length < P.minBars) return null;
+  if(m5.length < 110) return stop('warmup'); // EMA100 / MACD(26+9) / AO(34) warmup — 110 (not more) so it still works on the 120-bar windows Paper and Backtest hand detectors (live gets 150)
 
-  const i = m5.length - 1;
-  const last = m5[i];
-  const c = closes(m5);
+  const cl = closes(m5);
   const psar = parabolicSar(m5);
-  const ema50 = emaSeries(c, 50);
-  const ema100 = emaSeries(c, 100);
-  if(psar[i] == null) return null;
+  const ema50 = emaSeries(cl, 50);
+  const ema100 = emaSeries(cl, 100);
+  const ao = awesomeOscillator(m5);
+  const macd = macdSeries(m5, 12, 26, 9);
+  const i = m5.length - 1;
+  if(psar[i] == null || ao.values[i] == null || macd.macd[i] == null) return stop('warmup');
 
-  // 1. Trigger: SAR crossing the EMA band, dots on the correct side of price.
-  const up = findSarBandCross(psar, ema50, ema100, i, 'up');
-  const down = findSarBandCross(psar, ema50, ema100, i, 'down');
-  const buy = up && psar[i] < last.c;
-  const sell = down && psar[i] > last.c;
-  if(!buy && !sell) return null;
-  const cross = buy ? up : down;
-  if(cross.age > P.crossMaxAgeBars) return null;
-  const dir = buy ? 'LONG' : 'SHORT';
+  const bandHi = (k) => Math.max(ema50[k], ema100[k]);
+  const bandLo = (k) => Math.min(ema50[k], ema100[k]);
+  const sideAt = (k) => {
+    if(psar[k] == null) return null;
+    if(psar[k] > bandHi(k)) return 'above';
+    if(psar[k] < bandLo(k)) return 'below';
+    return 'inside';
+  };
 
-  // 2. AO + MACD on the right side of zero.
-  const ao = awesomeOscillator(m5).values;
-  const macd = macdLineSeries(m5, 12, 26);
-  const onSide = dir === 'LONG' ? (v => v > 0) : (v => v < 0);
-  const aoBars = streakBack(ao, i, onSide);
-  const macdBars = streakBack(macd, i, onSide);
-  const word = dir === 'LONG' ? 'above' : 'below';
-  if(aoBars < P.minZeroBars || macdBars < P.minZeroBars) return null; // momentum not confirming yet — may still fire on a later bar inside the cross window
+  // ---- 1. SAR breaks through the band ----
+  const nowSide = sideAt(i);
+  if(nowSide !== 'above' && nowSide !== 'below') return stop('no-cross'); // still inside the band — not through it yet
+  const dir = nowSide === 'above' ? 'LONG' : 'SHORT';
 
-  // 3. Smart Range Filter (M5 only). Vetoes are returned, not swallowed, so
-  // the scanner can show WHY a genuine trigger was skipped (engine.js
-  // routes any signal carrying vetoes[] to a REJECTED row with those reasons).
-  const vetoes = [];
-  const state = assessMarketState(m5, P.rangeFilter, { psar, ema50, ema100 });
-  if(!state.trending) vetoes.push(...state.reasons);
+  // when did the dots first clear the band on this side (consecutive run ending now)?
+  let c0 = i;
+  while(c0 - 1 >= 0 && sideAt(c0 - 1) === nowSide) c0--;
+  if(i - c0 > NOVA_CROSS_MAX_AGE) return stop('no-cross'); // not a fresh cross
 
-  // Structural stop.
-  const atr5 = atr(m5, 14) || last.c * 0.0015;
+  // ...and before that they were on the OTHER side (allow a few bars of "inside" while crossing)
+  const wantPrior = nowSide === 'above' ? 'below' : 'above';
+  let priorIdx = null;
+  for(let k = c0 - 1; k >= Math.max(0, c0 - 12); k--){
+    const sd = sideAt(k);
+    if(sd === wantPrior){ priorIdx = k; break; }
+    if(sd === nowSide) break; // can't happen given c0, defensive
+  }
+  if(priorIdx == null) return stop('no-cross');
+
+  // SAR must have stayed on the trade's side of PRICE the whole way (no flip mid-cross):
+  // bullish = dots under price for a buy, bearish = dots over price for a sell.
+  const sarWithTrade = (k) => dir === 'LONG' ? psar[k] < m5[k].c : psar[k] > m5[k].c;
+  for(let k = priorIdx; k <= i; k++) if(psar[k] == null || !sarWithTrade(k)) return stop('sar-flip');
+
+  // ---- 2. MACD + AO both on the trade's side of zero ----
+  const agrees = (k) => {
+    const m = macd.macd[k], a = ao.values[k];
+    if(m == null || a == null) return false;
+    return dir === 'LONG' ? (m > 0 && a > 0) : (m < 0 && a < 0);
+  };
+  let confirmBars = 0;
+  for(let k = i; k >= 0 && agrees(k); k--) confirmBars++;
+  if(confirmBars < NOVA_MIN_CONFIRM_BARS) return stop('macd-ao');
+
+  // ---- 3. Smart range filter ----
+  const filt = smartRangeFilter(m5, dir, regime);
+  if(trace) trace.filter = filt;
+  if(!filt.trending) return stop('range-filter');
+
+  // ---- stop: recent swing extreme near the SAR run's extreme ----
+  const atr5 = atr(m5, 14);
+  if(!atr5) return stop('warmup');
+  const entry = m5[i].c;
+
   let runStart = i;
-  for(let k = i; k >= Math.max(0, i - 80); k--){
-    const inRun = psar[k] != null && (dir === 'LONG' ? psar[k] < m5[k].c : psar[k] > m5[k].c);
-    if(!inRun) break;
-    runStart = k;
-  }
-  let sarExtreme = dir === 'LONG' ? Infinity : -Infinity; // lowest dot (buy) / highest dot (sell) of the run
-  for(let k = runStart; k <= i; k++){
-    if(psar[k] == null) continue;
-    sarExtreme = dir === 'LONG' ? Math.min(sarExtreme, psar[k]) : Math.max(sarExtreme, psar[k]);
-  }
-  const from = Math.max(0, runStart - P.swingLeft), to = i - P.swingRight;
-  const swings = dir === 'LONG' ? swingLowPoints(m5, from, to, P.swingLeft, P.swingRight) : swingHighPoints(m5, from, to, P.swingLeft, P.swingRight);
-  const validSwings = swings.filter(sw => dir === 'LONG' ? sw.price < last.c : sw.price > last.c);
-  const swing = validSwings.length ? validSwings[validSwings.length - 1] : null; // most recent
-  const anchor = swing ? swing.price : sarExtreme;
-  const stopBasis = swing ? 'swing' : 'sar';
-  const buffer = atr5 * P.stopBufferAtr;
-  const stopPrice = dir === 'LONG' ? anchor - buffer : anchor + buffer;
-  const stopDistPct = Math.abs(last.c - stopPrice) / last.c * 100;
+  while(runStart - 1 >= 0 && psar[runStart - 1] != null && sarWithTrade(runStart - 1)) runStart--;
+  let sarExtreme = psar[runStart];
+  for(let k = runStart; k <= i; k++) sarExtreme = dir === 'LONG' ? Math.min(sarExtreme, psar[k]) : Math.max(sarExtreme, psar[k]);
 
-  if(!(stopDistPct > 0) || (dir === 'LONG' ? stopPrice >= last.c : stopPrice <= last.c)) return null;
-  if(stopDistPct < P.minStopPct) vetoes.push(`Structural stop only ${stopDistPct.toFixed(3)}% from entry — too tight to be meaningful`);
-  if(stopDistPct > P.maxStopPct) vetoes.push(`Structural stop ${stopDistPct.toFixed(2)}% from entry exceeds the ${P.maxStopPct}% cap — entry too far from the swing`);
+  const swings = fractalSwings(m5, Math.max(2, runStart - 8), i - 2, dir === 'LONG' ? 'low' : 'high');
+  const tol = atr5 * 1.5;
+  const nearSar = swings.filter(sw => Math.abs(sw.price - sarExtreme) <= tol
+    && (dir === 'LONG' ? sw.price < entry : sw.price > entry));
+  let structure, stopBase;
+  if(nearSar.length){
+    const sw = nearSar[nearSar.length - 1]; // most recent
+    stopBase = sw.price;
+    structure = `swing ${dir === 'LONG' ? 'low' : 'high'} ${sw.price} (${i - sw.idx} bars ago) near the SAR extreme ${sarExtreme.toPrecision(6)}`;
+  } else {
+    stopBase = sarExtreme; // no fractal near the dots — the SAR extreme itself is the structure
+    structure = `SAR dot extreme ${sarExtreme.toPrecision(6)} (no confirmed swing ${dir === 'LONG' ? 'low' : 'high'} near it)`;
+  }
+  const stopPrice = dir === 'LONG' ? stopBase - atr5 * NOVA_STOP_ATR_BUFFER : stopBase + atr5 * NOVA_STOP_ATR_BUFFER;
+  const stopDistancePct = Math.abs(entry - stopPrice) / entry * 100;
+  if(dir === 'LONG' ? stopPrice >= entry : stopPrice <= entry) return stop('stop-invalid');
+  const maxStopPct = clamp((atr5 / entry) * 100 * NOVA_MAX_STOP_ATRS, NOVA_MAX_STOP_FLOOR_PCT, NOVA_MAX_STOP_CEIL_PCT);
+  if(stopDistancePct > maxStopPct || stopDistancePct < NOVA_MIN_STOP_PCT){ if(trace) trace.stopPct = stopDistancePct; return stop('stop-distance'); }
 
+  // ---- confidence + explanation ----
   const emaAligned = dir === 'LONG' ? ema50[i] > ema100[i] : ema50[i] < ema100[i];
-  const twoPlus = aoBars >= P.preferredZeroBars && macdBars >= P.preferredZeroBars;
-
   const reasons = [
-    `Parabolic SAR crossed ${dir === 'LONG' ? 'up' : 'down'} through the EMA50/EMA100 band ${cross.age === 0 ? 'on this bar' : cross.age + ' bar(s) ago'}, dots ${dir === 'LONG' ? 'under' : 'over'} price`,
-    `AO ${word} zero for ${aoBars} bar(s), MACD ${word} zero for ${macdBars} bar(s)${twoPlus ? ' (2+ preferred: met)' : ' (2+ preferred: not yet)'}`,
-    `Stop at ${stopBasis === 'swing' ? 'most recent swing ' + (dir === 'LONG' ? 'low' : 'high') : 'SAR ' + (dir === 'LONG' ? 'low' : 'high')} ${stopPrice.toPrecision(6)} (${stopDistPct.toFixed(2)}% risk), target fixed at ${P.rewardRisk}R`,
-    ...state.reasons,
+    `Parabolic SAR broke ${dir === 'LONG' ? 'up through the top of' : 'down through the bottom of'} the EMA50/EMA100 band ${i - c0 === 0 ? 'on this bar' : `${i - c0} bar(s) ago`}, SAR still ${dir === 'LONG' ? 'below' : 'above'} price`,
+    `MACD and Awesome Oscillator both ${dir === 'LONG' ? 'above' : 'below'} zero for ${confirmBars} bar${confirmBars === 1 ? '' : 's'}`,
+    `Smart range filter: trend quality ${filt.score}/100 — ${filt.notes[0]}`,
+    `Stop at ${structure}; single ${NOVA_TARGET_R}R target`,
   ];
-  if(emaAligned) reasons.push(`EMA50 ${dir === 'LONG' ? 'above' : 'below'} EMA100 confirms the ${dir === 'LONG' ? 'up' : 'down'}trend`);
+  if(emaAligned) reasons.push(`EMA50 ${dir === 'LONG' ? 'above' : 'below'} EMA100 — band already stacked with the trade`);
 
-  let conf = 60;
-  conf += aoBars >= P.preferredZeroBars ? 6 : 0;
-  conf += macdBars >= P.preferredZeroBars ? 6 : 0;
-  conf += state.score >= 75 ? 10 : state.score >= 65 ? 6 : 2;
-  conf += emaAligned ? 6 : 0;
-  conf += cross.age <= 1 ? 4 : 0;
-  conf = clamp(conf, 0, 92);
+  let conf = 55;
+  conf += clamp((filt.score - 60) / 40, 0, 1) * 20;              // trend quality: up to +20
+  conf += confirmBars >= NOVA_PREFERRED_CONFIRM_BARS ? 12 : 0;   // the "2+ bars" preference
+  conf += confirmBars >= 4 ? 4 : 0;
+  conf += emaAligned ? 8 : 0;
+  conf += (i - c0) === 0 ? 4 : 0;                                // fresh on this very bar
+  conf = clamp(conf, 0, 90);
 
   return {
     type: 'Nova Scalp', direction: dir, rawConfidence: Math.round(conf), reasons,
-    vetoes: vetoes.length ? vetoes : undefined,
-    meta: {
-      stopPrice, stopBasis, stopDistPct, crossAge: cross.age, aoBars, macdBars,
-      rangeFilter: { score: state.score, ...state.metrics },
-    },
+    meta: { stopPrice, stopDistancePct, targetR: NOVA_TARGET_R, structure, confirmBars, crossAgeBars: i - c0, smartFilter: { score: filt.score, components: filt.components } },
   };
 }

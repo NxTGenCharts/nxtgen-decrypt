@@ -956,40 +956,32 @@ Backtest tab against real historical data before sizing anything real
 behind it.
 
 
-## Update: Nova Scalp rewritten — PSAR x EMA50/100 cross, AO + MACD zero-line, Smart Range Filter, fixed 1:2
 
-Nova Scalp's old VWAP-reclaim detector is gone. `detectNovaScalp` in
-`setups.js` now trades this (5m only; every tunable lives in the exported
-`NOVA_SCALP` object at the top of that section):
+## Nova Scalp — rebuilt (PSAR / EMA50+100 break, MACD + AO, range-filtered)
 
-**Buy**: the Parabolic SAR dots cross UP through the whole EMA50/EMA100 band
-(SAR clearly below both, then clearly above both, dots under price, cross no
-older than 3 bars) while the Awesome Oscillator and the MACD main line are
-both above zero. "2+ preferred" is implemented as 2+ consecutive bars above
-zero on both — a confidence bonus, not a hard rule (`minZeroBars: 1` is the
-hard minimum; set it to 2 to make 2+ mandatory). **Sell** is the exact mirror.
+Nova Scalp no longer trades a VWAP reclaim. Current logic (`detectNovaScalp` in
+`js/futures/setups.js`; entry logic reads the 5m candles only):
 
-**Stop**: the most recent confirmed swing low (2-left/2-right fractal) inside
-the current SAR run — the swing sitting next to the lowest SAR dots — or the
-run's lowest dot if no swing formed, minus 0.1 ATR. Sells mirror it. This
-stop is structural, so it is not clamped to the fee floors the other scalps
-use: stops wider than 1.5% are skipped, stops too tight for fees are
-rejected by the existing fee-to-stop gate.
+* **Trigger** — Parabolic SAR dots break through the EMA50/EMA100 band: up
+  through the top of it for a Buy, down through the bottom for a Sell, with SAR
+  still on the trade's side of price the whole way and the break fresh (within
+  the last 3 bars).
+* **Momentum** — MACD(12,26,9) line and Awesome Oscillator both above zero (Buy)
+  / below zero (Sell). 1 bar is the minimum, 2+ bars scores higher
+  (`NOVA_MIN_CONFIRM_BARS` / `NOVA_PREFERRED_CONFIRM_BARS`).
+* **Smart Range Filter** (`js/futures/rangeFilter.js`) — a 0-100 trend-quality
+  score from ADX level + slope, efficiency ratio, 20-bar net displacement, EMA50
+  slope, SAR whipsaw count and EMA50 chop count (each measured in the symbol's
+  own ATRs), plus a hard veto when the higher-timeframe regime is Range / Low
+  Vol / Chaotic. Needs 65+ to trade. It is rule-based, not a trained model.
+* **Stop** — most recent confirmed swing low (high for sells) near the extreme of
+  the SAR dots in the current run, + 0.15 ATR buffer, used as-is (no floor
+  widening). Skipped if wider than 7 ATRs (1-3%). The global fee-to-stop cap in
+  `noTradeEngine.js` still rejects stops too tight to survive round-trip fees.
+* **Target** — single 2R exit for the whole position (no 30/30/40 partials, no
+  breakeven move). Fee floor can only push it further out, never nearer.
+* **Time stop** — 120 minutes (`cfg.novaScalpTimeStopMinutes`; Backtest uses the
+  same).
 
-**Target**: one exit at exactly 2R. No 30/30/40 partials, no breakeven move,
-no fee-bump of the target (`attachSingleTargetLevels` in `engine.js`). Paper,
-Backtest and Live/Demo all treat it as a single-exit trade (`singleTp`); the
-Live path places one native SL + one native TP. The time stop is only a 24h
-safety valve so trades resolve at stop or target like real exchange orders.
-
-**Smart Range Filter** (`rangeFilter.js`): an M5-only trend-quality score
-from ADX, efficiency ratio, EMA50/100 separation and slope, SAR flip count,
-EMA50 close-crosses and an ATR squeeze. Below 55/100 the entry is vetoed and
-the scanner row says which measurements voted "range". This is a rules-based
-score, not a trained model. If the optional AI second opinion (API Keys tab)
-is on, Nova Scalp signals also hand it these numbers and it is told to reject
-range/whipsaw conditions.
-
-**Not measured.** Synthetic-data runs confirm the mechanics (exact 1:2 on
-every winner, filter on/off changes the trade mix as intended) but say
-nothing about live edge. Run it through the Backtest tab on real 5m history.
+Not measured: none of the numbers above have been backtested on real market data
+from within this codebase. Run it in the Backtest tab before risking capital.

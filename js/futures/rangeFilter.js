@@ -1,110 +1,127 @@
 // =============================================================
-// rangeFilter.js — "Smart Range Filter" used by Nova Scalp to stay out
-// of ranging / choppy markets.
+// rangeFilter.js — the "Smart Range Filter" used by Nova Scalp.
 //
-// What this is, plainly: a multi-factor, fully M5-based trend-quality
-// score (0-100). It is NOT a trained model and not an LLM call — it is
-// six standard, inspectable measurements blended with fixed weights, so
-// every rejection can say exactly which measurements said "range".
-// (The optional LLM second opinion in js/ai-signal.js is a separate
-// layer; for Nova Scalp it is now also handed these same numbers and
-// told to reject range conditions — see server.js's buildAiPrompt.)
+// PURPOSE: Nova Scalp is a trend-following trigger (Parabolic SAR
+// breaking through the EMA50/EMA100 band, MACD + Awesome Oscillator
+// agreeing). In a sideways market those exact signals still fire — SAR
+// dots wander across flat, tangled EMAs all day — and each one is a
+// coin-flip with a fee attached. This module scores how much a real,
+// directional, tradeable trend is actually present on the 5m chart and
+// vetoes the entry when it isn't.
 //
-// Everything here reads ONLY the 5-minute candles the entry logic itself
-// uses — no higher-timeframe data — so the filter respects the "entries
-// on the 5m timeframe only" rule.
+// WHAT IT IS (and isn't): a transparent, rule-based adaptive scorer —
+// seven independent trend/chop measurements, each normalised against the
+// symbol's OWN volatility (ATR) so it self-adjusts per coin instead of
+// using one fixed % threshold, combined into a 0-100 "trend quality"
+// score with every component reported back so a rejection always says
+// which measurement failed. It is NOT a trained machine-learning model
+// and has no learned weights; nothing here has been fitted to data. The
+// thresholds are reasoned starting points — check them in the Backtest
+// tab on your own symbols before trusting them. (If you want a genuine
+// LLM second opinion on top, that exists separately: the "AI second
+// opinion" layer in the API Keys tab, which reviews an already-approved
+// signal using your own provider key.)
 //
-// The six measurements (weights sum to 1.0):
-//   ADX(14)                          .25  trend strength. <~15 chop, >~28 trend
-//   Efficiency Ratio (20 bars)       .20  net move / total path. ~0 = went nowhere
-//   EMA50-vs-EMA100 separation       .15  in ATRs. Tangled EMAs = range
-//   EMA100 slope (10 bars)           .10  in ATRs. Flat slow EMA = range
-//   Parabolic SAR flips (40 bars)    .15  many flips = whipsaw
-//   Close crosses of EMA50 (30 bars) .10  many crosses = whipsaw
-//   ATR(14) / ATR(50)                .05  volatility contraction = squeeze
-//
-// Thresholds below are reasoned starting points, not fitted optima. Tune
-// them (and re-run the Backtest tab) rather than trusting them blindly.
+// Pure function of 5m candles (+ the existing higher-timeframe regime
+// label as a hard veto only) — no side effects, no network.
 // =============================================================
-import { adx, atr, closes, emaSeries, efficiencyRatio, parabolicSar, sarFlipCount, closeCrossCount, clamp } from './indicators.js';
+import { emaSeries, closes, atr, adx, parabolicSar, efficiencyRatio, clamp } from './indicators.js';
+import { REGIMES } from './regime.js';
+
+// Score a value linearly: <= lo -> 0, >= hi -> 1.
+const ramp = (v, lo, hi) => clamp((v - lo) / (hi - lo), 0, 1);
+
+// Component weights sum to 100.
+const WEIGHTS = { adx: 15, adxRise: 10, efficiency: 20, displacement: 20, emaSlope: 10, sarWhipsaw: 15, chop: 10 };
 
 export const RANGE_FILTER_DEFAULTS = {
-  enabled: true,
-  minTrendScore: 55,          // score below this = "ranging" -> veto the entry
-  adxLo: 15, adxHi: 28,
-  erLo: 0.20, erHi: 0.45,
-  sepAtrLo: 0.30, sepAtrHi: 1.20,
-  slopeAtrLo: 0.30, slopeAtrHi: 1.50,
-  flipsLo: 1.5, flipsHi: 5,   // flips in the last 40 bars (a fresh SAR flip is normal, 4+ is chop)
-  crossLo: 2, crossHi: 7,     // EMA50 close-crosses in the last 30 bars
-  atrRatioLo: 0.70, atrRatioHi: 1.10,
-  minBars: 105,
+  minScore: 65,          // trend-quality score needed to allow an entry
+  hardMinAdx: 14,        // below this the market is a range regardless of the other readings
+  vetoRegimes: [REGIMES.RANGE, REGIMES.LOW_VOL, REGIMES.CHAOTIC], // higher-timeframe states that veto outright
 };
 
-const ramp = (x, lo, hi) => clamp((x - lo) / (hi - lo), 0, 1);
+// direction: 'LONG' | 'SHORT' (the EMA slope check is direction-aware)
+export function smartRangeFilter(m5, direction, regime, opts){
+  const o = { ...RANGE_FILTER_DEFAULTS, ...(opts || {}) };
+  const notes = [];
+  const fail = (why) => ({ trending: false, score: 0, components: {}, reasons: [why], notes });
 
-// m5: candles oldest-first. pre (optional): already-computed { psar, ema50, ema100 }
-// so the caller's own series aren't recomputed. Returns:
-//   { trending, score, metrics, reasons }
-// `reasons` is human-readable and is what ends up in the scanner's
-// REJECTED explanation when this filter vetoes a trade.
-export function assessMarketState(m5, opts, pre){
-  const cfg = { ...RANGE_FILTER_DEFAULTS, ...(opts || {}) };
-  if(!cfg.enabled) return { trending: true, score: 100, metrics: {}, reasons: ['Range filter disabled'] };
-  if(!m5 || m5.length < cfg.minBars) return { trending: false, score: 0, metrics: {}, reasons: ['Not enough M5 history to judge trend vs range'] };
+  if(m5.length < 110) return fail('Not enough 5m history to judge trend vs range');
 
   const i = m5.length - 1;
-  const c = closes(m5);
-  const ema50 = (pre && pre.ema50) || emaSeries(c, 50);
-  const ema100 = (pre && pre.ema100) || emaSeries(c, 100);
-  const psar = (pre && pre.psar) || parabolicSar(m5);
+  const cl = closes(m5);
+  const atr5 = atr(m5, 14);
+  if(!atr5) return fail('ATR unavailable');
 
-  const atr14 = atr(m5, 14), atr50 = atr(m5, 50);
-  if(!atr14 || !atr50) return { trending: false, score: 0, metrics: {}, reasons: ['ATR unavailable'] };
+  // ---- hard vetoes (any one is enough) ----
+  if(regime && o.vetoRegimes.includes(regime.regime)){
+    return fail(`Higher-timeframe regime is "${regime.regime}" — not a trending market`);
+  }
+  const adxNow = adx(m5, 14);
+  if(adxNow == null) return fail('ADX unavailable');
+  if(adxNow < o.hardMinAdx) return fail(`ADX ${adxNow.toFixed(1)} is below ${o.hardMinAdx} — no directional strength (ranging)`);
 
-  const adxVal = adx(m5.slice(-100), 14);
-  const er = efficiencyRatio(c, 20);
-  const sepAtr = Math.abs(ema50[i] - ema100[i]) / atr14;
-  const slopeAtr = Math.abs(ema100[i] - ema100[i - 10]) / atr14;
-  const flips = sarFlipCount(psar, m5, 40);
-  const crosses = closeCrossCount(m5, ema50, 30);
-  const atrRatio = atr14 / atr50;
+  // ---- 1+2. ADX: how strong the directional movement is, AND whether it is
+  //      building. A breakout out of compression starts with a LOW but sharply
+  //      RISING ADX, so a rising ADX earns real credit — the filter is meant to
+  //      block chop, not the first bars of a genuine breakout. ----
+  const adxPrev = adx(m5.slice(0, -4), 14);
+  const adxDelta = adxPrev != null ? adxNow - adxPrev : 0;
+  const adxScore = ramp(adxNow, 18, 30);
+  const adxRiseScore = ramp(adxDelta, 0, 4);
 
-  const parts = {
-    adx: adxVal == null ? 0.5 : ramp(adxVal, cfg.adxLo, cfg.adxHi),
-    er: er == null ? 0.5 : ramp(er, cfg.erLo, cfg.erHi),
-    sep: ramp(sepAtr, cfg.sepAtrLo, cfg.sepAtrHi),
-    slope: ramp(slopeAtr, cfg.slopeAtrLo, cfg.slopeAtrHi),
-    flips: 1 - ramp(flips, cfg.flipsLo, cfg.flipsHi),
-    crosses: 1 - ramp(crosses, cfg.crossLo, cfg.crossHi),
-    atrRatio: ramp(atrRatio, cfg.atrRatioLo, cfg.atrRatioHi),
+  // ---- 3. Efficiency ratio: does price actually travel, or just churn? ----
+  const er = efficiencyRatio(m5, 20) ?? 0;
+  const erScore = ramp(er, 0.20, 0.50);
+
+  // ---- 4. Net displacement over the last 20 bars, in ATRs, in the trade's
+  //      direction: a live move has gone somewhere; a range has round-tripped ----
+  const disp = (cl[i] - cl[i - 20]) / atr5;
+  const dirDisp = direction === 'LONG' ? disp : -disp;
+  const dispScore = ramp(dirDisp, 2, 6);
+
+  // ---- 5. EMA50 slope in the trade's direction (ATRs per 10 bars) ----
+  const ema50 = emaSeries(cl, 50);
+  const slopeAtr = (ema50[i] - ema50[i - 10]) / atr5;
+  const dirSlope = direction === 'LONG' ? slopeAtr : -slopeAtr;
+  const slopeScore = ramp(dirSlope, 0, 0.6);
+
+  // ---- 6. Parabolic SAR whipsaw: flipping side constantly = chop ----
+  const psar = parabolicSar(m5);
+  let flips = 0;
+  for(let k = i - 39; k <= i; k++){
+    if(k < 1 || psar[k] == null || psar[k - 1] == null) continue;
+    const upNow = psar[k] < m5[k].c, upPrev = psar[k - 1] < m5[k - 1].c;
+    if(upNow !== upPrev) flips++;
+  }
+  const whipsawScore = 1 - ramp(flips, 2, 6);
+
+  // ---- 7. Chop: how often price crossed EMA50 recently ----
+  let crosses = 0;
+  for(let k = i - 29; k <= i; k++){
+    if(k < 1) continue;
+    if((cl[k] > ema50[k]) !== (cl[k - 1] > ema50[k - 1])) crosses++;
+  }
+  const chopScore = 1 - ramp(crosses, 1, 6);
+
+  const components = {
+    adx:          { value: +adxNow.toFixed(1), points: +(adxScore * WEIGHTS.adx).toFixed(1), of: WEIGHTS.adx },
+    adxRise:      { value: +adxDelta.toFixed(1), points: +(adxRiseScore * WEIGHTS.adxRise).toFixed(1), of: WEIGHTS.adxRise },
+    efficiency:   { value: +er.toFixed(2), points: +(erScore * WEIGHTS.efficiency).toFixed(1), of: WEIGHTS.efficiency },
+    displacement: { value: +dirDisp.toFixed(1), points: +(dispScore * WEIGHTS.displacement).toFixed(1), of: WEIGHTS.displacement },
+    emaSlope:     { value: +dirSlope.toFixed(2), points: +(slopeScore * WEIGHTS.emaSlope).toFixed(1), of: WEIGHTS.emaSlope },
+    sarWhipsaw:   { value: flips, points: +(whipsawScore * WEIGHTS.sarWhipsaw).toFixed(1), of: WEIGHTS.sarWhipsaw },
+    chop:         { value: crosses, points: +(chopScore * WEIGHTS.chop).toFixed(1), of: WEIGHTS.chop },
   };
-  const score = Math.round(100 * (
-    parts.adx * 0.25 + parts.er * 0.20 + parts.sep * 0.15 + parts.slope * 0.10 +
-    parts.flips * 0.15 + parts.crosses * 0.10 + parts.atrRatio * 0.05
-  ));
+  const score = Math.round(Object.values(components).reduce((a, c) => a + c.points, 0));
+  const trending = score >= o.minScore;
 
-  const metrics = {
-    adx: adxVal, efficiencyRatio: er, emaSeparationAtr: sepAtr, ema100SlopeAtr: slopeAtr,
-    sarFlips40: flips, ema50Crosses30: crosses, atrRatio, trendScore: score,
-  };
-
-  const trending = score >= cfg.minTrendScore;
   const reasons = [];
   if(!trending){
-    reasons.push(`Smart Range Filter: ranging/choppy market (trend score ${score} < ${cfg.minTrendScore})`);
-    // Name the measurements that actually voted "range" so the rejection is explainable.
-    const weak = [];
-    if(parts.adx < 0.35 && adxVal != null) weak.push(`ADX ${adxVal.toFixed(0)}`);
-    if(parts.er < 0.35 && er != null) weak.push(`efficiency ${er.toFixed(2)}`);
-    if(parts.sep < 0.35) weak.push(`EMA50/100 tangled (${sepAtr.toFixed(2)} ATR apart)`);
-    if(parts.slope < 0.35) weak.push(`EMA100 flat (${slopeAtr.toFixed(2)} ATR/10 bars)`);
-    if(parts.flips < 0.35) weak.push(`${flips} SAR flips in 40 bars`);
-    if(parts.crosses < 0.35) weak.push(`${crosses} EMA50 crosses in 30 bars`);
-    if(parts.atrRatio < 0.35) weak.push(`volatility squeeze (ATR14/ATR50 ${atrRatio.toFixed(2)})`);
-    if(weak.length) reasons.push(`Range evidence: ${weak.join(', ')}`);
-  } else {
-    reasons.push(`Smart Range Filter: trending (score ${score}, ADX ${adxVal != null ? adxVal.toFixed(0) : 'n/a'}, efficiency ${er != null ? er.toFixed(2) : 'n/a'})`);
+    reasons.push(`Smart range filter: trend quality ${score}/100 is below the ${o.minScore} needed — market looks range-bound`);
+    const weakest = Object.entries(components).sort((a, b) => (a[1].points / a[1].of) - (b[1].points / b[1].of)).slice(0, 2).map(([k]) => k);
+    reasons.push(`Weakest readings: ${weakest.join(', ')}`);
   }
-  return { trending, score, metrics, reasons };
+  notes.push(`ADX ${adxNow.toFixed(1)} (${adxDelta >= 0 ? '+' : ''}${adxDelta.toFixed(1)}), efficiency ${er.toFixed(2)}, ${dirDisp.toFixed(1)} ATR net move/20 bars, ${flips} SAR flips/40 bars, ${crosses} EMA50 crosses/30 bars`);
+  return { trending, score, components, reasons, notes };
 }

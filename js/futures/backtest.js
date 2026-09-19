@@ -161,8 +161,7 @@ function openBacktestPosition(row, dayState, nowMs){
     entry: row.entry, stop: row.stop, originalStop: row.stop,
     tp1: row.tp1, tp2: row.tp2, tp3: row.tp3,
     tpFractions: row.tpFractions || { tp1: 0.30, tp2: 0.30, tp3: 0.40 },
-    breakevenStopPrice: row.breakevenStopPrice,
-    singleTp: !!row.singleTp, // Nova Scalp: one fixed 2R exit, mirrors engine.js's managePositions
+    breakevenStopPrice: row.breakevenStopPrice, singleTarget: !!row.singleTarget,
     qty, notionalUsd: row.sizing ? row.sizing.notionalUsd : 0,
     leverage: row.leverage, execution: row.execution,
     entryFeePct: row.costsBreakdown.entryFeePct, exitFeePct: row.costsBreakdown.exitFeePct,
@@ -230,29 +229,9 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
       continue;
     }
 
-    // Nova Scalp: single fixed 2R target, no partials/breakeven — identical
-    // to engine.js's managePositions. SL is checked first above (a bar that
-    // touches both is conservatively a loss).
-    if(pos.singleTp){
-      if(hitTP(pos.tp1)){
-        const pnl = netPnlForFraction(pos, pos.tp1, pos.remainingFraction, dayState, true);
-        closeBacktestTrade(pos, pos.tp1, pnl, 'TAKE_PROFIT_2R', dayState, closedTrades, nowMs);
-        dayState.cooldownUntilBySymbol[pos.symbol] = nowMs + 30 * 60_000;
-        continue;
-      }
-      if(ageMinutes > timeStopMinutes){
-        const pnl = netPnlForFraction(pos, candle.c, pos.remainingFraction, dayState, false);
-        closeBacktestTrade(pos, candle.c, pnl, 'TIME_STOP', dayState, closedTrades, nowMs);
-        dayState.cooldownUntilBySymbol[pos.symbol] = nowMs + 30 * 60_000;
-        continue;
-      }
-      stillOpen.push(pos);
-      continue;
-    }
-
     const tp1Fraction = pos.tpFractions.tp1, tp2Fraction = pos.tpFractions.tp2;
 
-    if(!pos.partialsTaken.includes('tp1') && hitTP(pos.tp1)){
+    if(tp1Fraction > 0 && !pos.partialsTaken.includes('tp1') && hitTP(pos.tp1)){
       const pnl = netPnlForFraction(pos, pos.tp1, tp1Fraction, dayState, true);
       pos.remainingFraction -= tp1Fraction;
       pos.partialsTaken.push('tp1');
@@ -263,7 +242,7 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
       pos.accrued.feesUsd += pnl.feesUsd; pos.accrued.fundingUsd += pnl.fundingUsd;
     }
 
-    if(pos.remainingFraction > 0 && !pos.partialsTaken.includes('tp2') && hitTP(pos.tp2)){
+    if(tp2Fraction > 0 && pos.remainingFraction > 0 && !pos.partialsTaken.includes('tp2') && hitTP(pos.tp2)){
       const pnl = netPnlForFraction(pos, pos.tp2, tp2Fraction, dayState, true);
       pos.remainingFraction -= tp2Fraction;
       pos.partialsTaken.push('tp2');
@@ -295,7 +274,7 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
 }
 
 function timeStopMinutesFor(setupType){
-  return setupType === 'NxTGen Scalp' ? 40 : setupType === 'Nova Scalp' ? 1440 : setupType === 'Range Scalp' ? 45 : 240;
+  return setupType === 'NxTGen Scalp' ? 40 : setupType === 'Nova Scalp' ? 120 : setupType === 'Range Scalp' ? 45 : 240;
 }
 
 // candlesBySymbol: { [symbol]: [{t,o,h,l,c,v}, ...] } — 5-minute candles,

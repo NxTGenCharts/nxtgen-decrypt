@@ -121,6 +121,21 @@ export function buildTpLevels({ entry, direction, stopDistancePct, entryFeePct, 
   });
 }
 
+// Single-exit variant of buildTpLevels, used by Nova Scalp: the WHOLE position
+// closes at one target `rMultiple` x the stop distance (default 2R), instead
+// of the shared 30/30/40 split. Same fee-safety rule as TP1 above — if the raw
+// R distance wouldn't clear round-trip costs it's pushed out to the fee floor
+// (which can only make the target FARTHER than 2R, never nearer). Returned in
+// the same tp1/tp2/tp3 shape everything downstream already reads: all three
+// prices are the one target, with fractions 0 / 0 / 1 so the existing TP3
+// "close what's left" path is the single exit and the partial legs are inert.
+export function buildSingleTargetLevel({ entry, direction, stopDistancePct, rMultiple, entryFeePct, exitFeePct, spreadPct, slippagePct }){
+  const sign = direction === 'LONG' ? 1 : -1;
+  const minPct = minProfitableMovePct({ entryFeePct, exitFeePct, spreadPct, slippagePct }) * FEE_SAFETY_MARGIN;
+  const pct = Math.max(stopDistancePct * (rMultiple || 2), minPct);
+  return { pct, price: entry * (1 + sign * pct / 100) };
+}
+
 // Fee-adjusted breakeven for the 40% left after TP2 (requirement #6/#7):
 // the price at which closing what remains nets to (at worst) a genuine
 // small non-loss after ITS OWN round-trip fees/slippage — not the raw
