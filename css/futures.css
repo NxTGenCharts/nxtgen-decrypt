@@ -204,3 +204,20 @@
   .tb-stats-row{ gap:16px; }
   .tb-modal{ padding:16px; }
 }
+
+/* ---- Live / Demo Trading panel: compact settings row + single arm row ----
+   The five settings (risk, timeframe, daily target, max daily loss, trade mode) used to be
+   five stacked full-height fields; they now sit in one auto-fitting grid (2–3 columns on a
+   phone, one row on a wide screen). The arm switch and Start button share one row. */
+.fu-live-settings{
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px 14px;
+  margin:14px 0 12px; align-items:end;
+}
+.fu-live-settings .field{ min-width:0; max-width:none; margin:0; }
+.fu-live-settings .mode-toggle{ align-self:flex-start; }
+.fu-live-settings .mode-btn{ min-height:var(--touch-target); }
+.fu-live-status{ margin:0 0 4px; max-width:none; }
+.fu-live-actions{ display:flex; flex-wrap:wrap; gap:10px; align-items:flex-start; }
+.fu-live-actions #fuServerWorker{ flex:1 1 380px; min-width:0; }
+.fu-live-actions .live-toggle{ flex:0 0 auto; min-height:var(--touch-target); }
+.fu-live-actions .live-toggle:disabled{ opacity:.5; cursor:not-allowed; }

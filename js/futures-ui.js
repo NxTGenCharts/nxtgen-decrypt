@@ -23,6 +23,7 @@ import { fmtPct } from './utils.js';
 import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS, scanSymbolsWithQuant } from './futures/engine.js';
 import { QUANT_ID, QUANT_TYPE } from './futures/quant/config.js';
 import { qlog } from './futures/quant/log.js';
+import { isServerArmed, setBrowserArmHooks } from './server-worker.js';
 import { getQuantCfg, setQuantProviders, setQuantConfigListener, quantCardStatsLine, getQuantRewardRisk, updateQuantConfig } from './quant-ui.js';
 import { mockMarket } from './futures/mockMarket.js';
 import { WATCHLIST_TOP_N, rankTopByVolume } from './futures/watchlist.js';
@@ -183,7 +184,6 @@ function paperScanSymbols(f){
   if(paperWatch.exchange !== f.exchange || !paperWatch.symbols || !paperWatch.symbols.length) return undefined;
   return scanSymbolsWithQuant(paperWatch.symbols, { strategies: f.strategies, quant: getQuantCfg() });
 }
-const ARM_PHRASE = 'PLACE REAL ORDERS';
 
 function fu(){ return state.futures; }
 
@@ -2193,12 +2193,20 @@ function updateLiveModeUI(){
   const exchange = f.liveExchange;
   const mode = f.liveModeByExchange[exchange] || 'live';
   const name = EXCHANGE_DISPLAY_NAMES[exchange] || exchange;
+  const onServer = isServerArmed(exchange);
   if(els.fuLiveArmWrap) els.fuLiveArmWrap.style.display = '';
-  if(els.fuLiveConfirmLabel) els.fuLiveConfirmLabel.textContent = `Sign and send real orders instead of simulating (requires a connected, verified ${name} ${mode} key)`;
-  if(!f.liveArmed){
-    showLiveMessage(`${name} (${mode === 'live' ? 'Live' : 'Demo'}) selected but not armed — check the box and type the phrase below to arm.`);
+  if(onServer){
+    showLiveMessage(`Running on the server for ${name} (${mode === 'live' ? 'LIVE — real funds' : 'Demo'}) — you can close this tab. Use the switch below to stop it.`);
+  } else if(!f.liveArmed){
+    showLiveMessage(`${name} (${mode === 'live' ? 'Live' : 'Demo'}) selected but not armed — flip the switch below to arm.`);
   } else {
     showLiveMessage(`Armed for ${mode === 'live' ? 'LIVE (real funds)' : 'Demo'} trading on ${name}.`);
+  }
+  // While the server runs this exchange the tab must not start its own loop on the same account.
+  if(els.fuLiveToggleBtn){
+    const blocked = onServer && !f.liveRunning;
+    els.fuLiveToggleBtn.disabled = blocked;
+    els.fuLiveToggleBtn.title = blocked ? 'This exchange is already running on the server — switch that off first, or two bots would trade the same account.' : '';
   }
 }
 
@@ -2249,6 +2257,10 @@ function stopFastTick(){
 
 function toggleLiveRunning(){
   const f = fu();
+  if(!f.liveRunning && isServerArmed(f.liveExchange)){
+    showLiveMessage(`${EXCHANGE_DISPLAY_NAMES[f.liveExchange] || f.liveExchange} is already running on the server — switch that off first; two bots on one account would double up trades.`, 'error');
+    return;
+  }
   f.liveRunning = !f.liveRunning;
   if(f.liveRunning){
     runLiveCycle();
@@ -2290,9 +2302,6 @@ function resetLiveSession(){
   f.livePausedByCircuitBreaker = false;
   f.liveAdaptiveConfidenceBoost = 0;
   f.livePendingSignal = null;
-  if(els.fuLiveConfirmCheck) els.fuLiveConfirmCheck.checked = false;
-  if(els.fuLiveArmRow) els.fuLiveArmRow.style.display = 'none';
-  if(els.fuLiveArmPhrase) els.fuLiveArmPhrase.value = '';
   renderLiveExchangeRows();
   renderLivePendingSignal();
   updateLiveModeUI();
@@ -2301,32 +2310,22 @@ function resetLiveSession(){
 
 function initLiveTradingControls(){
   initLiveExchangeRows();
-  if(els.fuLiveConfirmCheck){
-    els.fuLiveConfirmCheck.addEventListener('change', () => {
-      if(els.fuLiveArmRow) els.fuLiveArmRow.style.display = els.fuLiveConfirmCheck.checked ? '' : 'none';
-    });
-  }
-  if(els.fuLiveArmBtn){
-    els.fuLiveArmBtn.addEventListener('click', () => {
+  // The single arm switch (js/server-worker.js) arms the server in Auto mode and THIS TAB in Manual mode;
+  // these are the tab-side pieces it calls. Un-arming only stops NEW entries — an open position keeps
+  // being monitored and keeps its exchange-side SL/TP.
+  setBrowserArmHooks({
+    isArmed: () => !!fu().liveArmed,
+    arm: () => { fu().liveArmed = true; updateLiveModeUI(); renderLive(); },
+    disarm: () => {
       const f = fu();
-      const exchange = f.liveExchange;
-      const mode = f.liveModeByExchange[exchange] || 'live';
-      if(!liveCred(exchange, mode)){
-        showLiveMessage(`No verified ${exchange} ${mode} key found — connect and verify one in Autotrade & Balances first, then come back and arm.`, 'error');
-        return;
-      }
-      if(!els.fuLiveConfirmCheck || !els.fuLiveConfirmCheck.checked){
-        showLiveMessage('Check the confirmation box first.', 'error');
-        return;
-      }
-      if((els.fuLiveArmPhrase.value || '').trim() !== ARM_PHRASE){
-        showLiveMessage(`Type exactly "${ARM_PHRASE}" to arm.`, 'error');
-        return;
-      }
-      f.liveArmed = true;
+      f.liveArmed = false;
+      f.livePendingSignal = null;
+      renderLivePendingSignal();
       updateLiveModeUI();
-    });
-  }
+      renderLive();
+    },
+  });
+  document.addEventListener('nxtgen-server-arm-changed', updateLiveModeUI);
   if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.addEventListener('click', toggleLiveRunning);
   // Delegated once from the row itself, since renderLiveCloseButtons()
   // rebuilds the buttons' innerHTML on every render (open/close/cycle) —

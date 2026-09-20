@@ -188,22 +188,29 @@ When `WORKER_EXCHANGE` + `WORKER_API_KEY` + `WORKER_SECRET_KEY` are set:
 
 ## "Run on server" button (Autotrade & Futures page)
 
-Under the Live / Demo Trading panel there's a single **Run on server — 24/7** switch
-(`js/server-worker.js`). Flip it ON and the exchange + network currently selected in
-that panel is handed to the server, using the key already saved and verified in the
-browser and the values **currently on screen** on that page: Risk per trade, Leverage,
-Min confidence, Daily Profit Target, Max Daily Loss, High Selectivity and the
-Strategies list (plus the saved NxTGen Quant settings). They're re-read at the moment
-you flip it and sent with `explicitSettings: true` — a blank field makes the switch
-refuse and name it. Flip it OFF to stop new entries (an open position keeps its
-exchange-side SL/TP). The switch mirrors `/api/worker/status`, so it also shows ON after
-a refresh or when the server auto-armed itself.
+Under the Live / Demo Trading panel there's a single **Arm — sign & send real orders**
+switch (`js/server-worker.js`). It replaces the old "Sign and send real orders" checkbox +
+typed phrase + Arm button and the separate "Run on server" switch.
 
-The access token is asked for once (a prompt, the first time you flip the switch) and
-remembered on that device; a rejected token is asked for again. Live mode asks for a
-confirm() instead of typing the arm phrase. If the server answers 503, the message says
-whether `WORKER_TOKEN` is not set on the service that answered or is set but shorter than
-20 characters.
+- **Trade Mode = Auto:** flipping it ON hands the exchange + network currently selected in
+  that panel to the server (the browser can be closed), using the key already saved and
+  verified in the browser and the values **currently on screen**: Risk per trade, Leverage,
+  Min confidence, Daily Profit Target, Max Daily Loss, High Selectivity and the Strategies
+  list (plus the saved NxTGen Quant settings). They're re-read at the moment you flip it and
+  sent with `explicitSettings: true` — a blank field makes the switch refuse and name it.
+- **Trade Mode = Manual:** the server has no click-to-execute step, so the switch arms *this
+  tab* instead (`state.futures.liveArmed`); qualifying signals wait for your Execute click.
+- **OFF** stops new entries (server session and/or this tab). An open position keeps its
+  exchange-side SL/TP.
+- The switch mirrors `/api/worker/status` (and the tab's armed flag), so it also shows ON
+  after a refresh or when the server auto-armed itself. **Start Live/Demo Trading** is
+  disabled while the server runs that exchange, so two bots can never trade one account.
+- The access token is asked for once (a prompt, the first time the server is needed) and
+  remembered on that device; a rejected token is asked for again. Live mode asks for a
+  confirm() instead of typing the arm phrase (the server API still takes `armPhrase`; the
+  page sends it on your behalf). If the server answers 503, the message says whether
+  `WORKER_TOKEN` is not set on the service that answered or is set but shorter than 20
+  characters.
 
 - **Several exchanges:** switch the exchange row, flip the switch again — each keeps the settings it was armed with. Change a value later and it only applies to the *next* time you switch it on; switch off and on again to apply it.
 - **Daily targets roll over:** "daily" profit target / max daily loss are measured against the balance at the start of the local day (the browser's timezone, sent at arm time). At local midnight the baseline resets, so a hit target pauses the bot until the next day rather than forever.

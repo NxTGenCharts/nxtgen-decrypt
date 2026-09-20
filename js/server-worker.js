@@ -1,33 +1,35 @@
 // =============================================================
-// server-worker.js — the ONE switch for "Run on server — 24/7" on the
-// Autotrade & Futures page.
+// server-worker.js — the ONE arm switch on the Autotrade & Futures page.
 //
-// Switch ON  -> hands the exchange/network selected in the Live / Demo panel to
-//               the always-on server worker (server/worker.js). It trades with
-//               the key already verified in this browser and the values that are
-//               ON SCREEN right now (Risk per trade, Leverage, Min confidence,
-//               Daily Profit Target, Max Daily Loss, High Selectivity, and the
-//               strategies switched on) — read at the moment you flip it.
-//               Nothing falls back to a default: a blank/invalid field refuses
-//               and names the field.
-// Switch OFF -> stops new entries on the server. An open position keeps its
-//               exchange-side SL/TP.
+// It replaces both the old "Sign and send real orders" checkbox (+ typed phrase +
+// Arm button) and the separate "Run on server — 24/7" switch. Flip it ON to arm:
 //
-// There is no token box, arm phrase, settings summary or session list here any
-// more (the settings live in one place — the fields above; the /worker/ page
-// still has the full log). The switch mirrors what the server is actually doing,
-// so it is also ON after a refresh, or if the server armed itself
-// (WORKER_AUTOARM).
+//   Trade Mode = Auto   -> the selected exchange/network is handed to the always-on
+//                          server worker (server/worker.js), so the browser can be
+//                          closed. It trades with the key already verified in this
+//                          browser and the values ON SCREEN right now (Risk per
+//                          trade, Leverage, Min confidence, Daily Profit Target,
+//                          Max Daily Loss, High Selectivity, strategies) — read at
+//                          the moment you flip it. Nothing falls back to a default:
+//                          a blank/invalid field refuses and names the field.
+//   Trade Mode = Manual -> arms THIS TAB instead (the server has no click-to-execute
+//                          step): signals wait for your Execute click.
 //
-// The access token is still required by the server (the proxy URL is public, and
-// CORS does not stop curl) — it is asked for ONCE, the first time you flip the
-// switch, and remembered on this device. A rejected token is asked for again.
-// Live mode asks for a confirm() instead of typing a phrase.
+// Flip it OFF to stop new entries (server session and/or this tab). An open position
+// keeps its exchange-side SL/TP either way.
 //
-// Each exchange is its own server session, so Bybit, Binance, ... can each be
-// switched on separately (select the exchange row, flip the switch). Keys stay in
-// the server's memory only; a server restart stops the session unless
-// WORKER_AUTOARM is on.
+// The switch mirrors what is actually happening — /api/worker/status for the server,
+// state.futures.liveArmed for the tab — so it is also ON after a refresh, or when the
+// server armed itself (WORKER_AUTOARM). futures-ui.js supplies the tab-side hooks via
+// setBrowserArmHooks() and listens for 'nxtgen-server-arm-changed' to keep its status
+// line and Start button in step (Start is disabled while the server runs that exchange,
+// so two bots can never trade one account).
+//
+// The access token is still required by the server (the proxy URL is public, and CORS
+// does not stop curl) — it is asked for ONCE, the first time the server is needed, and
+// remembered on this device; a rejected token is asked for again. Live mode asks for a
+// confirm() instead of typing a phrase. Keys stay in the server's memory only; a server
+// restart stops the session unless WORKER_AUTOARM is on.
 // =============================================================
 import { state } from './state.js';
 import { RISK_DEFAULTS } from './futures/risk.js';
@@ -138,14 +140,24 @@ function selection(){
 const selKey = () => { const s = selection(); return s.exchange + ':' + s.mode; };
 const nameOf = ex => EXCHANGE_NAMES[ex] || ex;
 
+// Tab-side arming lives in futures-ui.js (it owns state.futures.liveArmed and the Start loop);
+// it hands us three small functions instead of us reaching into its internals.
+let hooks = null; // { isArmed(), arm(), disarm() }
+export function setBrowserArmHooks(h){ hooks = h; }
+const tabArmed = () => !!(hooks && hooks.isArmed());
+
 // ---- state + rendering ----
 let lastStatus = null;   // last /api/worker/status payload — the switch mirrors THIS, not a local guess
 let readOnly = false;
 let busy = false;
 let msg = { text: '', kind: '', key: '', src: '' };
 
+// A rejected token gets a plain instruction instead of the server's terse text; the next flip asks for it again.
+const failText = (r, dflt) => r.code === 'unauthorized' ? 'The server rejected the access token — flip the switch again to enter it.' : (r.message || dflt);
+
 function fmtUsd(n){ if(n == null) return '—'; return (n < 0 ? '-$' : '+$') + Math.abs(n).toFixed(2); }
 function sessionFor(exchange){ return lastStatus && lastStatus.sessions ? lastStatus.sessions[exchange] : null; }
+export function isServerArmed(exchange){ const x = sessionFor(exchange); return !!(x && x.armed); }
 
 // A message belongs to the exchange/network it was raised for — switching the row clears it,
 // so an old "no verified live key" can never linger under a Demo selection.
@@ -154,38 +166,53 @@ function setMsg(text, kind, src){
   render();
 }
 
+let lastStateKey = null;
 function render(){
   const cb = $('swToggle'); if(!cb) return;
   const sel = selection();
+  const f = fu();
+  const manual = f.liveTradeMode === 'manual';
   const sess = sessionFor(sel.exchange);
-  const on = !!(sess && sess.armed);
+  const serverOn = !!(sess && sess.armed);
+  const tabOn = tabArmed();
+  const on = serverOn || tabOn;
   cb.checked = busy ? cb.checked : on;
-  cb.disabled = busy || readOnly;
+  cb.disabled = busy || (readOnly && (serverOn || !manual));
+
+  $('swPill').textContent = serverOn || (!tabOn && !manual) ? 'RUNS ON SERVER 24/7' : 'RUNS IN THIS TAB';
 
   let sub;
-  if(on){
+  if(serverOn){
     const bits = [`${nameOf(sess.exchange)} · ${sess.mode === 'live' ? 'LIVE' : 'Demo'}`, `${sess.trades || 0} trades (${sess.wins || 0}W/${sess.losses || 0}L)`, `net ${fmtUsd(sess.netPnlUsd)}`];
     const open = Object.keys(sess.openPositions || {});
     if(open.length) bits.push('open: ' + open.join(', '));
     sub = 'ON — running on the server, you can close this tab. ' + bits.join(' · ');
+  } else if(tabOn){
+    sub = 'ON — armed in this tab. ' + (manual ? 'Signals wait for your Execute click.' : 'Orders are placed automatically while this tab is open.') +
+      (f.liveRunning ? '' : ' Press Start Live/Demo Trading to begin.');
   } else if(sess && Object.keys(sess.openPositions || {}).length){
     sub = 'OFF — no new entries. The open position keeps its exchange-side SL/TP until it closes.';
+  } else if(manual){
+    sub = 'OFF — Manual mode arms this tab: signals wait for your Execute click.';
   } else {
-    sub = `OFF — ${nameOf(sel.exchange)} only trades while this tab is open.`;
+    sub = `OFF — switching on runs ${nameOf(sel.exchange)} on the server, so the browser can be closed.`;
   }
   $('swSub').textContent = sub;
 
   let text = '', kind = '';
   if(msg.text && msg.key === selKey()){ text = msg.text; kind = msg.kind; }
-  const f = fu();
-  if(!text && on && f.liveRunning && f.liveArmed && f.liveExchange === sel.exchange){
-    text = 'This tab is also running the bot on this exchange — stop one of them, or trades will double up.'; kind = 'error';
+  if(!text && serverOn && tabOn && f.liveRunning){
+    text = 'This tab is also armed and running on this exchange — switch off and on again, or trades will double up.'; kind = 'error';
   }
   if(!text && readOnly){ text = 'This token is read-only: you can watch, not switch the server on or off.'; }
-  if(!text && on && sess.lastMessageKind === 'error' && sess.lastMessage){ text = sess.lastMessage; kind = 'error'; }
+  if(!text && serverOn && sess.lastMessageKind === 'error' && sess.lastMessage){ text = sess.lastMessage; kind = 'error'; }
   const el = $('swMsg');
   el.textContent = text;
   el.style.color = kind === 'error' ? 'var(--red)' : kind === 'ok' ? 'var(--green)' : 'var(--dim)';
+
+  // Tell futures-ui.js when the server's state for the selected exchange flips (its status line + Start button).
+  const stateKey = sel.exchange + ':' + serverOn;
+  if(stateKey !== lastStateKey){ lastStateKey = stateKey; document.dispatchEvent(new CustomEvent('nxtgen-server-arm-changed')); }
 }
 
 async function poll(){
@@ -194,7 +221,7 @@ async function poll(){
   if(!tok) return; // never asked yet — the switch just shows OFF until you flip it
   try{
     const r = await wcall('/api/worker/status', 'GET', null, tok);
-    if(!r.ok){ setMsg(r.message || 'The server refused the request.', 'error', 'poll'); return; }
+    if(!r.ok){ setMsg(failText(r, 'The server refused the request.'), 'error', 'poll'); return; }
     lastStatus = r.status;
     readOnly = r.role === 'view';
     if(msg.src === 'poll') msg = { text: '', kind: '', key: '', src: '' }; // the earlier poll problem is gone
@@ -204,13 +231,23 @@ async function poll(){
   }
 }
 
-async function turnOn(){
+function turnOnTab(){
+  const sel = selection();
+  const name = nameOf(sel.exchange);
+  if(!sel.verified){ setMsg(`No verified ${sel.mode} key for ${name} in this browser — connect and verify one in API Keys first.`, 'error'); return; }
+  if(!hooks){ setMsg('Arming is not available on this page.', 'error'); return; }
+  if(sel.mode === 'live' && !window.confirm(`Arm ${name} for REAL funds in this tab?\n\nReal orders can be placed from this tab while it stays open.`)) return;
+  hooks.arm();
+  setMsg(`Armed in this tab. Press Start Live/Demo Trading to begin scanning; qualifying signals wait for your Execute click.`, 'ok');
+}
+
+async function turnOnServer(){
   const sel = selection();
   const f = fu();
   const name = nameOf(sel.exchange);
   if(!sel.verified){ setMsg(`No verified ${sel.mode} key for ${name} in this browser — connect and verify one in API Keys first.`, 'error'); return; }
   if(f.liveRunning && f.liveArmed && f.liveExchange === sel.exchange){
-    setMsg(`The in-browser bot is running on ${name}. Stop it first — two bots on one account would double up trades.`, 'error'); return;
+    setMsg(`This tab is already armed and running ${name}. Stop it first — two bots on one account would double up trades.`, 'error'); return;
   }
   const { settings, problems } = readSettings();
   if(problems.length){ setMsg(`Not started — fill in: ${problems.join(', ')}.`, 'error'); return; }
@@ -241,21 +278,26 @@ async function turnOn(){
     if(s && s.ok){ lastStatus = s.status; readOnly = s.role === 'view'; }
     setMsg(`${name} is already running on the server.`, 'ok');
   } else {
-    setMsg(r.message || 'The server refused to start.', 'error');
+    setMsg(failText(r, 'The server refused to start.'), 'error');
   }
 }
 
 async function turnOff(){
   const sel = selection();
+  const name = nameOf(sel.exchange);
+  const serverOn = isServerArmed(sel.exchange);
+  // The tab first: it's local and instant, so a cancelled token prompt below can't leave it armed.
+  if(tabArmed()) hooks.disarm();
+  if(!serverOn){ setMsg(`Stopped ${name}. Any open position keeps its exchange-side SL/TP.`, 'ok'); return; }
   const tok = getToken(true);
   if(!tok){ setMsg('The access token is needed to switch the server off.', 'error'); return; }
   const r = await wcall('/api/worker/disarm', 'POST', { exchange: sel.exchange }, tok);
   if(r.ok){
     lastStatus = r.status;
-    setMsg(`Stopped ${nameOf(sel.exchange)}. Any open position keeps its exchange-side SL/TP.` +
+    setMsg(`Stopped ${name}. Any open position keeps its exchange-side SL/TP.` +
       (r.status && r.status.autoArm ? ' Server auto-arm is on, so it will start itself again after the next server restart.' : ''), 'ok');
   } else {
-    setMsg(r.message || 'Stop failed.', 'error');
+    setMsg(failText(r, 'Stop failed.'), 'error');
   }
 }
 
@@ -264,12 +306,14 @@ async function onToggle(){
   const want = $('swToggle').checked;
   busy = true; msg = { text: '', kind: '', key: '', src: '' }; render();
   try{
-    if(want) await turnOn(); else await turnOff();
+    if(!want) await turnOff();
+    else if(fu().liveTradeMode === 'manual') turnOnTab();
+    else await turnOnServer();
   }catch(err){
     setMsg(err.message === 'No verification proxy configured.' ? err.message : `Can't reach the server: ${err.message}`, 'error');
   }finally{
     busy = false;
-    render(); // re-syncs the switch to what the server really reports (a refused "on" flips back to off)
+    render(); // re-syncs the switch to what is really armed (a refused "on" flips back to off)
   }
 }
 
@@ -277,12 +321,12 @@ export function initServerWorker(){
   const host = $('fuServerWorker');
   if(!host) return; // not the Autotrade & Futures page
   host.innerHTML = `
-    <div style="margin-top:14px;">
-      <label class="toggle-check" style="font-size:13px;align-items:center;">
+    <div>
+      <label class="toggle-check" style="font-size:13px;align-items:center;" title="Arm: sign and send real orders instead of simulating. Auto mode runs on the server 24/7 (the browser can be closed); Manual mode arms this tab.">
         <input id="swToggle" type="checkbox">
         <span>
-          <b>Run on server — 24/7</b>
-          <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">BROWSER CAN BE CLOSED</span><br>
+          <b>Arm — sign &amp; send real orders</b>
+          <span id="swPill" class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);"></span><br>
           <span id="swSub" style="font-size:11.5px;"></span>
         </span>
       </label>
