@@ -11,7 +11,7 @@
 // is guarded on the element actually existing before touching it.
 // =============================================================
 import { els, state } from './state.js';
-import { switchSubTab } from './ui.js';
+import { initSubTabRouting } from './ui.js';
 import { runScan, startLiveScan, stopLiveScan } from './triangular.js';
 import { runXScan } from './cross-exchange.js';
 import { initAutotrade } from './autotrade.js';
@@ -44,9 +44,10 @@ if(els.scanBtn) els.scanBtn.addEventListener('click', runScan);
 if(els.xScanBtn) els.xScanBtn.addEventListener('click', runXScan);
 
 // ---- Autotrade & Futures page ----
-// tabAutoBtn/tabFuturesBtn are the sub-tab switch within this one page.
-if(els.tabAutoBtn) els.tabAutoBtn.addEventListener('click', () => switchSubTab('auto'));
-if(els.tabFuturesBtn) els.tabFuturesBtn.addEventListener('click', () => switchSubTab('futures'));
+// tabAutoBtn/tabFuturesBtn are the sub-tab switch within this one page. The
+// selected sub-tab is kept in the URL hash (#autotrade-balances /
+// #ai-futures-engine) — see initSubTabRouting in ui.js.
+initSubTabRouting();
 
 // ---- Init calls: each one is a no-op (or close to it) on a page that
 // doesn't have its elements, since every render function it calls now

@@ -178,7 +178,8 @@
 .tb-modal-head{ display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px; }
 .tb-modal-close{
   background:transparent; border:1px solid var(--line); color:var(--dim); border-radius:var(--r-sm);
-  width:28px; height:28px; cursor:pointer; font-size:13px; line-height:1;
+  width:28px; height:28px; cursor:pointer; font-size:14px; line-height:1;
+  display:inline-flex; align-items:center; justify-content:center; padding:0;
 }
 .tb-modal-close:hover{ color:var(--ink); border-color:var(--dim2); }
 .tb-tabs{ display:flex; gap:20px; border-bottom:1px solid var(--line-soft); margin:16px 0 16px; }
@@ -221,3 +222,7 @@
 .fu-live-actions #fuServerWorker{ flex:1 1 380px; min-width:0; }
 .fu-live-actions .live-toggle{ flex:0 0 auto; min-height:var(--touch-target); }
 .fu-live-actions .live-toggle:disabled{ opacity:.5; cursor:not-allowed; }
+
+/* Check / cross icons in the approve-reject explanation (see explanationHtml in futures-ui.js). */
+#panelFutures .fu-explain .ex-ok{ color:var(--green); }
+#panelFutures .fu-explain .ex-no{ color:var(--red); }

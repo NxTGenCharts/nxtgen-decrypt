@@ -6,6 +6,7 @@
 import { els, state } from './state.js';
 import { EXCHANGES, loadBitgetCoinInfo, tradeUrl } from './exchanges.js';
 import { coinIconHtml, fmtPct, fmtPrice, resultsLimitFrom } from './utils.js';
+import { icon } from './icons.js';
 import { setStatus, showXMessage, updateExchangeBadge, renderOverview } from './ui.js';
 
 // Ticker symbols reused by unrelated projects on different exchanges — the
@@ -178,7 +179,7 @@ function renderCross(opps, amount, feePct){
     const buyLink = tradeUrl(o.buyEntry.exchange, o.base, o.quote);
     const sellLink = tradeUrl(o.sellEntry.exchange, o.base, o.quote);
     const linkIcon = (url, exLabel, side) => url
-      ? `<a class="xlink" href="${url}" target="_blank" rel="noopener noreferrer" title="Open ${exLabel} spot ${side} for ${label}">↗</a>`
+      ? `<a class="xlink" href="${url}" target="_blank" rel="noopener noreferrer" title="Open ${exLabel} spot ${side} for ${label}">${icon('arrow-up-right')}</a>`
       : '';
 
     const cost = costBreakdown(o, amount, feePct);
@@ -329,7 +330,7 @@ function initXFilters(){
     const open = els.xFiltersPanel.hasAttribute('hidden') ? true : false;
     if(open){ els.xFiltersPanel.removeAttribute('hidden'); } else { els.xFiltersPanel.setAttribute('hidden',''); }
     els.xFiltersToggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    els.xFiltersToggleBtn.textContent = open ? 'Advanced Filters ▴' : 'Advanced Filters ▾';
+    // the chevron in the button flips via CSS on [aria-expanded]
   });
   const changeControls = [els.xFilterLiquidity, els.xFilterWindow, els.xFilterQuote, els.xFilterDwVerified, els.xFilterExBitget, els.xFilterExBinance, els.xFilterExBybit, els.xFilterExMexc, els.xFilterExGateio];
   changeControls.forEach(el => { if(el) el.addEventListener('change', applyAdvancedFiltersAndRender); });

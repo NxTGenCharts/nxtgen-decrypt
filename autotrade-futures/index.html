@@ -56,17 +56,17 @@
   </header>
 
   <nav class="term-nav" id="termNav">
-    <a class="navtab" href="/"><span class="ic">&#9635;</span>Overview</a>
-    <a class="navtab" href="/triangular-arbitrage/"><span class="ic">&#9651;</span>Triangular Arbitrage</a>
-    <a class="navtab" href="/cross-arbitrage/"><span class="ic">&#8645;</span>Cross-Exchange</a>
-    <a class="navtab active" href="/autotrade-futures/" aria-current="page"><span class="ic">&#9889;</span>Autotrade &amp; Futures</a>
-    <a class="navtab" href="/api-keys/"><span class="ic">&#128273;</span>API Keys</a>
+    <a class="navtab" href="/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-layout-dashboard"/></svg></span>Overview</a>
+    <a class="navtab" href="/triangular-arbitrage/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-triangle-nodes"/></svg></span>Triangular Arbitrage</a>
+    <a class="navtab" href="/cross-arbitrage/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-arrow-left-right"/></svg></span>Cross-Exchange</a>
+    <a class="navtab active" href="/autotrade-futures/" aria-current="page"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-zap"/></svg></span>Autotrade &amp; Futures</a>
+    <a class="navtab" href="/api-keys/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-key"/></svg></span>API Keys</a>
   </nav>
 
 <div class="panel active" id="panelTrading">
     <nav class="term-subnav" role="tablist" aria-label="Autotrade and Futures sub-tabs">
-      <button class="navtab subnavtab active" id="tabAutoBtn" role="tab" aria-selected="true"><span class="ic">&#9889;</span>Autotrade &amp; Balances</button>
-      <button class="navtab subnavtab" id="tabFuturesBtn" role="tab" aria-selected="false"><span class="ic">&#9670;</span>AI Futures Engine</button>
+      <a class="navtab subnavtab active" id="tabAutoBtn" href="#autotrade-balances" role="tab" aria-selected="true"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-zap"/></svg></span>Autotrade &amp; Balances</a>
+      <a class="navtab subnavtab" id="tabFuturesBtn" href="#ai-futures-engine" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-cpu"/></svg></span>AI Futures Engine</a>
     </nav>
 
   <!-- ============ AUTOTRADE & BALANCES ============ -->
@@ -582,6 +582,23 @@
   </div>
 </div>
 
+<script>
+/* Show the tab named in the URL before app.js has finished loading, so reloading
+   on #ai-futures-engine never flashes the Balances tab first. The real routing
+   lives in js/ui.js (initSubTabRouting) - keep these slugs in sync with it. */
+(function(){
+  var h = (location.hash || '').replace(/^#/, '').toLowerCase();
+  if(h !== 'ai-futures-engine' && h !== 'futures' && h !== 'bots') return;
+  var $ = function(id){ return document.getElementById(id); };
+  var flip = function(btnId, panelId, on){
+    var b = $(btnId), p = $(panelId);
+    if(b){ b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); }
+    if(p){ p.classList.toggle('active', on); }
+  };
+  flip('tabAutoBtn', 'panelAuto', false);
+  flip('tabFuturesBtn', 'panelFutures', true);
+})();
+</script>
 <script type="module" src="/js/app.js"></script>
 
 <script type="module" src="/js/mobile-shell.js"></script>

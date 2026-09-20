@@ -286,7 +286,9 @@ export function detectQuantFutures(snap, baseRegime, qcfg, ctx){
 export function buildQuantExplanation(row){
   const m = row.quantMeta;
   if(!m) return null;
-  const chk = (ok, t) => `${ok ? '✓' : '✗'} ${t}`;
+  // '[+] ' / '[-] ' line prefixes are turned into check / cross icons by
+  // explanationHtml() in futures-ui.js (plain text stays readable anywhere else).
+  const chk = (ok, t) => `${ok ? '[+]' : '[-]'} ${t}`;
   const s = row.direction === 'LONG' ? 1 : -1;
   const lines = [];
   lines.push(`${row.symbol} — ${row.direction}`);
@@ -297,7 +299,7 @@ export function buildQuantExplanation(row){
   lines.push('');
   lines.push('Reasons:');
   for(const c of m.confirmations) lines.push(chk(c.ok, c.text));
-  for(const r of row.reasons.slice(1)) lines.push(`✓ ${r}`);
+  for(const r of row.reasons.slice(1)) lines.push(`[+] ${r}`);
   lines.push(chk(true, `Risk/Reward = 1:${m.rewardRisk.toFixed(2)} (net of estimated costs 1:${m.netRR.toFixed(2)})`));
   lines.push('');
   lines.push('Score breakdown (weight × factor):');

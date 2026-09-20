@@ -7,6 +7,7 @@
 import { els, state } from './state.js';
 import { EXCHANGES, filterTriPairs } from './exchanges.js';
 import { coinIconHtml, fmtPct, resultsLimitFrom } from './utils.js';
+import { icon } from './icons.js';
 import { setStatus, showMessage, updateExchangeBadge, renderOverview } from './ui.js';
 
 export function buildGraph(pairs, useLastPriceNoSpread){
@@ -182,7 +183,7 @@ function render(cycles){
       <div class="result">
         <div class="${profitClass}">${fmtPct(c.profitPct)}</div>
         <div class="yield">100 ${A} → ${(100*c.mult).toFixed(4)} ${A}</div>
-        <div class="expand-hint">Execution path <span class="chev">&#9662;</span></div>
+        <div class="expand-hint">Execution path <span class="chev">${icon('chevron-down')}</span></div>
       </div>
       ${stepsPanel}
     </div>`;

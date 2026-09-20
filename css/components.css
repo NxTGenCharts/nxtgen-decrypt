@@ -120,7 +120,8 @@ details.ov-block > summary.ov-block-title{
 }
 details.ov-block > summary.ov-block-title::-webkit-details-marker{ display:none; }
 details.ov-block > summary.ov-block-title::before{
-  content:'▸'; display:inline-block; color:var(--amber); font-size:11px;
+  content:''; display:inline-block; width:12px; height:12px; background-color:var(--amber);
+  -webkit-mask:var(--mask-chevron-right) center/contain no-repeat; mask:var(--mask-chevron-right) center/contain no-repeat;
   transition:transform .15s ease; transform:rotate(0deg);
 }
 details.ov-block[open] > summary.ov-block-title::before{ transform:rotate(90deg); }
@@ -135,11 +136,20 @@ details.ov-block[open] > summary.ov-block-title{ margin-bottom:8px; }
 
 /* -------------------- 9 & 11. Triangular scanner / opportunity cards -------------------- */
 .msg{ padding:13px 16px; border-radius:var(--r-md); font-size:12.5px; margin-bottom:16px; border:1px solid; line-height:1.6; position:relative; padding-left:34px; }
-.msg::before{ position:absolute; left:14px; top:12px; font-size:12px; }
+.msg::before{
+  content:''; position:absolute; left:14px; top:13px; width:14px; height:14px; background-color:currentColor;
+  -webkit-mask:var(--mask-info) center/contain no-repeat; mask:var(--mask-info) center/contain no-repeat;
+}
+/* A message can carry its own, more specific icon (see showAtMessage in autotrade.js) —
+   it takes the place of the generic one instead of sitting next to it. */
+.msg.msg--icon::before{ display:none; }
+.msg .msg-ic{ position:absolute; left:14px; top:13px; width:14px; height:14px; }
+.msg .icon-circle-check{ color:var(--green); }
+.msg .icon{ vertical-align:-.16em; }
 .msg.info{ background:#101a15; border-color:#233428; color:var(--dim); }
-.msg.info::before{ content:'\24D8'; color:#6f97c9; }
+.msg.info::before{ color:#6f97c9; }
 .msg.error{ background:#1c1010; border-color:var(--red-line); color:var(--red); }
-.msg.error::before{ content:'\26A0'; }
+.msg.error::before{ -webkit-mask-image:var(--mask-alert); mask-image:var(--mask-alert); }
 
 .grid{ display:flex; flex-direction:column; gap:10px; }
 .row{
@@ -177,6 +187,7 @@ details.ov-block[open] > summary.ov-block-title{ margin-bottom:8px; }
 .yield{ font-size:11px; color:var(--dim); margin-top:2px; }
 .expand-hint{ font-size:9.5px; color:var(--dim2); margin-top:6px; text-transform:uppercase; letter-spacing:.06em; }
 .expand-hint .chev{ display:inline-block; transition:transform .15s; margin-left:3px; }
+.expand-hint .chev .icon{ width:12px; height:12px; vertical-align:-3px; }
 .row.row--open .expand-hint .chev{ transform:rotate(180deg); }
 .exch{ font-size:9.5px; text-transform:uppercase; letter-spacing:.07em; padding:2px 8px; border-radius:10px; border:1px solid var(--line); color:var(--dim); margin-left:8px; white-space:nowrap; }
 .exch.bitget{ border-color:#2f5b46; color:#8fd6ab; }
@@ -204,7 +215,10 @@ details.ov-block[open] > summary.ov-block-title{ margin-bottom:8px; }
   background:#101a1e; border:1px solid #1f3a42; color:#8fc9dc; border-radius:var(--r-md);
   padding:14px 16px 14px 34px; font-size:12px; line-height:1.6; margin-bottom:18px; position:relative;
 }
-.warn-banner::before{ content:'\26A0'; position:absolute; left:13px; top:14px; }
+.warn-banner::before{
+  content:''; position:absolute; left:13px; top:14px; width:14px; height:14px; background-color:currentColor;
+  -webkit-mask:var(--mask-alert) center/contain no-repeat; mask:var(--mask-alert) center/contain no-repeat;
+}
 .warn-banner b{ color:#bfe6f2; }
 
 /* -------------------- 10 & 12. Cross-exchange scanner / tables -------------------- */
@@ -250,7 +264,7 @@ details.ov-block[open] > summary.ov-block-title{ margin-bottom:8px; }
 /* ---- Link-out icon — opens that exchange's own spot trade page for the pair. ---- */
 .xlink{
   display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px;
-  border-radius:4px; font-size:10px; color:var(--dim); border:1px solid var(--line); margin-left:4px;
+  border-radius:4px; font-size:11px; color:var(--dim); border:1px solid var(--line); margin-left:4px;
   text-decoration:none; vertical-align:middle;
 }
 .xlink:hover{ color:var(--amber); border-color:var(--amber-dim); background:rgba(240,180,41,.08); }
@@ -387,3 +401,7 @@ footer b{ color:#a9bfae; }
 .ov-value[data-sign="neg"]{ color:var(--red) !important; }
 .ov-value[data-sign="zero"]{ color:var(--ink-dim) !important; }
 .cycle-log-time{ color:var(--dim2); font-size:11px; text-align:right; }
+
+/* ---- Advanced Filters toggle: chevron flips when the panel is open ---- */
+#xFiltersToggleBtn .btn-chev{ margin-left:4px; transition:transform .15s ease; }
+#xFiltersToggleBtn[aria-expanded="true"] .btn-chev{ transform:rotate(180deg); }

@@ -20,6 +20,7 @@
 // =============================================================
 import { els, state } from './state.js';
 import { fmtPct } from './utils.js';
+import { icon } from './icons.js';
 import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS, scanSymbolsWithQuant } from './futures/engine.js';
 import { QUANT_ID, QUANT_TYPE } from './futures/quant/config.js';
 import { qlog } from './futures/quant/log.js';
@@ -726,7 +727,7 @@ function renderScanner(rows){
   els.fuScannerRows.querySelectorAll('.fu-row').forEach(el => {
     el.addEventListener('click', () => {
       const row = rows[Number(el.dataset.idx)];
-      if(els.fuExplain) els.fuExplain.textContent = row.explanation || 'No qualifying setup — nothing to explain.';
+      if(els.fuExplain) els.fuExplain.innerHTML = explanationHtml(row.explanation || 'No qualifying setup — nothing to explain.');
     });
   });
 }
@@ -1510,7 +1511,7 @@ function renderStrategyRows(){
   const best = bestSignificantStrategy();
   if(els.fuStrategiesBest){
     els.fuStrategiesBest.innerHTML = best
-      ? `🏆 Best so far (Paper, ${best.stats.trades} trades): <b>${best.strategy.label}</b> — ${best.stats.winRatePct.toFixed(0)}% win rate, ${fmtUsd(best.stats.netUsd)} net${best.stats.profitFactor != null && isFinite(best.stats.profitFactor) ? `, ${best.stats.profitFactor.toFixed(2)} profit factor` : ''}`
+      ? `${icon('trophy')} Best so far (Paper, ${best.stats.trades} trades): <b>${best.strategy.label}</b> — ${best.stats.winRatePct.toFixed(0)}% win rate, ${fmtUsd(best.stats.netUsd)} net${best.stats.profitFactor != null && isFinite(best.stats.profitFactor) ? `, ${best.stats.profitFactor.toFixed(2)} profit factor` : ''}`
       : `No strategy has reached ${MIN_SIGNIFICANT_TRADES} paper trades yet — run Paper mode to build a real sample before trusting any win-rate comparison.`;
   }
   const renderStratRow = (s) => {
@@ -1519,9 +1520,9 @@ function renderStrategyRows(){
     if(stats.trades === 0){
       statsLine = `<span style="color:var(--dim);">No paper trades yet — enable this strategy in Paper mode to start building a sample</span>`;
     } else if(!stats.isSignificant){
-      statsLine = `<span style="color:var(--amber);">⏳ ${stats.trades}/${MIN_SIGNIFICANT_TRADES} paper trades — not yet enough for a reliable win rate</span> · so far: ${stats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(stats.netUsd)} net (Paper simulation)`;
+      statsLine = `<span style="color:var(--amber);">${icon('hourglass')} ${stats.trades}/${MIN_SIGNIFICANT_TRADES} paper trades — not yet enough for a reliable win rate</span> · so far: ${stats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(stats.netUsd)} net (Paper simulation)`;
     } else {
-      statsLine = `<span style="color:var(--green);">✓ ${stats.trades} paper trades</span> · ${stats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(stats.netUsd)} net${stats.profitFactor != null && isFinite(stats.profitFactor) ? ` · ${stats.profitFactor.toFixed(2)} profit factor` : ''} — Paper simulation, this browser`;
+      statsLine = `<span style="color:var(--green);">${icon('check')} ${stats.trades} paper trades</span> · ${stats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(stats.netUsd)} net${stats.profitFactor != null && isFinite(stats.profitFactor) ? ` · ${stats.profitFactor.toFixed(2)} profit factor` : ''} — Paper simulation, this browser`;
     }
     const enabled = f.strategies[s.id] ?? s.defaultEnabled;
     if(enabled) enabledCount++;
@@ -1570,9 +1571,9 @@ function renderStrategyRows(){
   if(gridStats.trades === 0){
     gridStatsLine = `<span style="color:var(--dim);">No paper trades yet — enable it here to start building a sample</span>`;
   } else if(!gridStats.isSignificant){
-    gridStatsLine = `<span style="color:var(--amber);">⏳ ${gridStats.trades}/${MIN_SIGNIFICANT_TRADES} paper trades — not yet enough for a reliable win rate</span> · so far: ${gridStats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(gridStats.netUsd)} net (Paper simulation)`;
+    gridStatsLine = `<span style="color:var(--amber);">${icon('hourglass')} ${gridStats.trades}/${MIN_SIGNIFICANT_TRADES} paper trades — not yet enough for a reliable win rate</span> · so far: ${gridStats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(gridStats.netUsd)} net (Paper simulation)`;
   } else {
-    gridStatsLine = `<span style="color:var(--green);">✓ ${gridStats.trades} paper trades</span> · ${gridStats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(gridStats.netUsd)} net${gridStats.profitFactor != null && isFinite(gridStats.profitFactor) ? ` · ${gridStats.profitFactor.toFixed(2)} profit factor` : ''} — Paper simulation, this browser`;
+    gridStatsLine = `<span style="color:var(--green);">${icon('check')} ${gridStats.trades} paper trades</span> · ${gridStats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(gridStats.netUsd)} net${gridStats.profitFactor != null && isFinite(gridStats.profitFactor) ? ` · ${gridStats.profitFactor.toFixed(2)} profit factor` : ''} — Paper simulation, this browser`;
   }
   const gridRowHtml = `
     <div class="ov-block" style="margin-bottom:10px;padding:12px;border-color:${gridEnabled ? 'var(--line)' : 'var(--line-dim, var(--line))'};opacity:${gridEnabled ? '1' : '.6'};">
@@ -1584,7 +1585,7 @@ function renderStrategyRows(){
           </label>
           <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;">${GRID_STRATEGY.description}</div>
         </div>
-        <div style="min-width:150px;font-size:11px;color:var(--dim);text-align:right;">Levels, leverage, exchange, and Live/Demo controls are configured below ↓</div>
+        <div style="min-width:150px;font-size:11px;color:var(--dim);text-align:right;">Levels, leverage, exchange, and Live/Demo controls are configured below ${icon('arrow-down')}</div>
       </div>
       <div style="font-size:11px;margin-top:8px;">${gridStatsLine}</div>
     </div>
@@ -2051,16 +2052,28 @@ function renderLiveHistory(){
   `).join('');
 }
 
+// The "why was this approved/rejected" text is plain text from the engine; lines
+// it prefixes with '[+] ' / '[-] ' (checklist items) are shown with check / cross
+// icons. Everything else is HTML-escaped as-is (the block keeps white-space:pre-wrap).
+function explanationHtml(text){
+  const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(text).split('\n').map(line => {
+    if(line.startsWith('[+] ')) return icon('check', 'ex-ok') + ' ' + esc(line.slice(4));
+    if(line.startsWith('[-] ')) return icon('x', 'ex-no') + ' ' + esc(line.slice(4));
+    return esc(line);
+  }).join('\n');
+}
+
 // Small inline badge shown next to the symbol in every live trade row —
-// 🤖 for a position this app itself placed the entry order for
-// (source:'bot'), ⚠️ for one it only found and adopted (source:'unknown' —
+// a bot icon for a position this app itself placed the entry order for
+// (source:'bot'), a warning icon for one it only found and adopted (source:'unknown' —
 // see placeLiveEntryOrder's rejection-adoption branch and the broad
 // reconciliation block in runLiveCycleInner) so it's visually obvious
 // which rows this app is fully responsible for managing (its own TP/SL)
 // versus ones it's only watching.
 function tradeSourceBadge(t){
-  if(t.source === 'bot') return ' <span title="Placed by this bot" style="opacity:.7;">🤖</span>';
-  if(t.source === 'unknown') return ' <span title="Adopted — not placed by this bot" style="opacity:.7;">⚠️</span>';
+  if(t.source === 'bot') return ' <span title="Placed by this bot" style="opacity:.7;">' + icon('bot') + '</span>';
+  if(t.source === 'unknown') return ' <span title="Adopted — not placed by this bot" style="opacity:.7;">' + icon('triangle-alert') + '</span>';
   return '';
 }
 
@@ -2635,7 +2648,7 @@ function renderTradingBotsDailyLimits(){
         </label>
         <div style="font-size:12px;">Today: <strong style="color:${dayPct >= 0 ? 'var(--green)' : 'var(--red)'};">${dayPct >= 0 ? '+' : ''}${dayPct.toFixed(2)}%</strong> (${fmtUsd(f.tbDayRealizedUsd)} realized)</div>
       </div>
-      ${f.tbDailyHalted ? `<div style="margin-top:8px;font-size:12px;color:var(--red);border:1px solid var(--red);border-radius:6px;padding:6px 10px;">⏸ PAUSED for today: ${f.tbDailyHaltMessage || 'daily limit reached'} — resumes automatically at the next UTC day rollover.</div>` : ''}
+      ${f.tbDailyHalted ? `<div style="margin-top:8px;font-size:12px;color:var(--red);border:1px solid var(--red);border-radius:6px;padding:6px 10px;">${icon('pause')} PAUSED for today: ${f.tbDailyHaltMessage || 'daily limit reached'} — resumes automatically at the next UTC day rollover.</div>` : ''}
     </div>
   `;
   const formBlock = document.getElementById('tbCreateFormBlock');
@@ -3731,7 +3744,7 @@ function renderTradingBotsList(){
       <div class="tb-card">
         <div class="tb-card-head">
           <div class="tb-card-id">
-            <div class="tb-icon">${bot.type === 'grid' ? '▤' : '↻'}</div>
+            <div class="tb-icon">${icon(bot.type === 'grid' ? 'rows' : 'refresh-cw')}</div>
             <div>
               <div class="tb-card-title">
                 <strong>${bot.symbol}</strong>
@@ -3868,7 +3881,7 @@ function renderTradingBotDetailsModal(){
       <div class="tb-modal">
         <div class="tb-modal-head">
           <div class="tb-card-id">
-            <div class="tb-icon">${isGrid ? '▤' : '↻'}</div>
+            <div class="tb-icon">${icon(isGrid ? 'rows' : 'refresh-cw')}</div>
             <div>
               <div class="tb-card-title">
                 <strong>${bot.symbol}</strong>
@@ -3884,7 +3897,7 @@ function renderTradingBotDetailsModal(){
           </div>
           <div class="tb-card-actions">
             ${bot.status === 'active' ? `<button type="button" class="primary ghost tb-stop-btn" data-id="${bot.id}">Terminate</button>` : `<button type="button" class="primary ghost tb-delete-btn" data-id="${bot.id}">Delete</button>`}
-            <button type="button" class="tb-modal-close" title="Close">✕</button>
+            <button type="button" class="tb-modal-close" title="Close" aria-label="Close">${icon('x')}</button>
           </div>
         </div>
         <div class="tb-tabs">

@@ -33,6 +33,7 @@ import { els, state, DEFAULT_VERIFY_PROXY_URL } from './state.js';
 import { EXCHANGES, filterTriPairs } from './exchanges.js';
 import { buildGraph, findCycles } from './triangular.js';
 import { fmtPct, coinIconHtml } from './utils.js';
+import { icon } from './icons.js';
 
 const LS_KEY = 'nxtgen_autotrade_v1';
 // Absolute sanity floor, NOT the user-facing minimum — this only guards
@@ -318,9 +319,13 @@ function restore(){
   }catch(e){ /* ignore corrupt/blocked storage — safe defaults from state.js are already in place */ }
 }
 
-function showAtMessage(html, type){
+// iconName (optional) swaps the banner's generic info/alert icon for a more
+// specific one from assets/icons.svg — e.g. a green check for a completed trade.
+function showAtMessage(html, type, iconName){
   if(!els.atMessages) return;
-  els.atMessages.innerHTML = html ? `<div class="msg ${type||'info'}">${html}</div>` : '';
+  els.atMessages.innerHTML = html
+    ? `<div class="msg ${type||'info'}${iconName ? ' msg--icon' : ''}">${iconName ? icon(iconName, 'msg-ic') : ''}${html}</div>`
+    : '';
 }
 
 // ---------------- Connect Exchanges ----------------
@@ -1002,7 +1007,7 @@ async function executeCycleReal(cycle, dailyTarget, forcedTest){
     return;
   }
   if(forcedTest){
-    showAtMessage(`⚠ FORCED REAL TEST — placing real ${EXCHANGES[key].label} demo orders for a cycle at ${fmtPct(cycle.profitPct)}, ignoring the profit floor on purpose, to verify the execution pipeline. This is a real demo trade, expected to likely lose a small amount.`, 'error');
+    showAtMessage(`FORCED REAL TEST — placing real ${EXCHANGES[key].label} demo orders for a cycle at ${fmtPct(cycle.profitPct)}, ignoring the profit floor on purpose, to verify the execution pipeline. This is a real demo trade, expected to likely lose a small amount.`, 'error', 'triangle-alert');
   }
 
   const spendPct = Math.min(100, Math.max(1, parseFloat(els.atSpendPct.value) || 99));
@@ -1062,10 +1067,10 @@ async function executeCycleReal(cycle, dailyTarget, forcedTest){
       time: new Date().toLocaleTimeString(), real: true, forcedTest: !!forcedTest,
       orders: legResults.map(r => ({ symbol: r.leg.symbol, side: r.leg.side, orderId: r.result.orderId, filledBaseQty: r.result.filledBaseQty, filledQuoteQty: r.result.filledQuoteQty, avgPrice: r.result.avgPrice })),
     });
-    showAtMessage(`✅ REAL${forcedTest ? ' (forced test)' : ''} cycle executed on ${EXCHANGES[key].label} (${mode}): ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(profitPct)} (${money(profitAmt)}). Refreshing balance…`, 'info');
+    showAtMessage(`REAL${forcedTest ? ' (forced test)' : ''} cycle executed on ${EXCHANGES[key].label} (${mode}): ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(profitPct)} (${money(profitAmt)}). Refreshing balance…`, 'info', 'circle-check');
   } else if(failedAtLeg === 0){
     // Leg 1 never executed — nothing was spent, nothing to unwind.
-    showAtMessage(`⛔ REAL execution stopped before leg 1 on ${EXCHANGES[key].label} (${mode}): ${failMessage}. No funds were moved.`, 'error');
+    showAtMessage(`REAL execution stopped before leg 1 on ${EXCHANGES[key].label} (${mode}): ${failMessage}. No funds were moved.`, 'error', 'ban');
   } else {
     // A later leg failed. Walk BACKWARD through every leg that DID
     // execute, reversing each one in turn — failing on leg 3 of a
@@ -1073,7 +1078,7 @@ async function executeCycleReal(cycle, dailyTarget, forcedTest){
     // anchor (C→B, then B→A), not one; a single reversal would silently
     // strand you on B. Stop and alert immediately if a reversal itself
     // fails, rather than guessing at a further route.
-    showAtMessage(`⚠ REAL execution failed at leg ${failedAtLeg + 1} on ${EXCHANGES[key].label} (${mode}): ${failMessage}. Holding ${heldCurrency} — attempting to unwind back to ${cycle.path[0]}…`, 'error');
+    showAtMessage(`REAL execution failed at leg ${failedAtLeg + 1} on ${EXCHANGES[key].label} (${mode}): ${failMessage}. Holding ${heldCurrency} — attempting to unwind back to ${cycle.path[0]}…`, 'error', 'triangle-alert');
     const unwindOrders = [];
     let unwindOk = true;
     for(let i = failedAtLeg - 1; i >= 0; i--){
@@ -1094,7 +1099,7 @@ async function executeCycleReal(cycle, dailyTarget, forcedTest){
         heldCurrency = cycle.path[i]; // reversing leg i always lands back on the currency that leg started from
       }catch(unwindErr){
         unwindOk = false;
-        showAtMessage(`🛑 UNWIND FAILED partway through, on ${EXCHANGES[key].label} (${mode}): ${unwindErr.message}. You are currently holding ${heldCurrency} on this account, NOT back at ${cycle.path[0]} — check the exchange directly and resolve this manually before doing anything else.`, 'error');
+        showAtMessage(`UNWIND FAILED partway through, on ${EXCHANGES[key].label} (${mode}): ${unwindErr.message}. You are currently holding ${heldCurrency} on this account, NOT back at ${cycle.path[0]} — check the exchange directly and resolve this manually before doing anything else.`, 'error', 'octagon-x');
         stopAutotrade();
         break;
       }
@@ -1111,7 +1116,7 @@ async function executeCycleReal(cycle, dailyTarget, forcedTest){
         time: new Date().toLocaleTimeString(), real: true, unwound: true,
         orders: [...legResults.map(r => ({ symbol: r.leg.symbol, side: r.leg.side, orderId: r.result.orderId })), ...unwindOrders],
       });
-      showAtMessage(`↩ Unwound successfully back to ${cycle.path[0]} on ${EXCHANGES[key].label} (${mode}) after the leg ${failedAtLeg + 1} failure — net ${fmtPct(profitPct)} (${money(profitAmt)}) on this attempt. This was a real loss-limiting trade, not a profitable cycle.`, 'error');
+      showAtMessage(`Unwound successfully back to ${cycle.path[0]} on ${EXCHANGES[key].label} (${mode}) after the leg ${failedAtLeg + 1} failure — net ${fmtPct(profitPct)} (${money(profitAmt)}) on this attempt. This was a real loss-limiting trade, not a profitable cycle.`, 'error', 'undo');
     }
   }
 
@@ -1128,7 +1133,7 @@ async function executeCycleReal(cycle, dailyTarget, forcedTest){
     if(at.dayProfitPct >= dailyTarget){
       at.targetReached = true;
       stopAutotrade();
-      showAtMessage(`🎯 Daily target of ${dailyTarget}% reached — Autotrade stopped for the day. Started at ${money(at.startingBalance)}, now at ${money(at.currentBalance)} (${fmtPct(at.dayProfitPct)}).`, 'info');
+      showAtMessage(`Daily target of ${dailyTarget}% reached — Autotrade stopped for the day. Started at ${money(at.startingBalance)}, now at ${money(at.currentBalance)} (${fmtPct(at.dayProfitPct)}).`, 'info', 'target');
     }
   }
 }
@@ -1164,9 +1169,9 @@ function executeCycle(cycle, dailyTarget, testMode){
   if(!testMode && at.dayProfitPct >= dailyTarget){
     at.targetReached = true;
     stopAutotrade();
-    showAtMessage(`🎯 Daily target of ${dailyTarget}% reached after ${at.cycles.length} cycle${at.cycles.length===1?'':'s'} — Autotrade stopped for the day. Started at ${money(at.startingBalance)}, ended at ${money(at.currentBalance)} (+${fmtPct(at.dayProfitPct)}). See the cycle summary below.`, 'info');
+    showAtMessage(`Daily target of ${dailyTarget}% reached after ${at.cycles.length} cycle${at.cycles.length===1?'':'s'} — Autotrade stopped for the day. Started at ${money(at.startingBalance)}, ended at ${money(at.currentBalance)} (+${fmtPct(at.dayProfitPct)}). See the cycle summary below.`, 'info', 'target');
   } else if(testMode){
-    showAtMessage(`⚠ TEST MODE — executed cycle #${at.cycles.length} regardless of profitability: ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(cycle.profitPct)} (${money(profitAmt)}). This trade ignored the profit floor on purpose. Running total: ${fmtPct(at.dayProfitPct)}.`, 'error');
+    showAtMessage(`TEST MODE — executed cycle #${at.cycles.length} regardless of profitability: ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(cycle.profitPct)} (${money(profitAmt)}). This trade ignored the profit floor on purpose. Running total: ${fmtPct(at.dayProfitPct)}.`, 'error', 'triangle-alert');
   } else {
     showAtMessage(`Executed cycle #${at.cycles.length}: ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(cycle.profitPct)} (${money(profitAmt)}). Running total: ${fmtPct(at.dayProfitPct)} of ${dailyTarget}% target.`, 'info');
   }
@@ -1298,7 +1303,7 @@ function startAutotrade(){
 
   const netLabel = mode === 'demo' ? ' (demo)' : '';
   const floorNote = at.testMode
-    ? `⚠ TEST MODE is ON — it will execute the best cycle every scan regardless of profitability, including losses, to exercise the trade/log/balance path. It will NOT stop at the daily target automatically; use Stop Autotrade when you're done testing.`
+    ? `${icon('triangle-alert')} TEST MODE is ON — it will execute the best cycle every scan regardless of profitability, including losses, to exercise the trade/log/balance path. It will NOT stop at the daily target automatically; use Stop Autotrade when you're done testing.`
     : `Will only act on cycles ≥ ${(parseFloat(els.atMinProfit.value) > 0 ? parseFloat(els.atMinProfit.value) : MIN_PROFIT_SANITY_FLOOR).toFixed(2)}%, and stops automatically at +${els.atDailyTarget.value}% for the day.`;
   showAtMessage(`Autotrade started on ${EXCHANGES[key].label}${netLabel} — Triangular only, Spot only. ${floorNote}`, at.testMode ? 'error' : 'info');
   persist();

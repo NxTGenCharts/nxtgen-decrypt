@@ -19,6 +19,7 @@
 //     INSUFFICIENT SAMPLE below 30 trades. Paper / Live / Backtest are shown
 //     separately and never blended.
 // =============================================================
+import { icon } from './icons.js';
 import {
   MIN_SAMPLE_TRADES,
   loadQuantConfig, saveQuantConfig, sanitizeQuantConfig,
@@ -169,5 +170,5 @@ function renderWalkForward(el, wf, startingEquity){
     <table style="width:100%;font-size:11.5px;border-collapse:collapse;"><tr><th style="text-align:left;padding:3px 8px;">Fold</th><th style="text-align:left;padding:3px 8px;">Params chosen on TRAIN only</th><th style="text-align:right;padding:3px 8px;">Train: trades · net</th><th style="text-align:right;padding:3px 8px;">Out-of-sample: trades · net</th></tr>${rows}</table>
     <div style="margin-top:8px;font-size:12px;line-height:1.6;"><b>Out-of-sample only (walk-forward headline):</b> ${wf.oosStats.trades} trades · win rate ${winRateLabel(wf.oosStats)} · PF ${pf(wf.oosStats.profitFactor)} · ${usd(wf.oosStats.netUsd)} net · max DD ${num(wf.oosStats.maxDrawdownPct)}%</div>
     ${st ? `<div style="font-size:12px;line-height:1.6;">Parameter stability: most-chosen set "${st.mostChosen}" in ${st.mostChosenFolds}/${st.folds} folds (${st.distinctChoices} distinct choices) · profitable OOS folds ${st.oosProfitableFolds}/${st.oosFoldsWithTrades} (train-profitable ${st.trainProfitableFolds}/${st.folds})
-      ${st.overfitWarning ? '<div style="color:var(--red);">⚠ Overfit signature: parameters looked good in training but did not hold out-of-sample.</div>' : ''}</div>` : ''}`;
+      ${st.overfitWarning ? `<div style="color:var(--red);">${icon('triangle-alert')} Overfit signature: parameters looked good in training but did not hold out-of-sample.</div>` : ''}</div>` : ''}`;
 }

@@ -96,11 +96,28 @@ export function switchTabAll(which){
 // Sub-tab switch WITHIN the combined Autotrade & Futures panel — same
 // active-class-toggle pattern as switchTabAll above, just scoped to the
 // two sub-panels nested inside panelTrading instead of the top-level nav.
+//
+// The active sub-tab lives in the URL hash so it can be linked to, survives a
+// reload, and works with the browser's Back/Forward buttons:
+//   /autotrade-futures/#autotrade-balances   (also the default with no hash)
+//   /autotrade-futures/#ai-futures-engine
+// The old short links (#auto, #futures, #bots) keep working as aliases.
 const SUBTAB_KEYS = ['auto', 'futures'];
 const SUBTAB_BTN_ELS = { auto: 'tabAutoBtn', futures: 'tabFuturesBtn' };
 const SUBTAB_PANEL_ELS = { auto: 'panelAuto', futures: 'panelFutures' };
+const SUBTAB_SLUGS = { auto: 'autotrade-balances', futures: 'ai-futures-engine' };
+const SUBTAB_ALIASES = {
+  'autotrade-balances': 'auto', 'auto': 'auto',
+  'ai-futures-engine': 'futures', 'futures': 'futures', 'bots': 'futures',
+};
 
-export function switchSubTab(which){
+// Which sub-tab a URL hash points at, or null if it isn't one of ours.
+export function subTabFromHash(hash){
+  const h = String(hash === undefined ? location.hash : hash).replace(/^#/, '').toLowerCase();
+  return SUBTAB_ALIASES[h] || null;
+}
+
+export function switchSubTab(which, opts){
   SUBTAB_KEYS.forEach(key => {
     const btn = els[SUBTAB_BTN_ELS[key]];
     const panel = els[SUBTAB_PANEL_ELS[key]];
@@ -110,4 +127,32 @@ export function switchSubTab(which){
     panel.classList.toggle('active', active);
     btn.setAttribute('aria-selected', active);
   });
+  // Only write to the URL when the person actually clicked a tab, and only if
+  // it doesn't already point here (an alias like #bots is left as it is).
+  if(opts && opts.updateUrl && SUBTAB_SLUGS[which] && subTabFromHash() !== which){
+    history.pushState(null, '', location.pathname + location.search + '#' + SUBTAB_SLUGS[which]);
+  }
+}
+
+export function initSubTabRouting(){
+  if(!els.tabAutoBtn || !els.tabFuturesBtn) return; // other pages don't have the sub-tabs
+  const buttons = { auto: els.tabAutoBtn, futures: els.tabFuturesBtn };
+  Object.keys(buttons).forEach(which => {
+    buttons[which].addEventListener('click', (e) => {
+      // Let ctrl/cmd/shift/middle-click do their normal "open in new tab/window" thing.
+      if(e.button || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault(); // we set the hash ourselves so the page doesn't jump
+      switchSubTab(which, { updateUrl: true });
+    });
+  });
+  // Back/Forward, or someone editing the hash by hand. No hash at all means the
+  // default tab; a hash that isn't ours (e.g. some future in-page anchor) is ignored.
+  const syncFromUrl = () => {
+    const which = subTabFromHash() || (location.hash ? null : 'auto');
+    if(which) switchSubTab(which);
+  };
+  window.addEventListener('hashchange', syncFromUrl);
+  window.addEventListener('popstate', syncFromUrl);
+  const initial = subTabFromHash();
+  if(initial) switchSubTab(initial);
 }
