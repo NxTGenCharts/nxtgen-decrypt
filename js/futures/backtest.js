@@ -390,10 +390,9 @@ export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquit
     }
 
     for(const symbol of testSymbols){
-      // Same permanently-excluded set Paper/Live use (BTC/ETH/SOL/LTC/DOGE/BNB — see engine.js) — except
-      // symbols NxTGen Quant Futures is explicitly configured to trade (evaluateSymbol then restricts them to Quant alone).
-      if(EXCLUDED_FUTURES_SYMBOLS.has(symbol) && !quantOn) continue;
-      if(EXCLUDED_FUTURES_SYMBOLS.has(symbol) && quantOn && !quantSyms.has(symbol)) continue;
+      // Same permanently-excluded set Paper/Live use (BTC/ETH/SOL/LTC/DOGE/BNB/CL — excludedSymbols.js): skipped for
+      // EVERY strategy, Quant included.
+      if(EXCLUDED_FUTURES_SYMBOLS.has(symbol)) continue;
       if(dayState.positions.some(p => p.symbol === symbol)) continue; // already open — evaluateSymbol's own gate would reject this anyway, skip the compute
       const idx = idxBySymbol[symbol].get(nowMs);
       if(idx == null || idx < warmupBarsFor(barIntervalMinutes, quantOn && quantSyms.has(symbol))){ if(idx != null) skippedWarmup++; continue; }

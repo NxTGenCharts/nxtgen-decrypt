@@ -11,7 +11,8 @@
 // =============================================================
 import assert from 'node:assert/strict';
 import { STRATEGY_REGISTRY } from '../js/futures/setups.js';
-import { QUANT_ID, QUANT_TYPE, sanitizeQuantConfig, effectiveMinConfidence, HARD_LIMITS } from '../js/futures/quant/config.js';
+import { QUANT_ID, QUANT_TYPE, QUANT_DEFAULTS, sanitizeQuantConfig, effectiveMinConfidence, HARD_LIMITS, quantSymbolSet } from '../js/futures/quant/config.js';
+import { EXCLUDED_FUTURES_SYMBOLS } from '../js/futures/excludedSymbols.js';
 import { buildFeatures } from '../js/futures/quant/features.js';
 import { classifyQuantRegime } from '../js/futures/quant/regime.js';
 import { SETUP_DETECTORS } from '../js/futures/quant/setups.js';
@@ -20,7 +21,7 @@ import { computeQuantRiskState, effectiveRiskPct, quantSize } from '../js/future
 import { computeQuantStats, winRateLabel } from '../js/futures/quant/stats.js';
 import { monteCarlo, splitInOutOfSample } from '../js/futures/quant/validation.js';
 import { mockMarket } from '../js/futures/mockMarket.js';
-import { runScanCycle, openPosition, managePositions } from '../js/futures/engine.js';
+import { runScanCycle, openPosition, managePositions, evaluateSymbol, scanSymbolsWithQuant } from '../js/futures/engine.js';
 import { runBacktest } from '../js/futures/backtest.js';
 import { setQuantConsole } from '../js/futures/quant/log.js';
 setQuantConsole(false);
@@ -79,9 +80,11 @@ await test('registered as a strategy, off by default, RR options 2/2.5/3/4', () 
 });
 
 await test('config: every field clamped; RR never below 1:2; risk never above 1%; weights sum to 100', () => {
-  const c = sanitizeQuantConfig({ minConfidence: 5, riskPct: 9, rewardRisk: 0.5, maxPositions: 50, weights: { trend: 500, rr: 0 }, symbols: ['btcusdt', 'bad symbol', 'ETHUSDT'] });
+  const c = sanitizeQuantConfig({ minConfidence: 5, riskPct: 9, rewardRisk: 0.5, maxPositions: 50, weights: { trend: 500, rr: 0 }, symbols: ['btcusdt', 'bad symbol', 'ETHUSDT', 'xrpusdt', 'adausdt'] });
   assert.equal(c.minConfidence, 60); assert.equal(c.riskPct, HARD_LIMITS.maxRiskPct); assert.equal(c.rewardRisk, 2); assert.equal(c.maxPositions, 3);
-  assert.deepEqual(c.symbols, ['BTCUSDT', 'ETHUSDT']);
+  assert.deepEqual(c.symbols, ['XRPUSDT', 'ADAUSDT'], 'excluded majors (BTC/ETH/...) are stripped; valid non-excluded pairs stay');
+  assert.deepEqual(sanitizeQuantConfig({ symbols: ['BTCUSDT', 'ETHUSDT'] }).symbols, QUANT_DEFAULTS.symbols, 'only-excluded list falls back to the (non-excluded) defaults');
+  assert.ok(QUANT_DEFAULTS.symbols.every(x => !EXCLUDED_FUTURES_SYMBOLS.has(x)), 'default Quant symbols contain no excluded pair');
   assert.ok(Math.abs(Object.values(c.weights).reduce((a, b) => a + b, 0) - 100) < 1e-9);
   assert.equal(effectiveMinConfidence(sanitizeQuantConfig({ selectivity: 'high' })), 80);
   assert.equal(effectiveMinConfidence(sanitizeQuantConfig({ selectivity: 'veryHigh' })), 85);
@@ -230,7 +233,7 @@ await test('backtest: Quant trades are tagged, aligned to 15m candle closes, and
     for(let i = 0; i < bars; i++){ if(left <= 0){ const x = r(); mode = x < .45 ? 'trend' : x < .8 ? 'range' : 'burst'; dir = r() < .5 ? 1 : -1; left = 80 + Math.floor(r() * 400); } left--;
       let drift = 0, vol = 0.0009, vm = 1; if(mode === 'trend'){ drift = dir * 0.00012; vol = 0.0011; } else if(mode === 'range'){ drift = -(p - start) / start * 0.002; vol = 0.0007; vm = 0.8; } else { drift = dir * 0.0002; vol = 0.0022; vm = 1.8; }
       const o = p, c = o * (1 + drift + (r() - 0.5) * 2 * vol); out.push({ t, o, h: Math.max(o, c) * (1 + 0.0004 * r()), l: Math.min(o, c) * (1 - 0.0004 * r()), c, v: 1000 * vm * (0.6 + 0.8 * r()) }); p = c; t += 300000; } return out; };
-  const syms = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'], cb = {}; syms.forEach((s, i) => cb[s] = makeC(300 + i, [60000, 3000, 150][i], 9000));
+  const syms = ['XRPUSDT', 'ADAUSDT', 'AVAXUSDT'], cb = {}; syms.forEach((s, i) => cb[s] = makeC(300 + i, [0.6, 0.45, 35][i], 9000));
   const cfg = { exchange: 'binance', strategies: { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true }, minConfidence: 70, riskPctPerTrade: 0.5, leverage: 5, minNetProfitPct: 0.3, quant: sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60 }) };
   const res = await runBacktest({ candlesBySymbol: cb, symbols: syms, cfg, startingEquity: 10000, intervalMinutes: 5, maxDailyLossPct: 5, dailyProfitTargetPct: 50 });
   for(const t of res.trades){
@@ -245,6 +248,46 @@ await test('other strategies are untouched when Quant is off: majors are still e
   mockMarket.tick(3);
   const { rows } = runScanCycle({ exchange: 'binance', strategies: { aiScalp: true, novaScalp: true }, minConfidence: 70, riskPctPerTrade: 1, leverage: 5, minNetProfitPct: 0.3 }, ds);
   assert.ok(!rows.some(r => ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'].includes(r.symbol)));
+});
+
+
+await test('EXCLUDED pairs are never traded by Quant: scan list, engine choke point, Paper', () => {
+  // Even a hand-built cfg that bypasses sanitizeQuantConfig and lists every excluded pair must not get them traded.
+  const dirty = { ...sanitizeQuantConfig({}), symbols: [...EXCLUDED_FUTURES_SYMBOLS, 'XRPUSDT'], minConfidence: 60 };
+  assert.deepEqual(Array.from(quantSymbolSet(dirty)), ['XRPUSDT'], 'quantSymbolSet drops excluded pairs');
+  const cfg = { exchange: 'binance', strategies: { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true }, minConfidence: 60, riskPctPerTrade: 1, leverage: 5, minNetProfitPct: 0.3, quant: dirty };
+  const scan = scanSymbolsWithQuant(['ADAUSDT', ...EXCLUDED_FUTURES_SYMBOLS], cfg);
+  for(const x of EXCLUDED_FUTURES_SYMBOLS) assert.ok(!scan.includes(x), `${x} must not be scanned`);
+  assert.ok(scan.includes('XRPUSDT') && scan.includes('ADAUSDT'));
+  // The single choke point every mode goes through: excluded -> REJECTED before any detector runs.
+  const ds = { equity: 10000, startingEquity: 10000, peakEquity: 10000, trades: 0, wins: 0, losses: 0, consecutiveLosses: 0, lastLossAt: null, dailyPnlPct: 0, maxDrawdownPct: 0, realizedGrossUsd: 0, realizedNetUsd: 0, feesUsd: 0, fundingUsd: 0, slippageUsd: 0, openPositions: 0, openRiskPct: 0, positions: [], cooldownUntilBySymbol: {}, quantTrades: [] };
+  mockMarket.tick(3);
+  for(const x of EXCLUDED_FUTURES_SYMBOLS){
+    const snap = mockMarket.snapshot(x);
+    if(!snap) continue;
+    const row = evaluateSymbol(x, snap, { regime: 'Range', label: 'Range' }, cfg, ds, { shocked: false }, mockMarket.now());
+    assert.equal(row.status, 'REJECTED'); assert.ok(row.rejectReasons.join(' ').includes('excluded'), `${x}: ${row.rejectReasons}`);
+  }
+  // Paper: run a long stretch with an "unsanitized" config that names the majors — none may ever open.
+  const hist = [];
+  for(let c = 0; c < 1500; c++){
+    mockMarket.tick(3); managePositions(ds, hist, {});
+    const { rows } = runScanCycle(cfg, ds);
+    assert.ok(!rows.some(r => EXCLUDED_FUTURES_SYMBOLS.has(r.symbol) && r.status === 'APPROVED'), 'an excluded pair was approved');
+    assert.ok(!rows.some(r => EXCLUDED_FUTURES_SYMBOLS.has(r.symbol)), 'an excluded pair was scanned at all');
+    for(const r of rows) if(r.status === 'APPROVED' && !ds.positions.some(p => p.symbol === r.symbol) && ds.openPositions < 3) openPosition(r, ds);
+  }
+  assert.ok(![...ds.positions, ...hist].some(p => EXCLUDED_FUTURES_SYMBOLS.has(p.symbol)), 'no position/trade on an excluded pair');
+});
+
+await test('EXCLUDED pairs are never traded by Quant: Backtest skips them even when candles are supplied and Quant lists them', async () => {
+  const mk = (seed, start) => { const r = rng(seed); const out = []; let p = start, t = 1_700_000_000_000 - (1_700_000_000_000 % 300000);
+    for(let i = 0; i < 6000; i++){ const o = p, c = o * (1 + (r() - 0.5) * 0.004 + Math.sin(i / 200) * 0.0004); out.push({ t, o, h: Math.max(o, c) * 1.0005, l: Math.min(o, c) * 0.9995, c, v: 1000 * (0.6 + r()) }); p = c; t += 300000; } return out; };
+  const symsAll = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'], cb = {}; symsAll.forEach((s, i) => cb[s] = mk(900 + i, [60000, 3000, 150, 590, 0.6][i]));
+  const dirty = { ...sanitizeQuantConfig({}), symbols: symsAll, minConfidence: 60, entryTimeframe: '15m' };
+  const cfg = { exchange: 'binance', strategies: { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true }, minConfidence: 60, riskPctPerTrade: 0.5, leverage: 5, minNetProfitPct: 0.3, quant: dirty };
+  const res = await runBacktest({ candlesBySymbol: cb, symbols: symsAll, cfg, startingEquity: 10000, intervalMinutes: 5, maxDailyLossPct: 5, dailyProfitTargetPct: 50 });
+  assert.ok(!res.trades.some(t => EXCLUDED_FUTURES_SYMBOLS.has(t.symbol)), 'backtest traded an excluded pair');
 });
 
 console.log(`\n${passed} tests passed${process.exitCode ? ' — WITH FAILURES' : ''}`);

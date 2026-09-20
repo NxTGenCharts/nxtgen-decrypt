@@ -17,7 +17,7 @@
 // =============================================================
 import {
   QUANT_ID, QUANT_TYPE, SELECTIVITY, MIN_SAMPLE_TRADES,
-  loadQuantConfig, saveQuantConfig, sanitizeQuantConfig, effectiveMinConfidence,
+  loadQuantConfig, saveQuantConfig, sanitizeQuantConfig, effectiveMinConfidence, excludedSymbolsIn,
 } from './futures/quant/config.js';
 import { computeQuantStats, fromPaperLog, fromLiveLog, fromBacktest, winRateLabel } from './futures/quant/stats.js';
 import { computeQuantRiskState } from './futures/quant/risk.js';
@@ -118,8 +118,9 @@ export function initQuantUI(){
       <span style="font-size:11px;color:var(--dim);">Setups:</span>
       ${checkHtml('qfSetupA', 'A Trend Pullback')}${checkHtml('qfSetupB', 'B Breakout+Retest')}${checkHtml('qfSetupC', 'C Liquidity Sweep')}${checkHtml('qfSetupD', 'D Range Extremes')}
     </div>
+    <div id="qfSymbolsNote" style="font-size:11.5px;color:var(--amber);margin:0 0 6px;"></div>
     <div style="display:flex;flex-wrap:wrap;gap:12px 16px;margin-bottom:6px;">
-      ${fieldHtml('Symbols (comma separated, USDT perps)', inputHtml('qfSymbols', 'text', 'style="min-width:340px;" spellcheck="false"'), 'majors are scanned by Quant even though other strategies exclude them')}
+      ${fieldHtml('Symbols (comma separated, USDT perps)', inputHtml('qfSymbols', 'text', 'style="min-width:340px;" spellcheck="false"'), 'BTC/ETH/SOL/LTC/DOGE/BNB/CL are excluded platform-wide — Quant never trades them either (typed pairs are removed automatically)')}
       ${fieldHtml('Drawdown → risk ×0.7 at (%)', inputHtml('qfDd1', 'number', 'min="1" step="0.5"'))}
       ${fieldHtml('Drawdown → risk ×0.5 at (%)', inputHtml('qfDd2', 'number', 'min="1" step="0.5"'))}
       ${fieldHtml('Drawdown → PAUSE at (%)', inputHtml('qfDdPause', 'number', 'min="1" step="0.5"'))}
@@ -183,6 +184,12 @@ function readInputs(){
     ddTier1Pct: v('qfDd1'), ddTier2Pct: v('qfDd2'), ddPausePct: v('qfDdPause'), pauseResumeHours: v('qfResumeH'),
   };
   updateQuantConfig(patch); // sanitize (clamp) + persist + write the clamped values back into the inputs
+  // Tell the user when pairs they typed were dropped for being on the platform's excluded list.
+  const note = $('qfSymbolsNote');
+  if(note){
+    const removed = excludedSymbolsIn(patch.symbols);
+    note.textContent = removed.length ? `Removed (excluded platform-wide, never traded by any strategy): ${removed.join(', ')}` : '';
+  }
 }
 
 // ---- readouts ----

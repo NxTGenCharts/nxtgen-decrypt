@@ -9,6 +9,8 @@
 // limit past its hard ceiling.
 // =============================================================
 
+import { EXCLUDED_FUTURES_SYMBOLS } from '../excludedSymbols.js';
+
 export const QUANT_ID = 'quantFutures';
 export const QUANT_TYPE = 'NxTGen Quant Futures';
 export const QUANT_CONFIG_KEY = 'nxtgen_quant_futures_config_v1';
@@ -69,7 +71,9 @@ export const QUANT_DEFAULTS = {
   pauseResumeHours: 48,         // auto-resume (at tier-2 risk) this long after a drawdown pause
   allowLong: true,
   allowShort: true,
-  symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'],
+  // Liquid non-excluded alts. The platform's permanently excluded pairs (BTC/ETH/SOL/LTC/DOGE/BNB/CL —
+  // excludedSymbols.js) are NOT traded by Quant either: they are stripped by sanitizeQuantConfig.
+  symbols: ['XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT'],
   setups: { A: true, B: true, C: true, D: true },
   useFunding: true,             // optional funding-rate confirmation when the feed provides it
   maxSpreadPct: 0.04,           // reject entries when spread is wider than this
@@ -105,7 +109,7 @@ export function sanitizeQuantConfig(raw){
   out.allowLong = bool(r.allowLong, D.allowLong);
   out.allowShort = bool(r.allowShort, D.allowShort);
   const syms = Array.isArray(r.symbols) ? r.symbols : D.symbols;
-  out.symbols = Array.from(new Set(syms.map(s => String(s).trim().toUpperCase()).filter(s => /^[A-Z0-9]{3,20}USDT$/.test(s)))).slice(0, 40);
+  out.symbols = Array.from(new Set(syms.map(s => String(s).trim().toUpperCase()).filter(s => /^[A-Z0-9]{3,20}USDT$/.test(s) && !EXCLUDED_FUTURES_SYMBOLS.has(s)))).slice(0, 40);
   if(!out.symbols.length) out.symbols = D.symbols.slice();
   const su = (r.setups && typeof r.setups === 'object') ? r.setups : {};
   out.setups = { A: bool(su.A, true), B: bool(su.B, true), C: bool(su.C, true), D: bool(su.D, true) };
@@ -138,10 +142,16 @@ export function effectiveMinConfidence(qcfg){
   return Math.max(qcfg.minConfidence, tier.floor);
 }
 
-// Which symbols does Quant Futures scan? User-configurable; TradFi/oddball
-// symbols the platform permanently excludes stay excluded (engine.js).
+// Which symbols does Quant Futures scan? User-configurable, but the platform's
+// permanently excluded pairs (excludedSymbols.js) are never in this set — even if
+// an old saved config or a hand-built cfg object still lists them.
 export function quantSymbolSet(qcfg){
-  return new Set((qcfg && qcfg.symbols) || QUANT_DEFAULTS.symbols);
+  return new Set(((qcfg && qcfg.symbols) || QUANT_DEFAULTS.symbols).filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s)));
+}
+
+// Symbols the user typed that the platform excludes (for the UI to tell them, not fail silently).
+export function excludedSymbolsIn(list){
+  return Array.from(new Set((list || []).map(s => String(s).trim().toUpperCase()).filter(s => EXCLUDED_FUTURES_SYMBOLS.has(s))));
 }
 
 export function loadQuantConfig(){

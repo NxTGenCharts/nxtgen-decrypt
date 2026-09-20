@@ -31,6 +31,7 @@ import { QUANT_ID, QUANT_TYPE, quantSymbolSet, effectiveMinConfidence } from './
 import { computeQuantRiskState, effectiveRiskPct, quantSize, quantEntryGate, quantExitPrice, quantTradeFields } from './quant/risk.js';
 import { buildQuantExplanation } from './quant/signal.js';
 import { qlog } from './quant/log.js';
+import { EXCLUDED_FUTURES_SYMBOLS } from './excludedSymbols.js';
 
 function getSnapshot(symbol){ return mockMarket.snapshot(symbol); }
 function getBtcShock(){ return mockMarket.btcShock(); }
@@ -53,7 +54,9 @@ function getBtcShock(){ return mockMarket.btcShock(); }
 // at all — the engine could still "approve" it in Demo mode and then have
 // the order rejected at the exchange, or (worse) behave inconsistently
 // between Demo and Live. Excluded from both, same as everything else here.
-export const EXCLUDED_FUTURES_SYMBOLS = new Set(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'LTCUSDT', 'DOGEUSDT', 'BNBUSDT', 'CLUSDT']);
+// The excluded-pairs list lives in excludedSymbols.js (shared with the Quant config sanitizer). Re-exported
+// here under its original name so every existing import keeps working.
+export { EXCLUDED_FUTURES_SYMBOLS };
 export const TRADEABLE_FUTURES_SYMBOLS = FUTURES_SYMBOLS.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s));
 
 // Ensemble: each setup already carries its own direction+confidence.
@@ -207,21 +210,19 @@ function attachTpLevels(levels, direction, feeInputs){
   };
 }
 
-// NxTGen Quant Futures trades its OWN configurable symbol list (default
-// BTC/ETH/SOL/BNB/XRP), several of which the platform excludes from the six
-// original strategies for fee reasons (EXCLUDED_FUTURES_SYMBOLS). This adds
-// the Quant symbols to a scan list when — and only when — Quant is enabled.
-// evaluateSymbol restricts those symbols to the Quant detector alone, so the
-// exclusion still holds for every other strategy. CLUSDT (a TradFi-underlying
-// contract) stays excluded for everything, Quant included.
+// NxTGen Quant Futures trades its OWN configurable symbol list (default XRP/ADA/AVAX/LINK/DOT),
+// which can include liquid pairs outside the platform's default scan universe. This adds those
+// extra symbols to a scan list when — and only when — Quant is enabled. The platform's excluded
+// pairs (excludedSymbols.js: BTC/ETH/SOL/LTC/DOGE/BNB/CL) are NEVER added and never traded by
+// Quant either: the exclusion applies to every strategy in every mode.
 export function isQuantEnabled(cfg){
   const on = cfg && cfg.strategies ? !!cfg.strategies[QUANT_ID] : false;
   return on && !!cfg.quant;
 }
 export function scanSymbolsWithQuant(baseSymbols, cfg){
   if(!isQuantEnabled(cfg)) return baseSymbols;
-  const extra = Array.from(quantSymbolSet(cfg.quant)).filter(x => x !== 'CLUSDT' && !baseSymbols.includes(x));
-  return baseSymbols.concat(extra);
+  const extra = Array.from(quantSymbolSet(cfg.quant)).filter(x => !EXCLUDED_FUTURES_SYMBOLS.has(x) && !baseSymbols.includes(x));
+  return baseSymbols.filter(x => !EXCLUDED_FUTURES_SYMBOLS.has(x)).concat(extra);
 }
 
 // Produces one row per symbol: APPROVED opportunities plus REJECTED
@@ -261,9 +262,11 @@ export function runScanCycle(cfg, dayState, opts){
 // controls the data source and "now" entirely) and returns one scanner
 // row, APPROVED or REJECTED, same shape either way.
 export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, nowMs){
-  const quantApplies = isQuantEnabled(cfg) && quantSymbolSet(cfg.quant).has(symbol) && symbol !== 'CLUSDT';
-  const excluded = EXCLUDED_FUTURES_SYMBOLS.has(symbol);
-  if(excluded && !quantApplies) return baseRow(symbol, snap, regime, 'REJECTED', ['Symbol is excluded from scanning for the enabled strategies']);
+  // Single choke point for Paper, Backtest and Live/Demo (all three evaluate through here): a pair on the
+  // platform's excluded list is rejected for EVERY strategy, Quant included — no exceptions, whatever the
+  // caller's symbol list or a saved Quant config says.
+  if(EXCLUDED_FUTURES_SYMBOLS.has(symbol)) return baseRow(symbol, snap, regime, 'REJECTED', ['Symbol is on the platform\'s excluded list (BTC/ETH/SOL/LTC/DOGE/BNB/CL) — not traded by any strategy']);
+  const quantApplies = isQuantEnabled(cfg) && quantSymbolSet(cfg.quant).has(symbol);
   let quantCtx = null;
   if(quantApplies){
     const fees = (cfg.feeConfig || DEFAULT_FEE_CONFIG)[cfg.exchange || 'binance'] || DEFAULT_FEE_CONFIG.binance;
@@ -271,7 +274,7 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
     // Conservative round-trip cost estimate (taker in, taker out) the score's RR-quality factor uses.
     quantCtx = { qcfg: cfg.quant, ctx: { nowMs, log: !!cfg.quant.log, costPct: fees.takerPct * 2 + snap.meta.spreadPct + slipEst } };
   }
-  const detected = detectAllSetups(snap, regime, cfg.strategies, quantCtx, excluded ? [QUANT_ID] : null);
+  const detected = detectAllSetups(snap, regime, cfg.strategies, quantCtx);
   // Quant Futures is a self-contained system (own stop, own risk engine, own exit): when it produces a
   // qualifying signal it is evaluated on its own, not blended into the ensemble average.
   const quantSig = detected.find(sg => sg.type === QUANT_TYPE && !(sg.vetoes && sg.vetoes.length));

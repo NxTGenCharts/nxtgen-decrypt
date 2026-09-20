@@ -115,9 +115,9 @@ async function runBacktestFlow(){
   if(!range){ showBtMessage('Pick a valid custom date range (From before To).', 'error'); return; }
   let symbols = selectedSymbols();
   const strategies = selectedStrategyConfig();
-  // NxTGen Quant Futures trades its own configured symbol list (BTC/ETH/SOL/BNB/XRP by default) — which the
-  // checkbox list above deliberately omits (those majors are excluded for the other strategies). When Quant
-  // is ticked, its symbols are added to the run automatically; other strategies still skip the excluded ones.
+  // NxTGen Quant Futures trades its own configured symbol list (XRP/ADA/AVAX/LINK/DOT by default). Those are
+  // added to the run automatically when Quant is ticked. The platform's excluded pairs (BTC/ETH/SOL/LTC/DOGE/
+  // BNB/CL) are stripped from that list by sanitizeQuantConfig and skipped by the backtest loop regardless.
   const quantCfgForRun = getQuantCfg({ log: false });
   if(strategies[QUANT_ID]) symbols = Array.from(new Set([...symbols, ...quantCfgForRun.symbols]));
   if(!symbols.length){ showBtMessage('Select at least one symbol to test.', 'error'); return; }

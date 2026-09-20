@@ -302,9 +302,9 @@ export const STRATEGY_REGISTRY = [
 // quantCtx (optional): { qcfg, ctx } — the sanitized Quant Futures config and
 // its per-call context ({ nowMs, log, costPct }). Without it the Quant detector
 // simply returns nothing, so every existing caller is unaffected.
-// onlyIds (optional): restrict to these strategy ids — used for symbols that
-// the platform excludes from the six original strategies but that Quant Futures
-// is explicitly configured to trade (BTC/ETH/SOL/BNB).
+// onlyIds (optional): restrict to these strategy ids (no caller currently needs it). The platform's
+// excluded pairs (excludedSymbols.js) are never traded by Quant: quantSymbolSet() drops them, and
+// evaluateSymbol rejects them before any detector runs.
 export function detectAllSetups(snap, regime, strategyConfig, quantCtx, onlyIds){
   // strategyConfig: { [id]: boolean } — which strategies from
   // STRATEGY_REGISTRY above are enabled. Defaults to each strategy's own

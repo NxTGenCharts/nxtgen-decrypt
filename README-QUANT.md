@@ -43,7 +43,7 @@ Min confidence 70 (60–95); High Selectivity ≥ 80, Very High ≥ 85, both als
 * Live/Demo places one real position at a time (existing platform rule), uses the exchange bracket (SL+TP) with no time-stop (Paper/Backtest apply a 6h/12h time-stop), and gets exact lot/tick rounding from the server. Paper/Backtest assume a 3-significant-digit lot step.
 * Slippage in Paper/Backtest is modelled (½ spread + 0.6× spread), not observed.
 * Quant's risk ledger counts Quant trades only.
-* The shared fee-to-stop gate makes 5m entries on BTC/ETH almost always untradeable at taker fees — that is the fee math, not a bug.
+* **Excluded pairs are never traded — by Quant either.** BTC/ETH/SOL/LTC/DOGE/BNB/CL are excluded platform-wide (`js/futures/excludedSymbols.js`, the single source of truth) in Paper, Backtest and Live/Demo. `sanitizeQuantConfig` strips them from Quant's symbol list, `evaluateSymbol` rejects them for every strategy, and the backtest loop skips them. Default Quant symbols: XRP, ADA, AVAX, LINK, DOT.
 
 ## Integration note (merged with the rebuilt Nova Scalp)
 This copy carries the Quant strategy on top of the current Nova Scalp (PSAR/EMA50+100 break, MACD + AO, Smart Range Filter, structure stop, single 2R exit, no time stop in Paper/Backtest — see README-SCALP.md). Two independent single-exit mechanisms now coexist and neither touches the other:
