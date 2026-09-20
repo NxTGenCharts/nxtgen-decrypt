@@ -274,7 +274,7 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
 }
 
 function timeStopMinutesFor(setupType){
-  return setupType === 'NxTGen Scalp' ? 40 : setupType === 'Nova Scalp' ? 120 : setupType === 'Range Scalp' ? 45 : 240;
+  return setupType === 'NxTGen Scalp' ? 40 : setupType === 'Nova Scalp' ? Infinity /* no time stop — exits only at stop or 2R (removed on request) */ : setupType === 'Range Scalp' ? 45 : 240;
 }
 
 // candlesBySymbol: { [symbol]: [{t,o,h,l,c,v}, ...] } — 5-minute candles,

@@ -980,8 +980,10 @@ Nova Scalp no longer trades a VWAP reclaim. Current logic (`detectNovaScalp` in
   `noTradeEngine.js` still rejects stops too tight to survive round-trip fees.
 * **Target** — single 2R exit for the whole position (no 30/30/40 partials, no
   breakeven move). Fee floor can only push it further out, never nearer.
-* **Time stop** — 120 minutes (`cfg.novaScalpTimeStopMinutes`; Backtest uses the
-  same).
+* **Time stop** — none in Paper or Backtest: a trade exits only at its stop or its
+  2R target (Backtest closes anything still open at the end of the data as
+  `OPEN_AT_END`). Live/Demo never had one. Set `cfg.novaScalpTimeStopMinutes` to
+  bring it back in Paper.
 
 Not measured: none of the numbers above have been backtested on real market data
 from within this codebase. Run it in the Backtest tab before risking capital.

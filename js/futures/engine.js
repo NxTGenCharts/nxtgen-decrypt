@@ -504,7 +504,10 @@ export function managePositions(dayState, tradeHistory, cfg){
     const hitSL = candle.h !== undefined && (dir === 1 ? candle.l <= pos.stop : candle.h >= pos.stop);
     const ageMinutes = (mockMarket.now() - pos.openedAt) / 60_000;
     const timeStopMinutes = pos.setup === 'NxTGen Scalp' ? (cfg.aiScalpTimeStopMinutes || 40)
-      : pos.setup === 'Nova Scalp' ? (cfg.novaScalpTimeStopMinutes || 120)
+      // Nova Scalp has NO time stop in Paper (removed on request): it exits only at its
+      // structure stop or its single 2R target. Infinity makes the age check below never
+      // fire; set cfg.novaScalpTimeStopMinutes to a number to bring one back.
+      : pos.setup === 'Nova Scalp' ? (cfg.novaScalpTimeStopMinutes || Infinity)
       : pos.setup === 'Range Scalp' ? (cfg.scalpTimeStopMinutes || 45)
       : (cfg.timeStopMinutes || 240);
 
