@@ -46,6 +46,47 @@ const LIVE_CYCLE_MS = 8000; // real API calls — a slower, deliberately conserv
 // numbers as independently-set (see LIVE_CYCLE_MS itself, just above).
 const LIVE_SYMBOL_COOLDOWN_MS = 30 * 60_000;
 
+// A pair whose ORDER the exchange rejects (wrong precision, below the minimum size, insufficient margin for
+// that contract, a per-symbol trading restriction...) used to be picked again on the very next 8s cycle,
+// because it is still the first APPROVED row — the bot sat retrying it forever and never reached the next
+// opportunity. Now a failed order puts THAT pair on a short skip list and the scan moves on:
+//   * exchange rejected the order (result.ok === false)  -> 15 min; 60 min if the message is a sizing/precision
+//     rule (those don't fix themselves in a few minutes)
+//   * request itself failed (proxy/network error)        -> 3 min (likely transient, and other pairs would hit
+//     the same problem, so this is short)
+// Held in memory only; cleared by the same session reset that clears the post-close cooldown.
+const LIVE_ORDER_REJECT_COOLDOWN_MS = 15 * 60_000;
+const LIVE_ORDER_RULE_REJECT_COOLDOWN_MS = 60 * 60_000;
+const LIVE_ORDER_ERROR_COOLDOWN_MS = 3 * 60_000;
+const ORDER_RULE_REJECT_RE = /precision|lot size|minimum|min(imum)?\s*(size|qty|quantity|notional|order)|notional|tick size|step size|quantity|amount .* below|too small|invalid (qty|quantity|price)/i;
+
+function noteLiveOrderFailure(symbol, message, kind){
+  const f = fu();
+  f.liveOrderFailUntilBySymbol = f.liveOrderFailUntilBySymbol || {};
+  const ms = kind === 'error' ? LIVE_ORDER_ERROR_COOLDOWN_MS
+    : (ORDER_RULE_REJECT_RE.test(String(message || '')) ? LIVE_ORDER_RULE_REJECT_COOLDOWN_MS : LIVE_ORDER_REJECT_COOLDOWN_MS);
+  f.liveOrderFailUntilBySymbol[symbol] = { until: Date.now() + ms, message: String(message || '').slice(0, 140) };
+  return Math.round(ms / 60_000);
+}
+
+// Turns an APPROVED row for a pair that is on the order-failure skip list into a REJECTED one (with the reason
+// shown in the scanner), so `rows.find(r => r.status === 'APPROVED')` naturally moves on to the next pair.
+function applyOrderFailureSkips(rows){
+  const f = fu();
+  const map = f.liveOrderFailUntilBySymbol;
+  if(!map) return rows;
+  const now = Date.now();
+  for(const r of rows){
+    const e = map[r.symbol];
+    if(!e) continue;
+    if(now >= e.until){ delete map[r.symbol]; continue; }
+    if(r.status !== 'APPROVED') continue;
+    r.status = 'REJECTED';
+    r.rejectReasons = [...(r.rejectReasons || []), `Skipped: the exchange rejected the last order for ${r.symbol} ("${e.message}") — trying other pairs for ${Math.max(1, Math.ceil((e.until - now) / 60_000))} more min`];
+  }
+  return rows;
+}
+
 // Live/Demo no longer scans a small hardcoded watchlist — it pulls each
 // exchange's REAL, FULL current list of USDT-M perpetual symbols (see
 // /api/futures/universe in server.js) and scans everything on it except
@@ -1273,6 +1314,7 @@ async function runLiveCycleInner(){
     now: () => Date.now(),
     getBtcShock: () => computeBtcShock(snapshots.BTCUSDT.m5),
   });
+  applyOrderFailureSkips(rows); // pairs whose last order was rejected drop out here so the scan moves on to the next one
   renderScanner(rows); // reuse the same scanner table Paper mode renders into — it's one shared "what did the scan just find" view
 
   const approved = rows.find(r => r.status === 'APPROVED');
@@ -1387,7 +1429,8 @@ async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, eq
         showLiveMessage(`Order rejected: ${result.message} — adopted the existing ${ep.side} ${approved.symbol} position (size ${ep.size} @ ${ep.avgPrice}) into tracking so it stops showing as "None"; its own TP/SL (if any) weren't set by this app and aren't managed here.`, 'error');
         if(els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = `[${exchange}] ${approved.symbol} ${ep.side} ${ep.size} @ ${ep.avgPrice}`;
       } else {
-        showLiveMessage(`Order rejected: ${result.message}`, 'error');
+        const skipMin = noteLiveOrderFailure(approved.symbol, result.message, 'rejected');
+        showLiveMessage(`Order rejected on ${approved.symbol}: ${result.message} — skipping ${approved.symbol} for ${skipMin} min and moving on to the next pair.`, 'error');
       }
       renderLive();
       return;
@@ -1437,7 +1480,8 @@ async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, eq
     }
     showLiveMessage(`Real ${mode} position opened: ${approved.symbol} ${side} ${result.filledQty} @ ${result.avgPrice}, SL ${result.stopLossPrice} / ${tpNote} (order ${result.orderId}).`);
   }catch(err){
-    showLiveMessage(`Order failed: ${err.message}`, 'error');
+    const skipMin = noteLiveOrderFailure(approved.symbol, err.message, 'error');
+    showLiveMessage(`Order failed on ${approved.symbol}: ${err.message} — skipping ${approved.symbol} for ${skipMin} min.`, 'error');
   }
   renderLive();
 }
@@ -2785,6 +2829,7 @@ function resetLiveSession(){
   f.liveTradeHistory = [];
   f.livePositions = {};
   f.liveCooldownUntilBySymbol = {};
+  f.liveOrderFailUntilBySymbol = {};
   f.liveConsecutiveLosses = 0;
   f.livePausedByCircuitBreaker = false;
   f.liveAdaptiveConfidenceBoost = 0;

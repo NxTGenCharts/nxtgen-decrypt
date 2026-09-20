@@ -2691,19 +2691,64 @@ async function binanceFuturesBalance(mode, apiKey, secretKey){
   return usdt ? parseFloat(usdt.availableBalance) : null;
 }
 
-async function binanceFuturesSymbolFilters(base, symbol){
-  const res = await fetch(`${base}/fapi/v1/exchangeInfo?symbol=${symbol}`);
-  const data = await res.json().catch(() => null);
-  const s = data?.symbols?.[0];
-  if(!s) throw new Error(`Unknown Binance futures symbol ${symbol}`);
-  const lotSize = (s.filters || []).find(f => f.filterType === 'LOT_SIZE');
-  const minNotional = (s.filters || []).find(f => f.filterType === 'MIN_NOTIONAL');
-  return {
-    qtyStep: lotSize ? parseFloat(lotSize.stepSize) : Math.pow(10, -(s.quantityPrecision ?? 3)),
-    minQty: lotSize ? parseFloat(lotSize.minQty) : 0,
-    pricePrecision: s.pricePrecision ?? 2,
-    minNotional: minNotional ? parseFloat(minNotional.notional) : 0,
+// USDⓈ-M futures' GET /fapi/v1/exchangeInfo takes NO symbol parameter (Binance's docs list none and its own
+// connector sends none) — the old `?symbol=` was silently ignored, so `symbols[0]` was always the FIRST listed
+// contract (BTCUSDT) and every pair was sized/rounded with BTCUSDT's step and precision. That is exactly what
+// produces "-1111 Precision is over the maximum defined for this asset" on any pair whose real quantity step
+// is coarser than 0.001 (or whose tick differs from BTC's). So: fetch the full list once, index it by symbol,
+// cache it (rules change on the order of days), and look the pair up properly. Per base URL, because the demo
+// (testnet) host has its own list.
+const BINANCE_FUTURES_INFO_TTL_MS = 30 * 60_000;
+const binanceFuturesInfoCache = {}; // base -> { atMs, bySymbol: Map, pending }
+
+const decimalsOf = (n) => {
+  const str = String(n);
+  if(/e-/i.test(str)) return parseInt(str.split(/e-/i)[1], 10) + ((str.split(/e-/i)[0].split('.')[1] || '').length);
+  return (str.split('.')[1] || '').length;
+};
+
+function buildBinanceFuturesFilters(s){
+  const f = (type) => (s.filters || []).find(x => x.filterType === type);
+  const lot = f('LOT_SIZE'), mlot = f('MARKET_LOT_SIZE'), price = f('PRICE_FILTER'), notional = f('MIN_NOTIONAL');
+  // Entry and TP legs are MARKET-type orders, which are checked against MARKET_LOT_SIZE when it is present;
+  // use the coarser step / larger minimum of the two so a quantity satisfies both.
+  const steps = [lot, mlot].filter(Boolean).map(x => parseFloat(x.stepSize)).filter(x => x > 0);
+  const qtyStep = steps.length ? Math.max(...steps) : Math.pow(10, -(s.quantityPrecision ?? 3));
+  const minQty = Math.max(0, ...[lot, mlot].filter(Boolean).map(x => parseFloat(x.minQty) || 0));
+  const tickSize = price && parseFloat(price.tickSize) > 0 ? parseFloat(price.tickSize) : Math.pow(10, -(s.pricePrecision ?? 2));
+  const pricePrecision = decimalsOf(tickSize);
+  // Round to a multiple of the TICK (not just to N decimals) — a tick of 0.05 or 0.5 rejects a price that is
+  // merely rounded to 2 decimals with "-4014 price not increased by tick size".
+  const roundPrice = (p) => {
+    const ticks = Math.round(p / tickSize);
+    return Number((ticks * tickSize).toFixed(pricePrecision));
   };
+  return {
+    qtyStep, minQty, tickSize, pricePrecision, roundPrice,
+    minNotional: notional ? parseFloat(notional.notional) : 0,
+  };
+}
+
+async function binanceFuturesSymbolFilters(base, symbol){
+  let c = binanceFuturesInfoCache[base];
+  if(!c || Date.now() - c.atMs > BINANCE_FUTURES_INFO_TTL_MS){
+    if(!c) c = binanceFuturesInfoCache[base] = { atMs: 0, bySymbol: new Map(), pending: null };
+    if(!c.pending){
+      c.pending = (async () => {
+        const res = await fetch(`${base}/fapi/v1/exchangeInfo`);
+        const data = await res.json().catch(() => null);
+        if(!data || !Array.isArray(data.symbols)) throw new Error(`Could not read Binance futures exchange rules (HTTP ${res.status}).`);
+        const m = new Map();
+        for(const sym of data.symbols) m.set(sym.symbol, buildBinanceFuturesFilters(sym));
+        c.bySymbol = m; c.atMs = Date.now();
+      })().finally(() => { c.pending = null; });
+    }
+    try{ await c.pending; }
+    catch(err){ if(!c.bySymbol.size) throw err; /* stale rules beat none */ }
+  }
+  const filters = c.bySymbol.get(symbol);
+  if(!filters) throw new Error(`Unknown Binance futures symbol ${symbol}`);
+  return filters;
 }
 
 async function binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage){
@@ -2760,7 +2805,7 @@ async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side,
   if(qty <= 0 || qty < filters.minQty){
     throw new VerifyRejected(`Size ${rawQty} ${symbol} rounds down to ${qty}, below the exchange minimum (${filters.minQty}) — nothing was sent.`);
   }
-  const roundPrice = p => Number(p.toFixed(filters.pricePrecision));
+  const roundPrice = p => filters.roundPrice(p);
   const roundQty = q => floorToStep(q, filters.qtyStep);
   const stopLossPrice = roundPrice(rawStopLossPrice);
   const exitSide = side === 'BUY' ? 'SELL' : 'BUY'; // TP/SL close the position, so they trade the opposite direction from entry
@@ -2848,7 +2893,7 @@ async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side,
 async function moveBinanceStopToBreakeven(mode, apiKey, secretKey, { symbol, side, newStopPrice, slOrderId }){
   const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
   const filters = await binanceFuturesSymbolFilters(base, symbol);
-  const roundPrice = p => Number(p.toFixed(filters.pricePrecision));
+  const roundPrice = p => filters.roundPrice(p);
   const exitSide = side === 'BUY' ? 'SELL' : 'BUY';
   const hedgeOn = await getCachedBinanceHedgeMode(mode, apiKey, secretKey);
   const positionSide = side === 'BUY' ? 'LONG' : 'SHORT';
@@ -2977,7 +3022,7 @@ async function placeBinanceGridLevelOrder(mode, apiKey, secretKey, { symbol, dir
   if(roundedQty <= 0 || roundedQty < filters.minQty){
     throw new VerifyRejected(`Grid level size ${qty} ${symbol} rounds down to ${roundedQty}, below the exchange minimum (${filters.minQty}) — level skipped, not sent.`);
   }
-  const roundedPrice = Number(price.toFixed(filters.pricePrecision));
+  const roundedPrice = filters.roundPrice(price);
   await binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage);
   const { side, positionSide } = binanceHedgeOrderParams(direction, false);
   const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
@@ -2992,7 +3037,7 @@ async function placeBinanceGridCloseOrder(mode, apiKey, secretKey, { symbol, dir
   const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
   const filters = await binanceFuturesSymbolFilters(base, symbol);
   const roundedQty = floorToStep(qty, filters.qtyStep);
-  const roundedPrice = Number(price.toFixed(filters.pricePrecision));
+  const roundedPrice = filters.roundPrice(price);
   const { side, positionSide } = binanceHedgeOrderParams(direction, true);
   const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
     symbol, side, positionSide, type: 'LIMIT', timeInForce: 'GTC',
@@ -3014,7 +3059,7 @@ async function placeBinanceGridCloseOrder(mode, apiKey, secretKey, { symbol, dir
 async function setBinanceGridSideStop(mode, apiKey, secretKey, { symbol, direction, stopPrice, existingAlgoId }){
   const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
   const filters = await binanceFuturesSymbolFilters(base, symbol);
-  const roundedStop = Number(stopPrice.toFixed(filters.pricePrecision));
+  const roundedStop = filters.roundPrice(stopPrice);
   if(existingAlgoId){
     await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: existingAlgoId }, apiKey, secretKey, mode).catch(() => {});
   }
@@ -3096,7 +3141,7 @@ async function placeBinanceDcaOrder(mode, apiKey, secretKey, { symbol, direction
   };
   let roundedPrice = null;
   if(orderType !== 'MARKET'){
-    roundedPrice = Number(price.toFixed(filters.pricePrecision));
+    roundedPrice = filters.roundPrice(price);
     params.price = roundedPrice.toString();
     params.timeInForce = 'GTC';
   }
@@ -3131,7 +3176,7 @@ async function setBinanceDcaTakeProfit(mode, apiKey, secretKey, { symbol, direct
   if(existingTpAlgoId) await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: existingTpAlgoId }, apiKey, secretKey, mode).catch(() => {});
   if(existingSlAlgoId) await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: existingSlAlgoId }, apiKey, secretKey, mode).catch(() => {});
   if(takeProfitPrice != null){
-    const roundedTp = Number(takeProfitPrice.toFixed(filters.pricePrecision));
+    const roundedTp = filters.roundPrice(takeProfitPrice);
     const resp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
       algoType: 'CONDITIONAL', symbol, side: closeSide, type: 'TAKE_PROFIT_MARKET',
       triggerPrice: roundedTp.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
@@ -3139,7 +3184,7 @@ async function setBinanceDcaTakeProfit(mode, apiKey, secretKey, { symbol, direct
     result.takeProfitPrice = roundedTp; result.tpAlgoId = resp.algoId ?? resp.orderId ?? null;
   }
   if(stopLossPrice != null){
-    const roundedSl = Number(stopLossPrice.toFixed(filters.pricePrecision));
+    const roundedSl = filters.roundPrice(stopLossPrice);
     const resp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
       algoType: 'CONDITIONAL', symbol, side: closeSide, type: 'STOP_MARKET',
       triggerPrice: roundedSl.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
