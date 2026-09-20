@@ -231,13 +231,18 @@ function safeEq(a, b){
   return A.length === B.length && crypto.timingSafeEqual(A, B);
 }
 
+// Trimmed, so a stray space/newline pasted into the host's env screen can't make a
+// token that "looks right" fail to match (or count towards the length check).
+const adminToken = () => String(process.env.WORKER_TOKEN || '').trim();
+const viewToken = () => String(process.env.WORKER_VIEW_TOKEN || '').trim();
+
 function roleFor(req){
-  const admin = process.env.WORKER_TOKEN;
-  const view = process.env.WORKER_VIEW_TOKEN;
-  const presented = req.get('x-worker-token') || (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  const admin = adminToken();
+  const view = viewToken();
+  const presented = String(req.get('x-worker-token') || (req.get('authorization') || '').replace(/^Bearer\s+/i, '')).trim();
   if(!presented) return null;
-  if(admin && admin.length >= MIN_TOKEN_LEN && safeEq(presented, admin)) return 'admin';
-  if(view && view.length >= MIN_TOKEN_LEN && safeEq(presented, view)) return 'view';
+  if(admin.length >= MIN_TOKEN_LEN && safeEq(presented, admin)) return 'admin';
+  if(view.length >= MIN_TOKEN_LEN && safeEq(presented, view)) return 'view';
   return null;
 }
 
@@ -245,10 +250,16 @@ function roleFor(req){
 // /api/worker/* answers, so a fresh deploy can never expose the worker by accident.
 function requireRole(min){
   return (req, res, next) => {
-    const adminTok = process.env.WORKER_TOKEN;
-    if(!adminTok || adminTok.length < MIN_TOKEN_LEN){
+    const adminTok = adminToken();
+    if(adminTok.length < MIN_TOKEN_LEN){
+      // Say which of the two it is — "not set" (usually: the env group isn't linked
+      // to THIS service, or it hasn't redeployed yet) vs "too short". Only the length
+      // of a token that is unusable anyway is revealed; nothing about a valid one.
+      const why = adminTok.length === 0
+        ? 'WORKER_TOKEN is not set on the server that answered.'
+        : `WORKER_TOKEN is set but only ${adminTok.length} characters long.`;
       return res.status(503).json({ ok: false, code: 'no_token_configured',
-        message: `Set WORKER_TOKEN (at least ${MIN_TOKEN_LEN} characters) in the server's environment — the worker is locked until you do.` });
+        message: `${why} It must be at least ${MIN_TOKEN_LEN} characters, set in the environment of the service this page talks to (and that service redeployed) — the worker is locked until then.` });
     }
     const role = roleFor(req);
     if(!role) return res.status(401).json({ ok: false, code: 'unauthorized', message: 'Missing or incorrect access token.' });

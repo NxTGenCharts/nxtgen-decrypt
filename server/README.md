@@ -188,20 +188,27 @@ When `WORKER_EXCHANGE` + `WORKER_API_KEY` + `WORKER_SECRET_KEY` are set:
 
 ## "Run on server" button (Autotrade & Futures page)
 
-Under the Live / Demo Trading panel there's a **Run on server — 24/7** block
-(`js/server-worker.js`). It arms the exchange + network currently selected in that
-panel, using the key already saved and verified in the browser, and the values
-**currently on screen** on that page: Risk per trade, Leverage, Min confidence,
-Daily Profit Target, Max Daily Loss, High Selectivity and the Strategies list
-(plus the saved NxTGen Quant settings). They're shown in a summary first, re-read
-at the moment you press Arm, and sent with `explicitSettings: true` — a blank field
-makes the button refuse and name it. Each session's active values are echoed back
-under "Running on the server".
+Under the Live / Demo Trading panel there's a single **Run on server — 24/7** switch
+(`js/server-worker.js`). Flip it ON and the exchange + network currently selected in
+that panel is handed to the server, using the key already saved and verified in the
+browser and the values **currently on screen** on that page: Risk per trade, Leverage,
+Min confidence, Daily Profit Target, Max Daily Loss, High Selectivity and the
+Strategies list (plus the saved NxTGen Quant settings). They're re-read at the moment
+you flip it and sent with `explicitSettings: true` — a blank field makes the switch
+refuse and name it. Flip it OFF to stop new entries (an open position keeps its
+exchange-side SL/TP). The switch mirrors `/api/worker/status`, so it also shows ON after
+a refresh or when the server auto-armed itself.
 
-- **Several exchanges:** switch the exchange row, press Arm again — each keeps the settings it was armed with. Change a value later and it only applies to the *next* arm; Stop and re-arm to apply it.
+The access token is asked for once (a prompt, the first time you flip the switch) and
+remembered on that device; a rejected token is asked for again. Live mode asks for a
+confirm() instead of typing the arm phrase. If the server answers 503, the message says
+whether `WORKER_TOKEN` is not set on the service that answered or is set but shorter than
+20 characters.
+
+- **Several exchanges:** switch the exchange row, flip the switch again — each keeps the settings it was armed with. Change a value later and it only applies to the *next* time you switch it on; switch off and on again to apply it.
 - **Daily targets roll over:** "daily" profit target / max daily loss are measured against the balance at the start of the local day (the browser's timezone, sent at arm time). At local midnight the baseline resets, so a hit target pauses the bot until the next day rather than forever.
-- **Don't run both:** the button refuses if the in-browser bot is already running on that exchange — two bots on one account would double up trades.
-- **Restart = stopped:** the key lives only in server memory. A restart/redeploy/sleep stops every session (and resets the day baseline); press Arm again, or use the env-var route above for one exchange with auto-arm.
+- **Don't run both:** the switch refuses if the in-browser bot is already running on that exchange — two bots on one account would double up trades.
+- **Restart = stopped:** the key lives only in server memory. A restart/redeploy/sleep stops every session (and resets the day baseline); flip the switch again, or use the env-var route above for one exchange with auto-arm.
 - **Not included:** NxTGen Grid and the Trading Bots (Futures Grid / DCA) still run in the browser only.
 
 **Dashboard:** `worker/index.html` (repo root) is a self-contained mobile-friendly page for this — point it at your deployed proxy URL, arm/disarm, and watch status + the activity log live. Deploy it alongside the rest of the static site (or open the file directly) — it only talks to the endpoints above, nothing else to configure.
