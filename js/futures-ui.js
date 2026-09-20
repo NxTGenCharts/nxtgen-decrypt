@@ -28,6 +28,13 @@ import { mockMarket } from './futures/mockMarket.js';
 import { WATCHLIST_TOP_N, rankTopByVolume } from './futures/watchlist.js';
 import { RISK_DEFAULTS, estimateLiquidationPrice } from './futures/risk.js';
 import { DEFAULT_WEIGHTS } from './futures/scoring.js';
+import {
+  noteLiveOrderFailure as sharedNoteLiveOrderFailure, applyOrderFailureSkips as sharedApplyOrderFailureSkips,
+  decayAdaptiveConfidenceBoost as sharedDecayAdaptiveConfidenceBoost, checkAdaptiveCircuitBreaker as sharedCheckAdaptiveCircuitBreaker,
+  buildLiveDayStateShim as sharedBuildLiveDayStateShim, recordLiveClosure as sharedRecordLiveClosure,
+  getTradeableSymbols as sharedGetTradeableSymbols, placeLiveEntryOrder as sharedPlaceLiveEntryOrder,
+  runLiveCycleInner as sharedRunLiveCycleInner,
+} from './futures/liveEngine.js';
 import { computeBtcShock } from './futures/indicators.js';
 import { STRATEGY_REGISTRY } from './futures/setups.js';
 import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGridSymbol, closeAllGridSessions, buildGridPlan, buildManualGridPlan, suggestGridRange, detectGridBreakout, netCycleProfit, scoreGridSuitability, runTradingBotsGridBacktest, summarizeTradingBotsGridTrades } from './futures/grid.js';
@@ -60,31 +67,44 @@ const LIVE_ORDER_RULE_REJECT_COOLDOWN_MS = 60 * 60_000;
 const LIVE_ORDER_ERROR_COOLDOWN_MS = 3 * 60_000;
 const ORDER_RULE_REJECT_RE = /precision|lot size|minimum|min(imum)?\s*(size|qty|quantity|notional|order)|notional|tick size|step size|quantity|amount .* below|too small|invalid (qty|quantity|price)/i;
 
-function noteLiveOrderFailure(symbol, message, kind){
-  const f = fu();
-  f.liveOrderFailUntilBySymbol = f.liveOrderFailUntilBySymbol || {};
-  const ms = kind === 'error' ? LIVE_ORDER_ERROR_COOLDOWN_MS
-    : (ORDER_RULE_REJECT_RE.test(String(message || '')) ? LIVE_ORDER_RULE_REJECT_COOLDOWN_MS : LIVE_ORDER_REJECT_COOLDOWN_MS);
-  f.liveOrderFailUntilBySymbol[symbol] = { until: Date.now() + ms, message: String(message || '').slice(0, 140) };
-  return Math.round(ms / 60_000);
+// Bridges this browser tab's own helpers (DOM, localStorage, the proxy
+// fetch wrappers already defined further down in this file — all plain
+// `function` declarations, so hoisting makes them callable here despite
+// appearing later) into the shape js/futures/liveEngine.js expects. The
+// SAME shared module is what server/worker.js's Node adapter also feeds —
+// this is the one place that difference is bridged, so the actual
+// scan/decide/place logic itself is identical code, not a hand-kept-in-
+// sync copy of it.
+function buildBrowserLiveAdapter(){
+  return {
+    proxyCall: callProxy,
+    fetchSnapshot: fetchLiveSnapshot,
+    getCred: liveCred,
+    notify: showLiveMessage,
+    getQuantCfg,
+    onPositionsChanged: () => saveLivePositions(),
+    onRender: () => renderLive(),
+    onPendingSignal: () => renderLivePendingSignal(),
+    onDisarmedIdle: () => { if(fu().liveRunning) toggleLiveRunning(); },
+    updateOpenPositionLabel: text => { if(els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = text; },
+    updateBalanceLabel: text => { if(els.fuLiveBalance) els.fuLiveBalance.textContent = text; },
+    appendPersistentTrade,
+    syncSettings: () => readSettingsFromInputs(),
+    isAiEnabled: () => !!(state.aiSignal.enabled && state.aiSignal.apiKey),
+    getAiConfirmation,
+    onScanRows: rows => renderScanner(rows),
+  };
 }
 
-// Turns an APPROVED row for a pair that is on the order-failure skip list into a REJECTED one (with the reason
-// shown in the scanner), so `rows.find(r => r.status === 'APPROVED')` naturally moves on to the next pair.
+// noteLiveOrderFailure/applyOrderFailureSkips: the real logic now lives in
+// js/futures/liveEngine.js (shared with server/worker.js) — these are thin
+// wrappers so every existing call site in this file keeps working unchanged.
+function noteLiveOrderFailure(symbol, message, kind){
+  return sharedNoteLiveOrderFailure(fu(), symbol, message, kind);
+}
+
 function applyOrderFailureSkips(rows){
-  const f = fu();
-  const map = f.liveOrderFailUntilBySymbol;
-  if(!map) return rows;
-  const now = Date.now();
-  for(const r of rows){
-    const e = map[r.symbol];
-    if(!e) continue;
-    if(now >= e.until){ delete map[r.symbol]; continue; }
-    if(r.status !== 'APPROVED') continue;
-    r.status = 'REJECTED';
-    r.rejectReasons = [...(r.rejectReasons || []), `Skipped: the exchange rejected the last order for ${r.symbol} ("${e.message}") — trying other pairs for ${Math.max(1, Math.ceil((e.until - now) / 60_000))} more min`];
-  }
-  return rows;
+  return sharedApplyOrderFailureSkips(fu(), rows);
 }
 
 // Live/Demo no longer scans a small hardcoded watchlist — it pulls each
@@ -124,23 +144,12 @@ const liveUniverseCache = {}; // { [exchange]: { symbols: [{symbol, volume24hUsd
 // each pair's 24h volume and last price (Paper uses those to mirror the pairs with synthetic candles).
 // Returns null only if there's no usable list at all (first-ever fetch on
 // this exchange failed) — callers treat that as "can't scan yet".
+// The actual fetch+cache logic now lives in liveEngine.js (its own
+// module-scoped cache — separate from, and not shared with, the one
+// server/worker.js gets from importing the same module, since each runs
+// in its own process). Thin wrapper so every call site here is unchanged.
 async function getLiveTradeableSymbols(exchange){
-  const cached = liveUniverseCache[exchange];
-  const isFresh = cached && (Date.now() - cached.atMs < LIVE_UNIVERSE_TTL_MS);
-  let list = isFresh ? cached.symbols : null;
-  if(!list){
-    try{
-      const data = await callProxy('/api/futures/universe', { exchange });
-      if(!data.ok) throw new Error(data.message || 'Universe fetch failed.');
-      list = data.symbols;
-      liveUniverseCache[exchange] = { symbols: list, atMs: Date.now() };
-    }catch(err){
-      if(cached) list = cached.symbols; // stale is still better than nothing
-      else return null;
-    }
-  }
-  const ranked = rankTopByVolume(list, LIVE_SCAN_TOP_N);
-  return { top: ranked.top.map(s => s.symbol), entries: ranked.top, totalAvailable: ranked.totalAvailable };
+  return sharedGetTradeableSymbols(buildBrowserLiveAdapter(), exchange);
 }
 
 // ---- Paper watchlist ----
@@ -810,123 +819,15 @@ function showLiveMessage(msg, kind){
 // trades lives in fu().livePositions/liveTradeHistory below, updated
 // directly by runLiveCycle, not by anything inside engine.js.
 function buildLiveDayStateShim(equity){
-  const f = fu();
-  // Set once, the first time a real balance is read after Start — NOT
-  // re-derived from the current balance every cycle, or the daily-loss
-  // check below would always see 0% drawdown regardless of what actually
-  // happened (equity and startingEquity would always be equal).
-  if(f.liveStartingEquity == null) f.liveStartingEquity = equity;
-  const startingEquity = f.liveStartingEquity;
-  const dailyPnlPct = startingEquity > 0 ? ((equity - startingEquity) / startingEquity) * 100 : 0;
-
-  const openSymbols = Object.keys(f.livePositions);
-  const positions = openSymbols.map(symbol => {
-    const p = f.livePositions[symbol];
-    return {
-      symbol, riskAmountUsd: p.riskAmountUsd || 0,
-      // Portfolio context for the Quant risk gates (correlated exposure, margin, max positions).
-      direction: p.side === 'Buy' ? 'LONG' : 'SHORT', setup: p.setupType,
-      notionalUsd: (p.qty || 0) * (p.entry || 0), leverage: p.leverage || 1,
-    };
-  });
-  // Quant Futures' own closed-trade ledger, oldest first, from the real trade log — its
-  // drawdown tiers / streak pause / daily+weekly limits replay from this (see quant/risk.js).
-  const quantTrades = f.liveTradeHistory.filter(t => t.setupType === QUANT_TYPE).map(t => ({ closedAtMs: t.closedAtMs, netUsd: t.netUsd || 0 })).reverse();
-  // Recomputed from the real trade log's tail each cycle, rather than
-  // tracked as separately-mutable state that could drift out of sync with it.
-  let consecutiveLosses = 0, lastLossAt = null;
-  for(const t of f.liveTradeHistory){
-    if(t.netUsd < 0){ consecutiveLosses++; if(!lastLossAt) lastLossAt = t.closedAtMs; }
-    else break;
-  }
-  const openRiskPct = positions.reduce((a, p) => a + p.riskAmountUsd, 0) / Math.max(1, equity) * 100;
-  return {
-    equity, startingEquity, peakEquity: Math.max(equity, startingEquity),
-    trades: f.liveTrades, wins: 0, losses: 0, consecutiveLosses, lastLossAt,
-    dailyPnlPct, maxDrawdownPct: 0,
-    realizedGrossUsd: 0, realizedNetUsd: f.liveNetPnlUsd, feesUsd: 0, fundingUsd: 0, slippageUsd: 0,
-    openPositions: openSymbols.length, openRiskPct, positions, quantTrades,
-    // Per-symbol re-entry cooldown (set in runLiveCycle's close-detection
-    // above) — read by evaluateNoTradeFilters (noTradeEngine.js) exactly
-    // like Paper mode's own dayState.cooldownUntilBySymbol.
-    cooldownUntilBySymbol: f.liveCooldownUntilBySymbol || {},
-    // User-set overrides for RISK_DEFAULTS.dailyProfitTargetPct /
-    // maxDailyLossPct — see initLiveDailyProfitTargetInput /
-    // initLiveMaxDailyLossInput. Fall back to the fixed defaults if a
-    // field was never touched.
-    dailyProfitTargetPct: f.liveDailyProfitTargetPct != null ? f.liveDailyProfitTargetPct : RISK_DEFAULTS.dailyProfitTargetPct,
-    maxDailyLossPct: f.liveMaxDailyLossPct != null ? f.liveMaxDailyLossPct : RISK_DEFAULTS.maxDailyLossPct,
-  };
+  return sharedBuildLiveDayStateShim(fu(), equity);
 }
 
-// Records a real position's closure into session history + the
-// cross-session Trade Log, and clears it from live tracking — shared by
-// runLiveCycleInner's own closure-detection poll (TP/SL/manual-on-the-
-// exchange, all indistinguishable from here) AND closeLivePosition below
-// (the in-app "Close Position" button), so both paths book the trade
-// identically and neither can drift out of sync with the other.
-// Quant context copied onto a closed live trade so R-multiples / regime attribution survive in the Trade Log.
-function quantClosureFields(tracked, netUsd){
-  if(!tracked.quant) return {};
-  return { quant: { ...tracked.quant, riskUsd: tracked.riskAmountUsd || 0, realizedR: tracked.riskAmountUsd > 0 ? netUsd / tracked.riskAmountUsd : null } };
-}
-
+// recordLiveClosure: shared by runLiveCycleInner's closure-detection poll
+// AND closeLivePosition (the in-app "Close Position" button) — both still
+// call it with the exact same (f, symbol, tracked, closed) signature as
+// before; the actual bookkeeping now lives in liveEngine.js.
 function recordLiveClosure(f, symbol, tracked, closed){
-  const netUsd = closed ? closed.closedPnl : 0;
-  // grossPnl/feesUsd can still come back null for any exchange on
-  // a given trade if that specific lookup failed (rate limit,
-  // transient error) — every exchange, Bybit included, now
-  // reports a real breakdown when its history read succeeds (see
-  // getBybitExecutionFees in server.js), so this is a per-trade
-  // fallback, not a standing per-exchange gap.
-  const grossUsd = closed && closed.grossPnl != null ? closed.grossPnl : null;
-  const feesUsd = closed && closed.feesUsd != null ? closed.feesUsd : null;
-  const closedAtMs = Date.now();
-  // Only for Binance/Bybit for now, per an explicit "these two
-  // first" request — other exchanges' history rows keep durationMin
-  // as null until that's extended.
-  const durationMin = DURATION_TRACKED_EXCHANGES.includes(tracked.exchange)
-    ? Math.max(0, Math.round((closedAtMs - tracked.openedAtMs) / 60_000))
-    : null;
-  f.liveTradeHistory.unshift({
-    closedAtMs, time: new Date().toLocaleTimeString(), exchange: tracked.exchange, symbol, side: tracked.side,
-    entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
-    exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
-    leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-    setupType: tracked.setupType, durationMin, ...quantClosureFields(tracked, netUsd),
-  });
-  // Same trade, also written to the cross-session Trade Log (see
-  // appendPersistentTrade above) — independent of the session-scoped
-  // array just above, which resetLiveSession clears on every re-arm.
-  appendPersistentTrade({
-    closedAtMs, exchange: tracked.exchange, mode: tracked.mode, symbol, side: tracked.side,
-    entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
-    exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
-    leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-    setupType: tracked.setupType, durationMin, ...quantClosureFields(tracked, netUsd),
-  });
-  if(tracked.quant){
-    qlog(`${symbol} position closed`);
-    qlog(`${symbol} realized PnL = ${netUsd >= 0 ? '+' : ''}$${Number(netUsd).toFixed(2)}${tracked.riskAmountUsd > 0 ? ` (${(netUsd / tracked.riskAmountUsd).toFixed(2)}R)` : ''}`);
-    qlog(`${symbol} trade result: ${netUsd > 0 ? 'WIN' : 'LOSS'}`);
-    qlog('Strategy statistics updated (Live/Demo)');
-  }
-  f.liveTrades++;
-  if(netUsd > 0) f.liveWins++; else f.liveLosses++;
-  f.liveNetPnlUsd += netUsd;
-  if(grossUsd != null) f.liveGrossPnlUsd += grossUsd;
-  if(feesUsd != null) f.liveFeesUsd += feesUsd;
-  checkAdaptiveCircuitBreaker(netUsd);
-  // 30-minute no-re-entry cooldown on THIS symbol only (requirement:
-  // closing a pair — TP, SL, a manual close on the exchange itself, or a
-  // manual close from THIS app's own button — all show up here
-  // identically as "no longer open" — shouldn't let the bot immediately
-  // re-open the same pair; every other pair stays tradeable right away).
-  // Read by evaluateNoTradeFilters (noTradeEngine.js) via
-  // buildLiveDayStateShim's cooldownUntilBySymbol below.
-  f.liveCooldownUntilBySymbol = f.liveCooldownUntilBySymbol || {};
-  f.liveCooldownUntilBySymbol[symbol] = closedAtMs + LIVE_SYMBOL_COOLDOWN_MS;
-  delete f.livePositions[symbol];
+  return sharedRecordLiveClosure(f, buildBrowserLiveAdapter(), symbol, tracked, closed);
 }
 
 // Manually closes an open real position from this app — the "Close
@@ -1042,322 +943,7 @@ async function runLiveCycle(){
 }
 
 async function runLiveCycleInner(){
-  const f = fu();
-  const exchange = f.liveExchange;
-  const hadOpenPositions = Object.keys(f.livePositions).length > 0;
-  // Monitoring an already-open real position — closure detection, balance
-  // refresh, the TP2 breakeven stop-move — never requires being armed;
-  // arming only gates placing a NEW entry, further below. This matters
-  // specifically for a position restored after a page reload (see
-  // restoreLivePositions()): it's already real and already open on the
-  // exchange, and has to keep being watched whether or not "arm" has been
-  // redone yet — the alternative is a real, live position silently going
-  // unmonitored just because the page was reloaded to pick up a fix.
-  if(!f.liveArmed && !hadOpenPositions) return;
-  decayAdaptiveConfidenceBoost(); // see its own comment — lets a stricter bar from a losing stretch ease back on its own, not only on a win
-
-  // 1) Check whatever we're already tracking as open, for closure — using
-  // EACH position's own tracked exchange/mode/credential, not necessarily
-  // whatever's currently selected. If that were keyed off the current
-  // selection instead, switching exchanges while a position from a
-  // different one is still open would query the wrong exchange for it
-  // and silently stop monitoring the real position. (In practice
-  // resetLiveSession clears livePositions on any switch, so this is a
-  // belt-and-suspenders correctness point more than a routinely-hit path.)
-  for(const symbol of Object.keys(f.livePositions)){
-    const tracked = f.livePositions[symbol];
-    const posCred = liveCred(tracked.exchange, tracked.mode);
-    if(!posCred) continue; // can't check right now (key disconnected?) — leave it tracked, try again next cycle
-    try{
-      const data = await callProxy('/api/futures/position', { exchange: tracked.exchange, mode: tracked.mode, apiKey: posCred.apiKey, secretKey: posCred.secretKey, passphrase: posCred.passphrase, symbol, openedAtMs: tracked.openedAtMs, balanceBeforeUsd: tracked.balanceBeforeUsd });
-      if(!data.ok) continue; // transient error — leave it tracked, try again next cycle
-      if(!data.open){
-        recordLiveClosure(f, symbol, tracked, data.closed);
-      } else {
-        if(els.fuLiveOpenPosition){
-          els.fuLiveOpenPosition.textContent = `[${tracked.exchange}] ${symbol} ${data.position.side} ${data.position.size} @ ${data.position.avgPrice} (uPnL ${fmtUsd(data.position.unrealisedPnl)})`;
-        }
-        // Partial TP fill logging: a drop in reported position size
-        // between two polls (still open, just smaller) means a TP leg
-        // filled — previously this only ever produced ONE trade-log row,
-        // written when the position fully closes, so TP1/TP2 partials
-        // were realizing real P&L on the exchange with nothing recorded
-        // for them here. curRealisedPnl (Bybit only for now — see
-        // getBybitPosition/getAllBybitPositions in server.js) gives the
-        // cumulative realized $ on the still-open position, so diffing it
-        // against the last poll gives that leg's own P&L, not just "some
-        // amount closed". Logged rows are tagged partial:true and carry
-        // which leg (by remaining-size threshold, same logic the
-        // breakeven-move check below already uses) so the Trade
-        // Log/History can show them — they're deliberately EXCLUDED from
-        // the summary Gross/Fees/Net sums there (see renderTradeLog),
-        // since the eventual full-close row's netUsd is a balance-diff
-        // over the WHOLE position's lifetime and already includes
-        // whatever these partials realized; counting both would double
-        // the total. This only fires for usePartialTp positions this app
-        // itself placed (tracked.lastSize is only ever seeded there or on
-        // an adopted position) — never for the legacy single-TP path.
-        if(tracked.lastSize != null && data.position.size < tracked.lastSize - 1e-9){
-          const filledQty = tracked.lastSize - data.position.size;
-          const realizedDelta = (data.position.curRealisedPnl != null && tracked.lastRealizedPnl != null)
-            ? data.position.curRealisedPnl - tracked.lastRealizedPnl : null;
-          const remainingFraction = tracked.qty > 0 ? data.position.size / tracked.qty : 0;
-          const tp1Threshold = 1 - (tracked.tp1Fraction || 0.3) + 0.05;
-          const tp2Threshold = 1 - (tracked.tp1Fraction || 0.3) - (tracked.tp2Fraction || 0.3) + 0.05;
-          const legLabel = remainingFraction > tp1Threshold ? 'partial'
-            : remainingFraction > tp2Threshold ? 'TP1 partial' : 'TP2 partial';
-          const partialRecord = {
-            closedAtMs: Date.now(), time: new Date().toLocaleTimeString(), exchange: tracked.exchange, mode: tracked.mode,
-            symbol, side: tracked.side, entry: tracked.entry, exit: data.position.markPrice || null,
-            leverage: tracked.leverage, qty: filledQty, grossUsd: null, feesUsd: null, netUsd: realizedDelta || 0,
-            orderId: tracked.orderId, setupType: tracked.setupType, durationMin: null,
-            source: tracked.source || 'unknown', partial: true, tag: legLabel,
-          };
-          f.liveTradeHistory.unshift(partialRecord);
-          appendPersistentTrade(partialRecord);
-          if(realizedDelta != null) showLiveMessage(`${symbol}: ${legLabel} filled — ${filledQty} closed, ${fmtUsd(realizedDelta)} realized on that leg.`);
-          tracked.lastSize = data.position.size;
-          if(data.position.curRealisedPnl != null) tracked.lastRealizedPnl = data.position.curRealisedPnl;
-        }
-        // Requirement #6/#7: once TP2 has fully filled, move the stop on
-        // what's left (the 40% final leg) to its fee-adjusted breakeven
-        // — detected here by the position's remaining size crossing
-        // below the tp1+tp2 threshold, since Binance/Bybit report
-        // position size directly rather than individual TP-leg fill
-        // events. Never fires for TP1 alone (still ~70% remaining), and
-        // only ever fires once per position (tracked.breakevenMoved).
-        if(tracked.usePartialTp && !tracked.breakevenMoved && tracked.qty > 0 && tracked.breakevenStopPrice != null){
-          const remainingFraction = data.position.size / tracked.qty;
-          const tp2CrossedThreshold = 1 - (tracked.tp1Fraction || 0.3) - (tracked.tp2Fraction || 0.3) + 0.05; // ~0.45 — comfortably between "TP1 only" (~0.70) and "TP1+TP2" (~0.40) so a single poll can tell them apart
-          if(remainingFraction <= tp2CrossedThreshold){
-            tracked.breakevenMoved = true; // set before awaiting, so a slow response can't let a second poll double-fire this
-            try{
-              const moveResult = await callProxy('/api/futures/move-stop', {
-                exchange: tracked.exchange, mode: tracked.mode, apiKey: posCred.apiKey, secretKey: posCred.secretKey, passphrase: posCred.passphrase,
-                symbol, side: tracked.side, newStopPrice: tracked.breakevenStopPrice, slOrderId: tracked.slAlgoId,
-              });
-              if(moveResult.ok){
-                tracked.slAlgoId = moveResult.slOrderId || tracked.slAlgoId;
-                tracked.stopLossPrice = moveResult.newStopPrice; // keep the displayed SL (Open Position detail row) in sync with the actual exchange-side stop
-                showLiveMessage(`${symbol}: TP2 filled — stop on the remaining position moved to fee-adjusted breakeven (${moveResult.newStopPrice}).`);
-              } else {
-                tracked.breakevenMoved = false; // didn't actually take effect — allow a retry on a later poll
-                showLiveMessage(`${symbol}: TP2 filled but the breakeven stop move failed: ${moveResult.message}`, 'error');
-              }
-            }catch(err){
-              tracked.breakevenMoved = false;
-              showLiveMessage(`${symbol}: TP2 filled but the breakeven stop move failed: ${err.message}`, 'error');
-            }
-          }
-        }
-      }
-    }catch(err){
-      // network hiccup — leave it tracked, try again next cycle
-    }
-  }
-  renderLive();
-
-  const mode = f.liveModeByExchange[exchange] || 'live';
-  const exchangeUsable = LIVE_TRADEABLE_EXCHANGES.includes(exchange) && !(mode === 'demo' && LIVE_ONLY_EXCHANGES.includes(exchange));
-
-  // Real Balance (USDT) is now re-read from the exchange EVERY cycle,
-  // regardless of whether a position is currently open — previously this
-  // fetch only ran further down, inside the "no open position, scan for a
-  // new one" branch, so the card froze at whatever it last showed for the
-  // entire lifetime of an open position: taking TP1/TP2 partials (which
-  // realize PnL into walletBalance immediately on the exchange) or moving
-  // the stop to breakeven never touched it, only closing the position
-  // fully (and re-entering that branch) did. A stale connected-key or
-  // unsupported-mode situation is reported once here rather than
-  // repeated below.
-  let equity = null;
-  if(exchangeUsable){
-    const cred = liveCred(exchange, mode);
-    if(cred){
-      try{
-        const balData = await callProxy('/api/futures/balance', { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase });
-        if(balData.ok) equity = balData.balance;
-        else showLiveMessage(`Could not read the real ${exchange} futures balance: ${balData.message || 'unknown error'}`, 'error');
-      }catch(err){
-        showLiveMessage(`Could not read the real ${exchange} futures balance: ${err.message}`, 'error');
-      }
-    }
-  }
-  if(equity != null && els.fuLiveBalance){
-    els.fuLiveBalance.textContent = '$' + equity.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
-  }
-
-  // Broad reconciliation — every cycle, not just when this app is about to
-  // place a new order: ask the exchange for EVERY open position on the
-  // account (not just symbols already in f.livePositions) and adopt any
-  // that aren't already tracked. Without this, a position this app never
-  // placed (manual open on the exchange, a different browser/session, or
-  // localStorage getting cleared) stays invisible here — "Open Position:
-  // None" — until/unless an order attempt happens to target that exact
-  // symbol and trips the preflight check; it also means a second real
-  // position on a different symbol could be running unmonitored alongside
-  // a tracked one. FUTURES_ALL_POSITIONS_GETTERS (server.js) only covers
-  // bybit so far (supported:false for anything else — a no-op, not an
-  // error). Runs whether or not armed, same reasoning as the closure-check
-  // loop above: monitoring something real that's already open doesn't
-  // require authorization to place a NEW entry.
-  {
-    const reconcileCred = liveCred(exchange, mode);
-    if(reconcileCred){
-      try{
-        const allData = await callProxy('/api/futures/positions', { exchange, mode, apiKey: reconcileCred.apiKey, secretKey: reconcileCred.secretKey, passphrase: reconcileCred.passphrase });
-        if(allData.ok && allData.supported && Array.isArray(allData.positions)){
-          for(const ep of allData.positions){
-            if(f.livePositions[ep.symbol]) continue; // already tracked — the per-symbol loop above handles it
-            f.livePositions[ep.symbol] = {
-              exchange, mode, orderId: null, side: ep.side, qty: ep.size, entry: ep.avgPrice,
-              leverage: ep.leverage, stopLossPrice: null, takeProfitPrice: null,
-              tp1Price: null, tp2Price: null, tp3Price: null,
-              riskAmountUsd: 0, openedAtMs: Date.now(), balanceBeforeUsd: equity,
-              setupType: 'adopted-existing', usePartialTp: false, tp2Fraction: null, tp1Fraction: null,
-              breakevenStopPrice: null, slAlgoId: null, breakevenMoved: true,
-              source: 'unknown', lastSize: ep.size, lastRealizedPnl: ep.curRealisedPnl || 0,
-            };
-            showLiveMessage(`Found an untracked open ${exchange} position — ${ep.symbol} ${ep.side} ${ep.size} @ ${ep.avgPrice} — not placed or previously tracked by this app; adopted into monitoring so it's no longer only visible on ${exchange} itself.`, 'error');
-            if(els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = `[${exchange}] ${ep.symbol} ${ep.side} ${ep.size} @ ${ep.avgPrice} (uPnL ${fmtUsd(ep.unrealisedPnl || 0)})`;
-          }
-          saveLivePositions();
-        }
-      }catch(err){ /* network hiccup — try again next cycle */ }
-    }
-  }
-
-  // 2) One real position at a time, deliberately — see README-SCALP.md.
-  // If something's already open, don't scan for a new one this cycle
-  // (the balance refresh above already happened either way).
-  if(Object.keys(f.livePositions).length > 0){ renderLive(); return; }
-  if(els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = 'None';
-
-  if(!f.liveArmed){
-    // Reached with nothing left open and not armed — this is a
-    // restored-position monitoring cycle whose position just closed (or
-    // the position closed and armed was never re-confirmed). Nothing
-    // left to watch and no authorization to scan/place a new entry, so
-    // stop polling here instead of running forever in the background —
-    // toggleLiveRunning() also resets the Start/Stop button label.
-    if(f.liveRunning) toggleLiveRunning();
-    return;
-  }
-
-  if(!LIVE_TRADEABLE_EXCHANGES.includes(exchange)){
-    showLiveMessage(`"${exchange}" isn't a supported Live/Demo exchange.`, 'error');
-    return;
-  }
-  if(mode === 'demo' && LIVE_ONLY_EXCHANGES.includes(exchange)){
-    showLiveMessage(`${exchange} has no Demo Trading available through its API — only Live.`, 'error');
-    return;
-  }
-  const cred = liveCred(exchange, mode);
-  if(!cred){
-    showLiveMessage(`No verified ${exchange} ${mode} key found — connect and verify one in Autotrade & Balances first.`, 'error');
-    return;
-  }
-  if(equity == null){
-    // Balance fetch above already failed and already showed why — don't
-    // scan for (let alone place) a new entry this cycle without a
-    // confirmed real balance to size it against.
-    return;
-  }
-
-  // Fetch the real, full symbol universe for this exchange (ranked,
-  // exclusion-filtered, cached — see getLiveTradeableSymbols above),
-  // then fetch real snapshots for BTCUSDT (always, for the shock filter
-  // below, even though it's excluded from being traded) plus the top-N
-  // tradeable symbols from that universe. A symbol whose fetch fails just
-  // gets skipped this cycle (runScanCycle already tolerates a null
-  // snapshot — see engine.js), not treated as fatal.
-  const universe = await getLiveTradeableSymbols(exchange);
-  if(!universe){
-    showLiveMessage(`Could not fetch the ${exchange} futures symbol list this cycle — skipping.`, 'error');
-    return;
-  }
-  // Quant Futures scans its own symbol list (BTC/ETH/SOL/BNB/XRP by default) on top of the volume-ranked
-  // universe — only when it is enabled; otherwise this is exactly the original list.
-  const quantProbe = { strategies: fu().strategies, quant: getQuantCfg() };
-  const scanList = scanSymbolsWithQuant(universe.top, quantProbe);
-  const fetchSymbols = ['BTCUSDT', ...scanList.filter(s => s !== 'BTCUSDT')];
-  const snapshots = {};
-  // Locked to 5m everywhere — see initLiveTimeframeInput's comment.
-  const timeframe = '5m';
-  await Promise.all(fetchSymbols.map(async symbol => {
-    try{ snapshots[symbol] = await fetchLiveSnapshot(exchange, symbol, timeframe); }catch(err){ /* skip this symbol this cycle */ }
-  }));
-  if(!snapshots.BTCUSDT){
-    showLiveMessage(`Could not fetch real BTC market data from ${exchange} this cycle (needed for the shock filter) — skipping.`, 'error');
-    return;
-  }
-
-  readSettingsFromInputs();
-  const f2 = fu();
-  const cfg = {
-    exchange, weights: DEFAULT_WEIGHTS, highSelectivity: f2.highSelectivity,
-    // The adaptive boost (see checkAdaptiveCircuitBreaker) stacks on top
-    // of whatever Min Confidence is set to, not in place of it — a
-    // losing streak makes live trading pickier than your own setting,
-    // never more lenient than it.
-    minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost),
-    minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
-    riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage,
-    strategies: f2.strategies, strategyRR: f2.strategyRR,
-    // Quant follows the same shared top controls — including the live adaptive confidence boost above.
-    quant: getQuantCfg({ log: true, minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost), riskPct: f2.riskPctPerTrade, highSelectivity: f2.highSelectivity }),
-  };
-  const dayStateShim = buildLiveDayStateShim(equity);
-  const { rows } = runScanCycle(cfg, dayStateShim, {
-    symbols: scanList,
-    getSnapshot: symbol => snapshots[symbol] || null,
-    now: () => Date.now(),
-    getBtcShock: () => computeBtcShock(snapshots.BTCUSDT.m5),
-  });
-  applyOrderFailureSkips(rows); // pairs whose last order was rejected drop out here so the scan moves on to the next one
-  renderScanner(rows); // reuse the same scanner table Paper mode renders into — it's one shared "what did the scan just find" view
-
-  const approved = rows.find(r => r.status === 'APPROVED');
-  if(!approved){
-    const boostNote = f2.liveAdaptiveConfidenceBoost > 0 ? ` (min confidence raised +${f2.liveAdaptiveConfidenceBoost} after recent losses)` : '';
-    showLiveMessage(`Armed on ${exchange} (${mode}), watching top ${universe.top.length} of ${universe.totalAvailable} available pairs by volume (BTC/ETH/SOL/LTC/DOGE/BNB/CLUSDT excluded) — no qualifying signal this cycle${boostNote}.`);
-    return;
-  }
-
-  // Optional AI second opinion (see js/ai-signal.js) — consulted ONLY here,
-  // on a row the engine above has ALREADY approved through every existing
-  // scoring/risk/no-trade check. It can only cancel this one order; it
-  // never sees a rejected row and never touches sizing/leverage/risk.
-  if(state.aiSignal.enabled && state.aiSignal.apiKey){
-    showLiveMessage(`Engine approved ${approved.symbol} ${approved.direction} — checking with ${approved.symbol ? state.aiSignal.provider : ''}…`);
-    const verdict = await getAiConfirmation({
-      symbol: approved.symbol, exchange, direction: approved.direction, setup: approved.setup,
-      regime: approved.regime, confidence: approved.confidence, entry: approved.entry, stop: approved.stop,
-      tp1: approved.tp1, riskRewardRatio: approved.riskReward, expectedNetPct: approved.expectedNetPct,
-      liquidityScore: approved.liquidityScore, reasons: approved.reasons,
-    });
-    if(verdict && verdict.ok && verdict.approve === false){
-      showLiveMessage(`AI signal check rejected ${approved.symbol} ${approved.direction} despite the engine's approval: "${verdict.reason||'no reason given'}" — no order placed this cycle.`, 'error');
-      return;
-    }
-    if(verdict && !verdict.ok){
-      showLiveMessage(`AI signal check couldn't complete (${verdict.message||'unknown error'}) — proceeding on the engine's own approval alone.`);
-    }
-  }
-
-  const side = approved.direction === 'LONG' ? 'Buy' : 'Sell'; // server normalizes casing per exchange — see FUTURES_SIDE_CASING in server.js
-
-  if(f2.liveTradeMode === 'manual'){
-    // Manual mode: scanning and every check above still run exactly as
-    // in Auto — this just stops one step short of actually placing the
-    // order. Show it and wait for a deliberate click instead.
-    f2.livePendingSignal = { ...approved, side, exchange, mode, equityAtDetection: equity, detectedAtMs: Date.now() };
-    renderLivePendingSignal();
-    showLiveMessage(`Manual mode: ${approved.symbol} ${side} qualifies (confidence ${approved.confidence}, ${approved.setup}) — waiting for you to click Execute Trade.`);
-    return;
-  }
-
-  await placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, equity);
+  return sharedRunLiveCycleInner(fu(), buildBrowserLiveAdapter());
 }
 
 // Exchanges the partial 30/30/40 TP structure + fee-adjusted breakeven
@@ -1377,113 +963,7 @@ const DURATION_TRACKED_EXCHANGES = ['binance', 'bybit'];
 // acted on. Manual mode's only difference is WHEN this gets called and
 // that it re-validates immediately beforehand — see executeLivePendingSignal.
 async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, equity){
-  const f = fu();
-  const openedAtMs = Date.now();
-  // Single-exit trades go through the single take-profit order path below, not the 30/30/40 legs
-  // (zero-size legs are rejected by the server and the TP2-fill breakeven automation would misfire):
-  //   approved.singleTarget — Nova Scalp: whole position exits at one 2R target
-  //   approved.singleTp     — NxTGen Quant Futures: one fixed target (>= 1:2), no partials/breakeven
-  const usePartialTp = PARTIAL_TP_EXCHANGES.includes(exchange) && approved.tpFractions && !approved.singleTarget && !approved.singleTp;
-  try{
-    showLiveMessage(`Placing a real ${mode} order on ${exchange}: ${approved.symbol} ${side} @ ~${approved.entry}…`);
-    const orderBody = {
-      exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase,
-      symbol: approved.symbol, side, qty: approved.sizing.qty, leverage: cfg.leverage, entryPrice: approved.entry,
-      stopLossPrice: approved.stop,
-    };
-    if(usePartialTp){
-      // TP1 @ 1.0R closes 30%, TP2 @ 1.5R closes 30%, TP3 @ 2.25R closes
-      // the remaining 40% — prices/fractions come straight from the
-      // engine's own fee-aware construction (attachTpLevels, engine.js),
-      // not recomputed here.
-      orderBody.tpLevels = [
-        { price: approved.tp1, fraction: approved.tpFractions.tp1 },
-        { price: approved.tp2, fraction: approved.tpFractions.tp2 },
-        { price: approved.tp3, fraction: approved.tpFractions.tp3 },
-      ];
-    } else {
-      orderBody.takeProfitPrice = approved.tp1; // legacy single-TP path for exchanges not yet migrated
-    }
-    const result = await callProxy('/api/futures/order', orderBody);
-    if(!result.ok){
-      // If the server's own preflight rejected this because the exchange
-      // already has a real open position on this symbol, it hands back
-      // that position's own detail (existingPosition) precisely so this
-      // doesn't just log an error and leave the UI showing "None" for it
-      // forever after — adopt it into tracking right here instead. Degraded
-      // metadata (no known stop/TP order IDs, no known setup/risk) since
-      // this app didn't place it, so it's monitored for closure/balance
-      // only — no breakeven-move automation on legs it never placed.
-      if(result.rejected && result.existingPosition){
-        const ep = result.existingPosition;
-        f.livePositions[approved.symbol] = {
-          exchange, mode, orderId: null, side: ep.side, qty: ep.size, entry: ep.avgPrice,
-          leverage: ep.leverage, stopLossPrice: null, takeProfitPrice: null,
-          tp1Price: null, tp2Price: null, tp3Price: null,
-          riskAmountUsd: 0, openedAtMs: Date.now(), balanceBeforeUsd: equity,
-          setupType: 'adopted-existing', usePartialTp: false, tp2Fraction: null, tp1Fraction: null,
-          breakevenStopPrice: null, slAlgoId: null, breakevenMoved: true,
-          source: 'unknown', lastSize: ep.size, lastRealizedPnl: ep.curRealisedPnl || 0,
-        };
-        saveLivePositions();
-        showLiveMessage(`Order rejected: ${result.message} — adopted the existing ${ep.side} ${approved.symbol} position (size ${ep.size} @ ${ep.avgPrice}) into tracking so it stops showing as "None"; its own TP/SL (if any) weren't set by this app and aren't managed here.`, 'error');
-        if(els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = `[${exchange}] ${approved.symbol} ${ep.side} ${ep.size} @ ${ep.avgPrice}`;
-      } else {
-        const skipMin = noteLiveOrderFailure(approved.symbol, result.message, 'rejected');
-        showLiveMessage(`Order rejected on ${approved.symbol}: ${result.message} — skipping ${approved.symbol} for ${skipMin} min and moving on to the next pair.`, 'error');
-      }
-      renderLive();
-      return;
-    }
-    f.livePositions[approved.symbol] = {
-      exchange, mode, orderId: result.orderId, side, qty: result.filledQty, entry: result.avgPrice,
-      leverage: result.leverage, stopLossPrice: result.stopLossPrice, takeProfitPrice: result.takeProfitPrice,
-      // TP1/TP2/TP3 prices for display (Open Position detail row) — for
-      // the partial-TP exchanges these come straight from the engine's
-      // own approved levels (same values just sent as tpLevels above);
-      // for the legacy single-TP path there's only ever one TP, shown as
-      // TP1 with TP2/TP3 left null.
-      tp1Price: usePartialTp ? approved.tp1 : result.takeProfitPrice,
-      tp2Price: usePartialTp ? approved.tp2 : null,
-      tp3Price: usePartialTp ? approved.tp3 : null,
-      riskAmountUsd: approved.sizing.riskAmountUsd, openedAtMs, balanceBeforeUsd: equity,
-      setupType: approved.setup,
-      ...(approved.quantMeta ? { quant: {
-        setup: approved.quantMeta.setup, setupName: approved.quantMeta.setupName, score: approved.quantMeta.score,
-        regime: approved.quantMeta.regime.label, entryTf: approved.quantMeta.entryTf, initialRR: approved.quantMeta.rewardRisk,
-        riskPctUsed: approved.riskPctUsed, stopDistPct: approved.quantMeta.stopDistPct, factors: approved.quantMeta.factors,
-      } } : {}),
-      // Fields only meaningful when usePartialTp is true — used by
-      // runLiveCycle's position-size polling to detect when TP2 has
-      // fully filled and trigger the breakeven move exactly once.
-      usePartialTp, tp2Fraction: approved.tpFractions ? approved.tpFractions.tp2 : null,
-      tp1Fraction: approved.tpFractions ? approved.tpFractions.tp1 : null,
-      breakevenStopPrice: approved.breakevenStopPrice, slAlgoId: result.slAlgoId || null,
-      breakevenMoved: false,
-      // source: 'bot' marks every position this app itself placed the entry
-      // order for (as opposed to 'unknown' — adopted from an existing
-      // position it found but didn't place, see the rejection branch
-      // above) — shown as a tag in the Trade History/Trade Log rows.
-      // lastSize/lastRealizedPnl seed the partial-TP-fill detector in the
-      // monitoring loop below (a drop in size + a rise in curRealisedPnl
-      // between two polls = a TP leg filled).
-      source: 'bot', lastSize: result.filledQty, lastRealizedPnl: 0,
-    };
-    const tpNote = usePartialTp
-      ? `TP1 ${approved.tp1} (30%) / TP2 ${approved.tp2} (30%) / TP3 ${approved.tp3} (40%)`
-      : `TP ${result.takeProfitPrice}`;
-    if(approved.quantMeta){
-      qlog(`${approved.symbol} order submitted: ${approved.direction} qty ${result.filledQty} (${mode}, ${exchange})`);
-      qlog(`${approved.symbol} position opened @ ${result.avgPrice} (${approved.quantMeta.setupName}, score ${approved.quantMeta.score}, risk ${approved.riskPctUsed.toFixed(2)}%)`);
-      qlog(`${approved.symbol} stop loss set @ ${result.stopLossPrice}`);
-      qlog(`${approved.symbol} take profit set @ ${result.takeProfitPrice} (1:${approved.quantMeta.rewardRisk})`);
-    }
-    showLiveMessage(`Real ${mode} position opened: ${approved.symbol} ${side} ${result.filledQty} @ ${result.avgPrice}, SL ${result.stopLossPrice} / ${tpNote} (order ${result.orderId}).`);
-  }catch(err){
-    const skipMin = noteLiveOrderFailure(approved.symbol, err.message, 'error');
-    showLiveMessage(`Order failed on ${approved.symbol}: ${err.message} — skipping ${approved.symbol} for ${skipMin} min.`, 'error');
-  }
-  renderLive();
+  return sharedPlaceLiveEntryOrder(fu(), buildBrowserLiveAdapter(), approved, side, exchange, mode, cred, cfg, equity);
 }
 
 function renderLivePendingSignal(){
@@ -2653,35 +2133,11 @@ const LIVE_ADAPTIVE_CONFIDENCE_MAX = 25;   // cap on how much stricter it can ge
 const LIVE_ADAPTIVE_CONFIDENCE_DECAY_MS = 30 * 60_000; // one step back down per 30min with no NEW loss
 
 function decayAdaptiveConfidenceBoost(){
-  const f = fu();
-  if(f.liveAdaptiveConfidenceBoost <= 0) return;
-  const elapsed = Date.now() - (f.liveAdaptiveConfidenceBoostAtMs || 0);
-  if(elapsed < LIVE_ADAPTIVE_CONFIDENCE_DECAY_MS) return;
-  f.liveAdaptiveConfidenceBoost = Math.max(0, f.liveAdaptiveConfidenceBoost - LIVE_ADAPTIVE_CONFIDENCE_STEP);
-  f.liveAdaptiveConfidenceBoostAtMs = Date.now(); // restart the clock for the next step down, not just the first
+  sharedDecayAdaptiveConfidenceBoost(fu());
 }
 
 function checkAdaptiveCircuitBreaker(netUsd){
-  const f = fu();
-  if(netUsd < 0){
-    f.liveConsecutiveLosses++;
-    f.liveAdaptiveConfidenceBoost = Math.min(LIVE_ADAPTIVE_CONFIDENCE_MAX, f.liveAdaptiveConfidenceBoost + LIVE_ADAPTIVE_CONFIDENCE_STEP);
-    f.liveAdaptiveConfidenceBoostAtMs = Date.now();
-  } else {
-    f.liveConsecutiveLosses = 0;
-    f.liveAdaptiveConfidenceBoost = 0;
-  }
-  // Deliberately no auto-pause/auto-disarm on consecutive losses anymore —
-  // per an explicit request, this bot runs continuously and only stops
-  // when the user clicks Stop Live/Demo Trading (or the daily loss/profit
-  // limits in noTradeEngine.js's evaluateNoTradeFilters are hit, which is
-  // a different, session-level control the user configures separately).
-  // A losing streak still makes new signals pickier via the confidence
-  // boost above (LIVE_ADAPTIVE_CONFIDENCE_STEP/MAX, decaying on its own —
-  // see decayAdaptiveConfidenceBoost) — it just no longer halts trading
-  // outright. LIVE_CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES and
-  // f.livePausedByCircuitBreaker are kept only so nothing else that might
-  // reference them breaks; neither is acted on here anymore.
+  sharedCheckAdaptiveCircuitBreaker(fu(), netUsd);
 }
 
 const EXCHANGE_DISPLAY_NAMES = { bybit: 'Bybit', binance: 'Binance', gateio: 'Gate.io', mexc: 'MEXC', bitget: 'Bitget' };
