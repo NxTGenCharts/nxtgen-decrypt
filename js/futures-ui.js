@@ -841,7 +841,10 @@ function recordLiveClosure(f, symbol, tracked, closed){
 // updating are not always the same instant.
 async function closeLivePosition(symbol){
   const f = fu();
-  const tracked = f.livePositions[symbol];
+  const sv = getServerSession(f.liveExchange);
+  const svPos = !f.livePositions[symbol] && sv && sv.openPositions ? sv.openPositions[symbol] : null;
+  const fromServer = !!svPos; // the server is managing this one — it books the closure itself on its next cycle
+  const tracked = f.livePositions[symbol] || (svPos ? { ...svPos, exchange: svPos.exchange || sv.exchange, mode: svPos.mode || sv.mode } : null);
   if(!tracked) return;
   const row = els.fuLiveCloseRow;
   const btn = row && row.querySelector(`.fu-close-pos-btn[data-symbol="${CSS.escape(symbol)}"]`);
@@ -882,6 +885,11 @@ async function closeLivePosition(symbol){
       if(btn){ btn.disabled = false; btn.textContent = `Close ${symbol}`; }
       return;
     }
+    if(fromServer){
+      showLiveMessage(`${symbol} position closed — the server will log it on its next cycle.`, 'success');
+      if(btn){ btn.disabled = false; btn.textContent = `Close ${symbol}`; }
+      return;
+    }
     recordLiveClosure(f, symbol, tracked, closedData);
     showLiveMessage(`${symbol} position closed.`, 'success');
     renderLive();
@@ -904,7 +912,11 @@ function renderLiveCloseButtons(){
   const f = fu();
   const row = els.fuLiveCloseRow;
   if(!row) return;
-  const symbols = Object.keys(f.livePositions);
+  // This tab's own positions, or — when the server is running the exchange — the server's (same fields).
+  const sv = getServerSession(f.liveExchange);
+  const own = Object.keys(f.livePositions).length > 0;
+  const positions = own ? f.livePositions : (sv && sv.openPositions ? sv.openPositions : {});
+  const symbols = Object.keys(positions);
   if(symbols.length === 0){
     row.style.display = 'none';
     row.innerHTML = '';
@@ -913,12 +925,13 @@ function renderLiveCloseButtons(){
   const dash = v => (v != null ? v : '—');
   row.style.display = 'flex';
   row.innerHTML = symbols.map(s => {
-    const p = f.livePositions[s];
+    const p = positions[s];
+    const ex = p.exchange || (sv && sv.exchange) || '';
     return `<div class="fu-pos-detail" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;width:100%;">
       <span style="font-size:11px;color:var(--dim);">
-        Entry ${dash(p.entry)} &middot; SL ${dash(p.stopLossPrice)} &middot; TP1 ${dash(p.tp1Price)} &middot; TP2 ${dash(p.tp2Price)} &middot; TP3 ${dash(p.tp3Price)}
+        Entry ${dash(p.entry)} &middot; SL ${dash(p.stopLossPrice)} &middot; TP1 ${dash(p.tp1Price)} &middot; TP2 ${dash(p.tp2Price)} &middot; TP3 ${dash(p.tp3Price)}${own ? '' : ' &middot; <i>running on the server</i>'}
       </span>
-      <button type="button" class="primary ghost fu-close-pos-btn" data-symbol="${s}" style="font-size:11px;padding:4px 10px;" title="Close the open ${s} ${p.side || ''} position on ${p.exchange}">Close ${s}</button>
+      <button type="button" class="primary ghost fu-close-pos-btn" data-symbol="${s}" style="font-size:11px;padding:4px 10px;" title="Close the open ${s} ${p.side || ''} position on ${ex}">Close ${s}</button>
     </div>`;
   }).join('');
 }
@@ -2110,7 +2123,7 @@ function renderLive(){
   if(els.fuLiveOpenPosition){
     const svPos = sv ? Object.entries(sv.openPositions || {}) : [];
     if(svPos.length){
-      els.fuLiveOpenPosition.textContent = svPos.map(([sym, p]) => `[${sv.exchange}] ${sym} ${p.side} ${p.qty} @ ${p.entry}`).join(' · ');
+      els.fuLiveOpenPosition.textContent = svPos.map(([sym, p]) => openPositionText(p.exchange || sv.exchange, sym, p)).join(' · ');
     } else if(Object.keys(f.livePositions).length === 0){
       els.fuLiveOpenPosition.textContent = 'None';
     }
@@ -2219,7 +2232,8 @@ function updateLiveModeUI(){
   const onServer = isServerArmed(exchange);
   if(els.fuLiveArmWrap) els.fuLiveArmWrap.style.display = '';
   if(onServer){
-    showLiveMessage(`Running on the server for ${name} (${mode === 'live' ? 'LIVE — real funds' : 'Demo'}) — you can close this tab. Use the switch below to stop it.`);
+    const svMode = (getServerSession(exchange) || {}).mode || mode; // the server's network, not whatever this device's row happens to be set to
+    showLiveMessage(`Running on the server for ${name} (${svMode === 'live' ? 'LIVE — real funds' : 'Demo'}) — you can close this tab. Use the switch below to stop it.`);
   } else if(!f.liveArmed){
     showLiveMessage(`${name} (${mode === 'live' ? 'Live' : 'Demo'}) selected but not armed — flip the switch below to arm.`);
   } else {
@@ -2250,20 +2264,37 @@ function updateLiveModeUI(){
 const FAST_TICK_MS = 2000;
 let fastTickTimer = null;
 
-async function runFastTick(){
+// Latest mark price / unrealised P&L per symbol, from the public snapshot. Kept so renderLive() (which repaints on every
+// server status refresh) can show them instead of blanking the live P&L between ticks.
+let liveMarks = {};
+
+// Positions to keep a live mark on: the ones this tab tracks, plus any the SERVER is running on the selected exchange.
+function positionsForTick(){
   const f = fu();
-  const symbols = Object.keys(f.livePositions);
-  if(symbols.length === 0) return;
-  for(const symbol of symbols){
-    const tracked = f.livePositions[symbol];
+  const out = Object.entries(f.livePositions);
+  const sv = getServerSession(f.liveExchange);
+  if(sv) for(const [sym, p] of Object.entries(sv.openPositions || {})) if(!f.livePositions[sym]) out.push([sym, { ...p, exchange: p.exchange || sv.exchange }]);
+  return out;
+}
+
+function openPositionText(exchange, symbol, p){
+  const m = liveMarks[symbol];
+  return `[${exchange}] ${symbol} ${p.side} ${p.qty || 0} @ ${p.entry}` + (m ? ` — mark ${m.price} (uPnL ${fmtUsd(m.uPnl)})` : '');
+}
+
+async function runFastTick(){
+  const entries = positionsForTick();
+  if(entries.length === 0) return;
+  for(const [symbol, tracked] of entries){
     try{
       const snap = await fetchLiveSnapshot(tracked.exchange, symbol);
       const price = snap && snap.price;
       if(price == null || !tracked.entry) continue;
       const qty = tracked.qty || 0;
       const uPnl = tracked.side === 'Buy' ? (price - tracked.entry) * qty : (tracked.entry - price) * qty;
+      liveMarks[symbol] = { price, uPnl };
       if(els.fuLiveOpenPosition){
-        els.fuLiveOpenPosition.textContent = `[${tracked.exchange}] ${symbol} ${tracked.side} ${qty} @ ${tracked.entry} — mark ${price} (uPnL ${fmtUsd(uPnl)})`;
+        els.fuLiveOpenPosition.textContent = entries.map(([sym, p]) => openPositionText(p.exchange, sym, p)).join(' · ');
       }
     }catch(err){ /* a missed tick just leaves the last-known number showing until the next tick or the next real 8s poll — harmless */ }
   }
@@ -2294,7 +2325,8 @@ function toggleLiveRunning(){
   } else {
     clearInterval(f.liveTimer);
     f.liveTimer = null;
-    stopFastTick();
+    const svHere = getServerSession(f.liveExchange);
+    if(!(svHere && Object.keys(svHere.openPositions || {}).length)) stopFastTick(); // keep ticking if the server still holds a position
     if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.querySelector('.btn-label').textContent = 'Start Live/Demo Trading';
     if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.classList.remove('on');
   }
@@ -2349,7 +2381,12 @@ function initLiveTradingControls(){
     },
   });
   document.addEventListener('nxtgen-server-arm-changed', updateLiveModeUI);
-  document.addEventListener('nxtgen-server-status', renderLive); // new numbers from the server -> repaint the balance / P&L cards
+  document.addEventListener('nxtgen-server-status', () => {
+    renderLive(); // new numbers from the server -> repaint the balance / P&L cards
+    const sv = getServerSession(fu().liveExchange);
+    if(sv && Object.keys(sv.openPositions || {}).length) startFastTick(); // live mark price / uPnL for the server's open position
+    else if(!fu().liveRunning){ stopFastTick(); liveMarks = {}; }
+  });
   if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.addEventListener('click', toggleLiveRunning);
   // Delegated once from the row itself, since renderLiveCloseButtons()
   // rebuilds the buttons' innerHTML on every render (open/close/cycle) —

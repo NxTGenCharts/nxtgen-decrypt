@@ -189,6 +189,7 @@ function render(){
 
   $('swPill').textContent = serverOn || (!tabOn && !manual) ? 'RUNS ON SERVER 24/7' : 'RUNS IN THIS TAB';
 
+  const noToken = !getToken(false);
   let sub;
   if(serverOn){
     const bits = [`${nameOf(sess.exchange)} · ${sess.mode === 'live' ? 'LIVE' : 'Demo'}`, `${sess.trades || 0} trades (${sess.wins || 0}W/${sess.losses || 0}L)`, `net ${fmtUsd(sess.netPnlUsd)}`];
@@ -200,6 +201,8 @@ function render(){
       (f.liveRunning ? '' : ' Press Start Live/Demo Trading to begin.');
   } else if(sess && Object.keys(sess.openPositions || {}).length){
     sub = 'OFF — no new entries. The open position keeps its exchange-side SL/TP until it closes.';
+  } else if(noToken){
+    sub = 'Server status not loaded on this device yet.';
   } else if(manual){
     sub = 'OFF — Manual mode arms this tab: signals wait for your Execute click.';
   } else {
@@ -214,6 +217,12 @@ function render(){
   }
   if(!text && readOnly){ text = 'This token is read-only: you can watch, not switch the server on or off.'; }
   if(!text && serverOn && sess.lastMessageKind === 'error' && sess.lastMessage){ text = sess.lastMessage; kind = 'error'; }
+  // Other exchanges the server is running (this device's row may be a different one) — so the page never looks "idle" while it isn't.
+  const others = lastStatus && lastStatus.sessions ? Object.values(lastStatus.sessions).filter(x => x.armed && x.exchange !== sel.exchange) : [];
+  if(!text && others.length) text = 'Also running on the server: ' + others.map(x => `${nameOf(x.exchange)} · ${x.mode === 'live' ? 'LIVE' : 'Demo'}`).join(', ') + '.';
+  // A device that has never been given the access token can't see the server at all, so "OFF" here would be a guess.
+  if(!text && noToken) text = 'Not connected to the server on this device yet — enter the access token to see what it is running.';
+  $('swTokenBtn').style.display = noToken ? '' : 'none';
   const el = $('swMsg');
   el.textContent = text;
   el.style.color = kind === 'error' ? 'var(--red)' : kind === 'ok' ? 'var(--green)' : 'var(--dim)';
@@ -342,9 +351,11 @@ export function initServerWorker(){
         </span>
       </label>
       <div id="swMsg" role="status" aria-live="polite" style="font-size:12px;min-height:16px;margin-top:6px;"></div>
+      <button type="button" id="swTokenBtn" class="primary ghost" style="display:none;font-size:11px;padding:4px 10px;margin-top:6px;">Enter access token</button>
     </div>`;
 
   $('swToggle').addEventListener('change', onToggle);
+  $('swTokenBtn').addEventListener('click', () => { if(getToken(true)) poll(); });
   render();
   setInterval(render, 1500); // cheap: keeps the switch matching the selected exchange row, and clears a message that belonged to another row
   poll();

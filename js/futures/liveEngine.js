@@ -396,6 +396,9 @@ export async function runLiveCycleInner(session, adapter){
     }
   }
   if(equity != null) adapter.updateBalanceLabel && adapter.updateBalanceLabel('$' + equity.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 }), equity);
+  // Session starting balance = the first real balance seen. It used to be captured only when a scan ran, so a session
+  // that began with a position already open (or adopted from the exchange) never scanned and showed "—" for good.
+  if(equity != null && session.liveStartingEquity == null) session.liveStartingEquity = equity;
 
   {
     const reconcileCred = adapter.getCred(exchange, mode);
