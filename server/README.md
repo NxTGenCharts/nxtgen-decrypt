@@ -135,10 +135,10 @@ never at risk from any of this — see "Live/Demo futures trading" above.
 What the worker adds is the ability to open **new** ones without a
 browser open.
 
-- `POST /api/worker/arm` — body: `{ armPhrase, exchange, mode, apiKey, secretKey, passphrase, leverage, riskPctPerTrade, minConfidence, minRiskReward, dailyProfitTargetPct, maxDailyLossPct }`. `armPhrase` must be exactly `"PLACE REAL ORDERS"` — same phrase the app's own Arm control uses. Starts an 8-second scan/manage loop immediately. One position at a time, same as the browser bot.
-- `POST /api/worker/disarm` — stops placing new entries. Any position already open keeps its exchange-side SL/TP either way; this just means the worker stops polling it for closure bookkeeping until you re-arm.
-- `GET /api/worker/status` — armed state, open position(s), running totals (trades/wins/losses/PnL), last message, recent closed trades.
-- `GET /api/worker/logs?since=<epoch_ms>` — log lines since that time, for a "what happened while I was away" view.
+- `POST /api/worker/arm` — body: `{ armPhrase, exchange, mode, apiKey, secretKey, passphrase, leverage, riskPctPerTrade, minConfidence, minRiskReward, dailyProfitTargetPct, maxDailyLossPct }`. `armPhrase` must be exactly `"PLACE REAL ORDERS"` — same phrase the app's own Arm control uses. Starts an 8-second scan/manage loop for that exchange immediately. One position at a time per exchange, same as the browser bot. **Each exchange is its own independent session** (own key, settings, cooldowns, equity baseline, log), so several can run side by side; arming an exchange that's already armed is refused. Extra optional fields: `strategies`, `strategyRR`, `quantCfg`, `tzOffsetMinutes` (so daily targets reset at your midnight), and `explicitSettings: true` — with that flag set the server refuses to arm unless leverage, risk %, min confidence, daily profit target, max daily loss and a strategy selection were all actually sent, so nothing falls back to a default. Values outside the app's own ranges are clamped, and Demo is never silently turned into Live (MEXC has no Demo, so a Demo request for it is rejected).
+- `POST /api/worker/disarm` — body `{ exchange? }` (omit to stop every exchange). Stops placing new entries. Any position already open keeps its exchange-side SL/TP either way; this just means the worker stops polling it for closure bookkeeping until you re-arm.
+- `GET /api/worker/status` — `{ status: { armed, sessions: { <exchange>: { armed, mode, openPositions, trades/wins/losses, netPnlUsd, recentTrades, lastMessage, settings } } } }`. `settings` echoes exactly what each session is trading with (never a credential).
+- `GET /api/worker/logs?since=<epoch_ms>&exchange=<id>` — log lines since that time (all exchanges merged, each tagged with its `exchange`, or one exchange), for a "what happened while I was away" view.
 
 **Credentials are never persisted by this code** — same rule as the rest of this
 proxy (unless you opt in to server-saved settings below). They live in a variable in this process for as long as it's
@@ -171,7 +171,9 @@ browser, and none is written to disk by this code.
 | `WORKER_EXCHANGE` | `bybit`, `binance`, `gateio`, `mexc` or `bitget` |
 | `WORKER_MODE` | `demo` (default) or `live` |
 | `WORKER_API_KEY`, `WORKER_SECRET_KEY`, `WORKER_PASSPHRASE` | The credential the worker trades with (passphrase: Bitget only). |
-| `WORKER_LEVERAGE`, `WORKER_RISK_PCT`, `WORKER_MIN_CONFIDENCE`, `WORKER_MIN_RR`, `WORKER_MIN_NET_PROFIT_PCT`, `WORKER_DAILY_PROFIT_TARGET_PCT`, `WORKER_MAX_DAILY_LOSS_PCT`, `WORKER_HIGH_SELECTIVITY` | Optional — same meaning as the dashboard's risk settings; unset ones use the defaults. |
+| `WORKER_LEVERAGE`, `WORKER_RISK_PCT`, `WORKER_MIN_CONFIDENCE`, `WORKER_DAILY_PROFIT_TARGET_PCT`, `WORKER_MAX_DAILY_LOSS_PCT` | **Required to arm from the environment** (auto-arm or the dashboard's "saved keys" arm). The worker refuses to trade on default risk numbers — it names whichever of these is missing. Same meaning as the app's fields of the same names. |
+| `WORKER_MIN_RR`, `WORKER_MIN_NET_PROFIT_PCT`, `WORKER_HIGH_SELECTIVITY` | Optional extras. |
+| `WORKER_TZ_OFFSET_MINUTES` | When "daily" targets reset, as minutes from UTC (e.g. `60` for UTC+1). Default: UTC midnight. |
 | `WORKER_STRATEGIES` | Optional JSON of strategy on/off, e.g. `{"novaScalp":true,"rangeReversal":true,"quantFutures":true}`. Ids: `aiScalp`, `novaScalp`, `trendContinuation`, `liquiditySweep`, `rangeReversal`, `breakoutRetest`, `quantFutures`. Unlisted ids use their defaults. |
 | `WORKER_AUTOARM` | `true` = arm automatically ~3 s after every server start, using the saved settings above. |
 
@@ -183,6 +185,24 @@ When `WORKER_EXCHANGE` + `WORKER_API_KEY` + `WORKER_SECRET_KEY` are set:
 - A free Render instance sleeps when idle and the worker sleeps with it; wake-up re-arms it (if auto-arm is on), but it isn't trading while asleep. Use an always-on instance for real 24/7.
 
 **Sharing the dashboard.** `nxtgendecrypt.site/worker/#token=<token>&proxy=<server url>` opens pre-filled: the page saves both on that device and removes them from the address bar immediately (the part after `#` is never sent to any server). Give people the `WORKER_VIEW_TOKEN` version unless they should be able to arm/disarm — the admin token can start and stop trading on your account.
+
+## "Run on server" button (Autotrade & Futures page)
+
+Under the Live / Demo Trading panel there's a **Run on server — 24/7** block
+(`js/server-worker.js`). It arms the exchange + network currently selected in that
+panel, using the key already saved and verified in the browser, and the values
+**currently on screen** on that page: Risk per trade, Leverage, Min confidence,
+Daily Profit Target, Max Daily Loss, High Selectivity and the Strategies list
+(plus the saved NxTGen Quant settings). They're shown in a summary first, re-read
+at the moment you press Arm, and sent with `explicitSettings: true` — a blank field
+makes the button refuse and name it. Each session's active values are echoed back
+under "Running on the server".
+
+- **Several exchanges:** switch the exchange row, press Arm again — each keeps the settings it was armed with. Change a value later and it only applies to the *next* arm; Stop and re-arm to apply it.
+- **Daily targets roll over:** "daily" profit target / max daily loss are measured against the balance at the start of the local day (the browser's timezone, sent at arm time). At local midnight the baseline resets, so a hit target pauses the bot until the next day rather than forever.
+- **Don't run both:** the button refuses if the in-browser bot is already running on that exchange — two bots on one account would double up trades.
+- **Restart = stopped:** the key lives only in server memory. A restart/redeploy/sleep stops every session (and resets the day baseline); press Arm again, or use the env-var route above for one exchange with auto-arm.
+- **Not included:** NxTGen Grid and the Trading Bots (Futures Grid / DCA) still run in the browser only.
 
 **Dashboard:** `worker/index.html` (repo root) is a self-contained mobile-friendly page for this — point it at your deployed proxy URL, arm/disarm, and watch status + the activity log live. Deploy it alongside the rest of the static site (or open the file directly) — it only talks to the endpoints above, nothing else to configure.
 

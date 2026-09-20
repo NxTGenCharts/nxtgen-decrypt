@@ -146,7 +146,7 @@
     <input id="armPhrase" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="PLACE REAL ORDERS">
 
     <button class="btn-arm" id="armBtn">Arm — start trading</button>
-    <button class="btn-disarm" id="disarmBtn">Disarm — stop new entries</button>
+    <button class="btn-disarm" id="disarmBtn">Disarm all — stop new entries</button>
     <div class="msg" id="armMsg"></div>
     </div>
   </div>
@@ -253,37 +253,46 @@
 
   function renderStatus(status){
     const badge = $('statusBadge');
-    const armed = !!status.armed;
+    const sessions = Object.values(status.sessions || {});
+    const armedList = sessions.filter(x => x.armed);
+    const armed = armedList.length > 0;
     badge.innerHTML = armed
-      ? '<span class="badge badge-armed">ARMED — ' + (status.exchange || '') + ' ' + (status.mode || '') + '</span>'
+      ? armedList.map(x => '<span class="badge badge-armed" style="margin-right:6px;">ARMED — ' + escapeHtml(EX_NAMES[x.exchange] || x.exchange) + ' ' + escapeHtml(x.mode || '') + '</span>').join('')
       : '<span class="badge badge-disarmed">DISARMED</span>';
 
-    $('armBtn').disabled = armed;
+    // The manual/server-keys Arm button targets one exchange (the server's saved one,
+    // or the one picked in the form) — disable it only if THAT one is already armed.
+    const targetEx = serverKeys ? status.envExchange : $('exchange').value;
+    const targetArmed = !!(status.sessions && status.sessions[targetEx] && status.sessions[targetEx].armed);
+    $('armBtn').disabled = targetArmed;
     $('disarmBtn').disabled = !armed;
 
     let body = '';
-    if(armed || status.trades){
-      body += '<div class="kv"><span class="k">Last cycle</span><span>' + fmtAgo(status.lastCycleAtMs) + '</span></div>';
-      body += '<div class="kv"><span class="k">Trades / W / L</span><span>' + (status.trades||0) + ' / ' + (status.wins||0) + ' / ' + (status.losses||0) + '</span></div>';
-      body += '<div class="kv"><span class="k">Net P&amp;L (session)</span><span>' + fmtUsd(status.netPnlUsd) + '</span></div>';
-      if(status.lastMessage) body += '<div class="kv"><span class="k">Last message</span><span style="text-align:right;max-width:60%;">' + escapeHtml(status.lastMessage) + '</span></div>';
-    }
+    sessions.forEach(x => {
+      body += '<div style="margin-top:10px;font-weight:600;font-size:13px;">' + escapeHtml(EX_NAMES[x.exchange] || x.exchange) + ' · ' + escapeHtml(x.mode || '') + (x.armed ? '' : ' <span style="color:var(--dim);font-weight:400;">(stopped)</span>') + '</div>';
+      body += '<div class="kv"><span class="k">Last cycle</span><span>' + fmtAgo(x.lastCycleAtMs) + '</span></div>';
+      body += '<div class="kv"><span class="k">Trades / W / L</span><span>' + (x.trades||0) + ' / ' + (x.wins||0) + ' / ' + (x.losses||0) + '</span></div>';
+      body += '<div class="kv"><span class="k">Net P&amp;L (session)</span><span>' + fmtUsd(x.netPnlUsd) + '</span></div>';
+      const st = x.settings;
+      if(st) body += '<div class="kv"><span class="k">Using</span><span style="text-align:right;max-width:70%;">' + escapeHtml(st.leverage + 'x · ' + st.riskPctPerTrade + '% risk · conf ' + st.minConfidence + ' · target ' + (st.dailyProfitTargetPct ?? '—') + '% · loss cap ' + (st.maxDailyLossPct ?? '—') + '%') + '</span></div>';
+      if(x.lastMessage) body += '<div class="kv"><span class="k">Last message</span><span style="text-align:right;max-width:60%;">' + escapeHtml(x.lastMessage) + '</span></div>';
+    });
     $('statusBody').innerHTML = body;
 
-    const posKeys = status.openPositions ? Object.keys(status.openPositions) : [];
-    if(posKeys.length){
-      $('posBody').innerHTML = posKeys.map(sym => {
-        const p = status.openPositions[sym];
-        return '<div class="pos"><b>' + sym + '</b> ' + (p.side||'') + ' ' + (p.qty||'') + ' @ ' + (p.entry||'')
+    let posHtml = '';
+    sessions.forEach(x => {
+      Object.keys(x.openPositions || {}).forEach(sym => {
+        const p = x.openPositions[sym];
+        posHtml += '<div class="pos"><b>' + escapeHtml(sym) + '</b> <span style="color:var(--dim);">' + escapeHtml(EX_NAMES[x.exchange] || x.exchange) + '</span> ' + escapeHtml(p.side||'') + ' ' + escapeHtml(p.qty||'') + ' @ ' + escapeHtml(p.entry||'')
           + '<br>SL ' + (p.stopLossPrice ?? '—') + ' · TP1 ' + (p.tp1Price ?? '—') + ' · TP2 ' + (p.tp2Price ?? '—') + ' · TP3 ' + (p.tp3Price ?? '—') + '</div>';
-      }).join('');
-    } else {
-      $('posBody').innerHTML = '';
-    }
+      });
+    });
+    $('posBody').innerHTML = posHtml;
 
-    const trades = status.recentTrades || [];
+    const trades = [];
+    sessions.forEach(x => (x.recentTrades || []).forEach(t => trades.push({ ...t, _ex: x.exchange })));
     $('tradesBody').innerHTML = trades.length
-      ? trades.map(t => '<div class="kv"><span class="k">' + t.symbol + ' ' + (t.side||'') + '</span><span>' + fmtUsd(t.netUsd) + '</span></div>').join('')
+      ? trades.map(t => '<div class="kv"><span class="k">' + escapeHtml((EX_NAMES[t._ex] || t._ex) + ' ' + t.symbol + ' ' + (t.side||'')) + '</span><span>' + fmtUsd(t.netUsd) + '</span></div>').join('')
       : 'No closed trades yet this session.';
   }
 
@@ -299,7 +308,7 @@
       const div = document.createElement('div');
       div.className = 'line ' + (l.kind === 'error' ? 'err' : l.kind === 'success' ? 'ok' : '');
       const t = new Date(l.ts).toLocaleTimeString();
-      div.innerHTML = '<span class="t">' + t + '</span>  ' + escapeHtml(l.msg);
+      div.innerHTML = '<span class="t">' + t + '</span>  ' + (l.exchange ? '[' + escapeHtml(l.exchange) + '] ' : '') + escapeHtml(l.msg);
       el.appendChild(div);
       lastLogTs = Math.max(lastLogTs, l.ts);
     }

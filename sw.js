@@ -26,6 +26,7 @@ const PRECACHE = [
   "/js/futures/quant/stats.js",
   "/js/futures/quant/validation.js",
   "/js/quant-ui.js",
+  "/js/server-worker.js",
   "/",
   "/triangular-arbitrage/",
   "/cross-arbitrage/",
