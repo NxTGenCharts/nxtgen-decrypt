@@ -68,7 +68,7 @@ has a DOM to update or a cross-session log to write to.
   onPendingSignal(session)              -> Manual-mode UI hook (optional; browser only)
   onDisarmedIdle(session)               -> called when disarmed AND nothing left open — stop polling (optional)
   updateOpenPositionLabel(text)         -> DOM label update (optional)
-  updateBalanceLabel(text)              -> DOM label update (optional)
+  updateBalanceLabel(text, equity)      -> DOM label update (optional); `equity` is the same figure as a number
   appendPersistentTrade(record)         -> cross-session trade log (optional)
   syncSettings()                        -> pull form-input values onto session before building cfg (optional; browser only)
   isAiEnabled()                         -> boolean (optional)
@@ -395,7 +395,7 @@ export async function runLiveCycleInner(session, adapter){
       }
     }
   }
-  if(equity != null) adapter.updateBalanceLabel && adapter.updateBalanceLabel('$' + equity.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 }));
+  if(equity != null) adapter.updateBalanceLabel && adapter.updateBalanceLabel('$' + equity.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 }), equity);
 
   {
     const reconcileCred = adapter.getCred(exchange, mode);
@@ -445,10 +445,12 @@ export async function runLiveCycleInner(session, adapter){
   const fetchSymbols = ['BTCUSDT', ...scanList.filter(s => s !== 'BTCUSDT')];
   const snapshots = {};
   const timeframe = '5m';
+  const snapErrors = {};
   await Promise.all(fetchSymbols.map(async symbol => {
-    try{ snapshots[symbol] = await adapter.fetchSnapshot(exchange, symbol, timeframe); }catch(err){ /* skip this symbol this cycle */ }
+    try{ snapshots[symbol] = await adapter.fetchSnapshot(exchange, symbol, timeframe); }catch(err){ snapErrors[symbol] = (err && err.message) || 'unknown error'; /* skip this symbol this cycle */ }
   }));
-  if(!snapshots.BTCUSDT){ adapter.notify && adapter.notify(`Could not fetch real BTC market data from ${exchange} this cycle (needed for the shock filter) — skipping.`, 'error'); return; }
+  // BTC is only ever fetched as a market-wide REFERENCE for the shock filter — it is never traded (see excludedSymbols.js).
+  if(!snapshots.BTCUSDT){ adapter.notify && adapter.notify(`Could not fetch BTC reference data from ${exchange} this cycle (used only by the market-shock filter — BTC is never traded): ${snapErrors.BTCUSDT || 'no response'} — skipping.`, 'error'); return; }
 
   adapter.syncSettings && adapter.syncSettings();
   const cfg = {

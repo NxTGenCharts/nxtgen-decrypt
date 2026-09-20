@@ -69,7 +69,7 @@ function buildAdapter(runner){
       const tf = timeframe || '5m';
       const res = await fetch(`${selfBaseUrl}/api/futures/snapshot?exchange=${exchange}&symbol=${symbol}&interval=${tf}`);
       const data = await res.json().catch(() => null);
-      if(!data || !data.ok) throw new Error((data && data.message) || 'Snapshot fetch failed.');
+      if(!data || !data.ok) throw new Error((data && data.message) || `Snapshot fetch failed (HTTP ${res.status}).`);
       return data.snapshot;
     },
     getCred(exchange, mode){
@@ -99,7 +99,7 @@ function buildAdapter(runner){
       runner.timer = null;
     },
     updateOpenPositionLabel(){ /* see statusOf() — reads session.livePositions directly instead */ },
-    updateBalanceLabel(){ /* see statusOf() if a balance field is added later */ },
+    updateBalanceLabel(text, equity){ if(equity != null) session.liveBalanceUsd = equity; }, // surfaced by statusOf() so the page can show the server's balance
     appendPersistentTrade(){ /* the session-scoped liveTradeHistory already covers /api/worker/status's "recent trades"; no separate cross-session log server-side */ },
     syncSettings(){ /* no form to read from — session's cfg fields are set once, at arm time */ },
     isAiEnabled(){ return false; }, // no AI-signal-provider key exists server-side
@@ -423,6 +423,7 @@ function statusOf(runner){
     armedAtMs: s.armedAtMs, lastCycleAtMs: s.lastCycleAtMs,
     lastMessage: s.lastMessage, lastMessageKind: s.lastMessageKind,
     openPositions: s.livePositions,
+    balanceUsd: s.liveBalanceUsd ?? null, startingBalanceUsd: s.liveStartingEquity ?? null,
     trades: s.liveTrades, wins: s.liveWins, losses: s.liveLosses,
     netPnlUsd: s.liveNetPnlUsd, grossPnlUsd: s.liveGrossPnlUsd, feesUsd: s.liveFeesUsd,
     recentTrades: s.liveTradeHistory.slice(0, 20),

@@ -205,6 +205,8 @@ typed phrase + Arm button and the separate "Run on server" switch.
 - The switch mirrors `/api/worker/status` (and the tab's armed flag), so it also shows ON
   after a refresh or when the server auto-armed itself. **Start Live/Demo Trading** is
   disabled while the server runs that exchange, so two bots can never trade one account.
+- While the server runs an exchange, the page's Real Balance / Starting Balance / Open Position / Trades / P&L cards and the session trade history show the **server's** numbers (from `/api/worker/status`, refreshed every ~8s) instead of the tab's own (zeroed) counters.
+- The worker's own loopback calls to `/api/futures/snapshot` (BTC reference + top-25 scan list every cycle, ~195/min) skip the 120/min public rate limit; anything arriving over the network — including requests that carry an `X-Forwarded-For` header — is limited as before. BTC is fetched only as the market-shock reference and is never traded (see `js/futures/excludedSymbols.js`).
 - The access token is asked for once (a prompt, the first time the server is needed) and
   remembered on that device; a rejected token is asked for again. Live mode asks for a
   confirm() instead of typing the arm phrase (the server API still takes `armPhrase`; the

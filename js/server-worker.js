@@ -158,6 +158,14 @@ const failText = (r, dflt) => r.code === 'unauthorized' ? 'The server rejected t
 function fmtUsd(n){ if(n == null) return '—'; return (n < 0 ? '-$' : '+$') + Math.abs(n).toFixed(2); }
 function sessionFor(exchange){ return lastStatus && lastStatus.sessions ? lastStatus.sessions[exchange] : null; }
 export function isServerArmed(exchange){ const x = sessionFor(exchange); return !!(x && x.armed); }
+// The server's live numbers for an exchange (balance, trades, P&L, open position, recent trades), or null when the
+// server isn't running it. futures-ui.js paints these into the same Real Balance / stats cards the in-tab bot uses,
+// so a server run shows up on the page instead of only the switch turning on.
+export function getServerSession(exchange){
+  const x = sessionFor(exchange);
+  return x && (x.armed || Object.keys(x.openPositions || {}).length) ? x : null;
+}
+const announceStatus = () => document.dispatchEvent(new CustomEvent('nxtgen-server-status'));
 
 // A message belongs to the exchange/network it was raised for — switching the row clears it,
 // so an old "no verified live key" can never linger under a Demo selection.
@@ -226,6 +234,7 @@ async function poll(){
     readOnly = r.role === 'view';
     if(msg.src === 'poll') msg = { text: '', kind: '', key: '', src: '' }; // the earlier poll problem is gone
     render();
+    announceStatus();
   }catch(err){
     setMsg(`Can't reach the server: ${err.message}`, 'error', 'poll');
   }
@@ -273,6 +282,7 @@ async function turnOnServer(){
   if(r.ok){
     lastStatus = r.status;
     setMsg(`Running on the server: ${name} (${sel.mode}). You can close this tab now.`, 'ok');
+    announceStatus();
   } else if(/^Already armed/i.test(r.message || '')){
     const s = await wcall('/api/worker/status', 'GET', null, tok).catch(() => null);
     if(s && s.ok){ lastStatus = s.status; readOnly = s.role === 'view'; }
@@ -294,6 +304,7 @@ async function turnOff(){
   const r = await wcall('/api/worker/disarm', 'POST', { exchange: sel.exchange }, tok);
   if(r.ok){
     lastStatus = r.status;
+    announceStatus();
     setMsg(`Stopped ${name}. Any open position keeps its exchange-side SL/TP.` +
       (r.status && r.status.autoArm ? ' Server auto-arm is on, so it will start itself again after the next server restart.' : ''), 'ok');
   } else {

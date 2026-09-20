@@ -23,7 +23,7 @@ import { fmtPct } from './utils.js';
 import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS, scanSymbolsWithQuant } from './futures/engine.js';
 import { QUANT_ID, QUANT_TYPE } from './futures/quant/config.js';
 import { qlog } from './futures/quant/log.js';
-import { isServerArmed, setBrowserArmHooks } from './server-worker.js';
+import { isServerArmed, getServerSession, setBrowserArmHooks } from './server-worker.js';
 import { getQuantCfg, setQuantProviders, setQuantConfigListener, quantCardStatsLine, getQuantRewardRisk, updateQuantConfig } from './quant-ui.js';
 import { mockMarket } from './futures/mockMarket.js';
 import { WATCHLIST_TOP_N, rankTopByVolume } from './futures/watchlist.js';
@@ -2016,7 +2016,8 @@ function initTradeLog(){
 
 function renderLiveHistory(){
   if(!els.fuLiveHistoryRows) return;
-  const history = fu().liveTradeHistory;
+  const sv = getServerSession(fu().liveExchange);
+  const history = sv ? (sv.recentTrades || []) : fu().liveTradeHistory;
   if(!history.length){ els.fuLiveHistoryRows.innerHTML = '<div class="fu-empty">No live/demo trades yet this session.</div>'; return; }
   els.fuLiveHistoryRows.innerHTML = history.slice(0, 50).map(t => `
     <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr 1.4fr;">
@@ -2071,6 +2072,7 @@ function clearSavedLivePositions(){
   try{ localStorage.removeItem(LIVE_POSITIONS_KEY); }catch(e){ /* non-fatal */ }
 }
 
+let renderedFromServer = false; // did the last renderLive() paint the server's numbers? (so its balance isn't left behind when the session ends)
 function renderLive(){
   const f = fu();
   // f.livePositions itself was previously in-memory only, so a page
@@ -2083,15 +2085,36 @@ function renderLive(){
   // here keeps this in sync everywhere without scattering save calls
   // through runLiveCycleInner and placeLiveEntryOrder individually.
   saveLivePositions();
-  if(els.fuLiveStartingBalance) els.fuLiveStartingBalance.textContent = f.liveStartingEquity != null
-    ? '$' + f.liveStartingEquity.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 })
-    : '—';
-  if(els.fuLiveTrades) els.fuLiveTrades.textContent = String(f.liveTrades);
-  if(els.fuLiveWinRate) els.fuLiveWinRate.textContent = f.liveTrades ? ((f.liveWins / f.liveTrades) * 100).toFixed(1) + '%' : '—';
-  if(els.fuLiveGrossPnl) els.fuLiveGrossPnl.textContent = fmtUsd(f.liveGrossPnlUsd);
-  if(els.fuLiveFees) els.fuLiveFees.textContent = fmtUsd(f.liveFeesUsd);
-  if(els.fuLiveNetPnl) els.fuLiveNetPnl.textContent = fmtUsd(f.liveNetPnlUsd);
-  if(Object.keys(f.livePositions).length === 0 && els.fuLiveOpenPosition) els.fuLiveOpenPosition.textContent = 'None';
+  // When the SERVER is running this exchange the tab's own counters are all zero, so paint the server's numbers
+  // (from /api/worker/status, refreshed every few seconds) into the same cards instead.
+  const sv = getServerSession(f.liveExchange);
+  const startEq = sv ? sv.startingBalanceUsd : f.liveStartingEquity;
+  const trades = sv ? (sv.trades || 0) : f.liveTrades;
+  const wins = sv ? (sv.wins || 0) : f.liveWins;
+  const gross = sv ? (sv.grossPnlUsd || 0) : f.liveGrossPnlUsd;
+  const fees = sv ? (sv.feesUsd || 0) : f.liveFeesUsd;
+  const net = sv ? (sv.netPnlUsd || 0) : f.liveNetPnlUsd;
+  const usd = n => '$' + n.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
+  if(sv){
+    if(els.fuLiveBalance) els.fuLiveBalance.textContent = sv.balanceUsd != null ? usd(sv.balanceUsd) : '—';
+  } else if(renderedFromServer && els.fuLiveBalance){
+    els.fuLiveBalance.textContent = '—'; // the server session ended — don't leave its last balance sitting there
+  }
+  renderedFromServer = !!sv;
+  if(els.fuLiveStartingBalance) els.fuLiveStartingBalance.textContent = startEq != null ? usd(startEq) : '—';
+  if(els.fuLiveTrades) els.fuLiveTrades.textContent = String(trades);
+  if(els.fuLiveWinRate) els.fuLiveWinRate.textContent = trades ? ((wins / trades) * 100).toFixed(1) + '%' : '—';
+  if(els.fuLiveGrossPnl) els.fuLiveGrossPnl.textContent = fmtUsd(gross);
+  if(els.fuLiveFees) els.fuLiveFees.textContent = fmtUsd(fees);
+  if(els.fuLiveNetPnl) els.fuLiveNetPnl.textContent = fmtUsd(net);
+  if(els.fuLiveOpenPosition){
+    const svPos = sv ? Object.entries(sv.openPositions || {}) : [];
+    if(svPos.length){
+      els.fuLiveOpenPosition.textContent = svPos.map(([sym, p]) => `[${sv.exchange}] ${sym} ${p.side} ${p.qty} @ ${p.entry}`).join(' · ');
+    } else if(Object.keys(f.livePositions).length === 0){
+      els.fuLiveOpenPosition.textContent = 'None';
+    }
+  }
   renderLiveCloseButtons();
   renderLiveHistory();
   renderTradeLog();
@@ -2326,6 +2349,7 @@ function initLiveTradingControls(){
     },
   });
   document.addEventListener('nxtgen-server-arm-changed', updateLiveModeUI);
+  document.addEventListener('nxtgen-server-status', renderLive); // new numbers from the server -> repaint the balance / P&L cards
   if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.addEventListener('click', toggleLiveRunning);
   // Delegated once from the row itself, since renderLiveCloseButtons()
   // rebuilds the buttons' innerHTML on every render (open/close/cycle) —
