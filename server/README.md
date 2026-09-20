@@ -122,6 +122,48 @@ more than just you. Start in Demo mode with Test Mode on, watch it place a
 few forced-test cycles, and confirm the fills look right before ever
 pointing a Live key at an armed session.
 
+## Running unattended (24/7 worker)
+
+`worker.js` runs the same Auto-mode Live/Demo trading loop the app's
+browser tab runs, but inside this server process, so new entries keep
+getting placed even with every tab and every device closed. It's not a
+separate deploy — it's mounted on this same Express app and starts the
+moment you arm it.
+
+Existing open positions (and their native exchange-side SL/TP) are
+never at risk from any of this — see "Live/Demo futures trading" above.
+What the worker adds is the ability to open **new** ones without a
+browser open.
+
+- `POST /api/worker/arm` — body: `{ armPhrase, exchange, mode, apiKey, secretKey, passphrase, leverage, riskPctPerTrade, minConfidence, minRiskReward, dailyProfitTargetPct, maxDailyLossPct }`. `armPhrase` must be exactly `"PLACE REAL ORDERS"` — same phrase the app's own Arm control uses. Starts an 8-second scan/manage loop immediately. One position at a time, same as the browser bot.
+- `POST /api/worker/disarm` — stops placing new entries. Any position already open keeps its exchange-side SL/TP either way; this just means the worker stops polling it for closure bookkeeping until you re-arm.
+- `GET /api/worker/status` — armed state, open position(s), running totals (trades/wins/losses/PnL), last message, recent closed trades.
+- `GET /api/worker/logs?since=<epoch_ms>` — log lines since that time, for a "what happened while I was away" view.
+
+**Credentials are never persisted** — same rule as the rest of this
+proxy. They live in a variable in this process for as long as it's
+armed, and nothing else. That means:
+
+- A process restart (redeploy, crash, host maintenance) clears the
+  armed session. It comes back disarmed, waiting for you — nothing
+  re-arms itself. Re-arm with a `POST /api/worker/arm` call (from the
+  app, or a saved request in a phone shortcut/HTTP client) whenever you
+  want it running again.
+- Anyone who can reach this server directly (not through the app UI)
+  with the arm phrase and a valid key can arm it — the same
+  `ALLOWED_ORIGIN`/HTTPS/no-withdrawal-permission points under
+  "Deploying it for real" above are what actually protect this once
+  it's reachable by more than just you.
+
+**Dashboard:** `worker/index.html` (repo root) is a self-contained mobile-friendly page for this — point it at your deployed proxy URL, arm/disarm, and watch status + the activity log live. Deploy it alongside the rest of the static site (or open the file directly) — it only talks to the endpoints above, nothing else to configure.
+
+**Start in Demo mode.** The worker is a new, independently-running
+implementation of the browser bot's Auto-mode loop — reusing the exact
+same detection/scoring modules and the exact same order-placement
+routes, but its own copy of the orchestration (cooldowns, the
+daily-loss-cap shim, closure detection). Watch it place a few cycles
+against a Demo key before ever arming it with a Live one.
+
 ## Binance "shared IP weight usage" / IP-restricted key errors
 
 Binance counts request weight per **IP address** (2,400/min). On a shared host (e.g. Render's default outbound

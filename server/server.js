@@ -20,6 +20,7 @@ import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
+import { attachWorker } from './worker.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -4427,4 +4428,5 @@ app.use((err, req, res, next) => {
 });
 
 const port = process.env.PORT || 8787;
+attachWorker(app, `http://127.0.0.1:${port}`);
 app.listen(port, () => console.log(`nxtgen-verify-proxy listening on :${port}`));

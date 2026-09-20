@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>24/7 Worker — NxTGen DeCrypt</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#f0b429">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root{
+    --bg:#0b0d10; --panel:#12151a; --border:#232830; --text:#e7e9ec; --dim:#8a919c;
+    --gold:#f0b429; --green:#2fbf71; --red:#e5484d;
+    color-scheme: dark;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  .wrap{max-width:640px; margin:0 auto; padding:16px 16px 48px;}
+  h1{font-size:18px; margin:8px 0 2px; color:var(--gold);}
+  .sub{color:var(--dim); font-size:12px; margin-bottom:16px;}
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:14px;}
+  .card h2{font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--dim); margin:0 0 10px;}
+  label{display:block; font-size:12px; color:var(--dim); margin:10px 0 4px;}
+  input, select{
+    width:100%; background:#0e1116; border:1px solid var(--border); color:var(--text);
+    padding:9px 10px; border-radius:7px; font-size:14px;
+  }
+  input:focus, select:focus{outline:1px solid var(--gold);}
+  .row{display:flex; gap:10px;}
+  .row > *{flex:1;}
+  button{
+    border:none; border-radius:7px; padding:11px 14px; font-size:14px; font-weight:600;
+    cursor:pointer; width:100%; margin-top:14px;
+  }
+  .btn-arm{background:var(--gold); color:#1a1200;}
+  .btn-disarm{background:#2a2320; color:var(--red); border:1px solid var(--red);}
+  .btn-ghost{background:transparent; color:var(--dim); border:1px solid var(--border);}
+  button:disabled{opacity:.5; cursor:default;}
+  .badge{display:inline-block; padding:3px 9px; border-radius:99px; font-size:11px; font-weight:700; letter-spacing:.03em;}
+  .badge-armed{background:rgba(47,191,113,.15); color:var(--green); border:1px solid rgba(47,191,113,.4);}
+  .badge-disarmed{background:rgba(138,145,156,.15); color:var(--dim); border:1px solid var(--border);}
+  .kv{display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px dashed var(--border); font-size:13px;}
+  .kv:last-child{border-bottom:none;}
+  .kv .k{color:var(--dim);}
+  .pos{background:#0e1116; border:1px solid var(--border); border-radius:7px; padding:8px 10px; margin-top:8px; font-size:12px;}
+  #log{
+    background:#0e1116; border:1px solid var(--border); border-radius:7px; padding:8px 10px;
+    height:180px; overflow-y:auto; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; line-height:1.6;
+  }
+  #log .line{white-space:pre-wrap; word-break:break-word;}
+  #log .err{color:var(--red);}
+  #log .ok{color:var(--green);}
+  #log .t{color:var(--dim);}
+  .msg{font-size:12px; margin-top:8px; min-height:16px;}
+  .msg.err{color:var(--red);} .msg.ok{color:var(--green);}
+  .hint{font-size:11px; color:var(--dim); margin-top:4px;}
+  details summary{cursor:pointer; color:var(--dim); font-size:12px; margin-top:4px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>24/7 Worker</h1>
+  <div class="sub">Runs the Live/Demo Auto-trade loop on the server — trades keep opening even with no tab open. See <code>server/README.md</code> → "Running unattended" for what this does and doesn't cover.</div>
+
+  <div class="card">
+    <h2>Status</h2>
+    <div id="statusBadge"><span class="badge badge-disarmed">Checking…</span></div>
+    <div id="statusBody"></div>
+    <div id="posBody"></div>
+  </div>
+
+  <div class="card">
+    <h2>Connection</h2>
+    <label for="proxyUrl">Verification proxy URL</label>
+    <input id="proxyUrl" placeholder="https://your-proxy-host.example.com" autocapitalize="off" autocorrect="off">
+    <div class="hint">Same server your app's Autotrade & Balances panel points at.</div>
+  </div>
+
+  <div class="card" id="armCard">
+    <h2>Arm</h2>
+    <div class="row">
+      <div>
+        <label for="exchange">Exchange</label>
+        <select id="exchange">
+          <option value="bybit">Bybit</option>
+          <option value="binance">Binance</option>
+          <option value="gateio">Gate.io</option>
+          <option value="mexc">MEXC (Live only)</option>
+          <option value="bitget">Bitget</option>
+        </select>
+      </div>
+      <div>
+        <label for="mode">Mode</label>
+        <select id="mode">
+          <option value="demo">Demo</option>
+          <option value="live">Live</option>
+        </select>
+      </div>
+    </div>
+
+    <label for="apiKey">API key</label>
+    <input id="apiKey" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="secretKey">Secret key</label>
+    <input id="secretKey" type="password" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="passphrase" id="passLabel">Passphrase (Bitget only)</label>
+    <input id="passphrase" type="password" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <div class="hint">Never saved anywhere — re-enter each time you arm. See server/README.md.</div>
+
+    <details>
+      <summary>Risk settings (optional — defaults shown)</summary>
+      <div class="row">
+        <div><label for="leverage">Leverage</label><input id="leverage" type="number" value="5" min="1" max="10"></div>
+        <div><label for="riskPct">Risk % / trade</label><input id="riskPct" type="number" value="0.5" step="0.1" min="0.1" max="80"></div>
+      </div>
+      <div class="row">
+        <div><label for="minConfidence">Min confidence</label><input id="minConfidence" type="number" value="70" min="60" max="95"></div>
+        <div><label for="minRR">Min R:R</label><input id="minRR" type="number" value="2" step="0.1" min="1"></div>
+      </div>
+      <div class="row">
+        <div><label for="dailyProfitTarget">Daily profit target %</label><input id="dailyProfitTarget" type="number" value="10"></div>
+        <div><label for="maxDailyLoss">Max daily loss %</label><input id="maxDailyLoss" type="number" value="2"></div>
+      </div>
+    </details>
+
+    <label for="armPhrase">Type "PLACE REAL ORDERS" to arm</label>
+    <input id="armPhrase" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="PLACE REAL ORDERS">
+
+    <button class="btn-arm" id="armBtn">Arm — start trading</button>
+    <button class="btn-disarm" id="disarmBtn">Disarm — stop new entries</button>
+    <div class="msg" id="armMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>Recent trades</h2>
+    <div id="tradesBody" class="hint">No closed trades yet this session.</div>
+  </div>
+
+  <div class="card">
+    <h2>Activity log</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const LS_KEY = 'nxtgen_worker_dash_v1';
+  let lastLogTs = 0;
+  let pollTimer = null;
+
+  function loadPrefs(){
+    try{
+      const p = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+      if(p.proxyUrl) $('proxyUrl').value = p.proxyUrl;
+      if(p.exchange) $('exchange').value = p.exchange;
+      if(p.mode) $('mode').value = p.mode;
+    }catch(e){}
+  }
+  function savePrefs(){
+    try{
+      localStorage.setItem(LS_KEY, JSON.stringify({
+        proxyUrl: $('proxyUrl').value.trim(), exchange: $('exchange').value, mode: $('mode').value,
+      }));
+    }catch(e){}
+  }
+
+  function proxyUrl(){ return ($('proxyUrl').value || '').trim().replace(/\/$/, ''); }
+
+  async function call(path, method, body){
+    const url = proxyUrl() + path;
+    const res = await fetch(url, {
+      method: method || 'GET',
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await res.json().catch(() => null);
+    if(!data) throw new Error('Unreadable response from ' + path);
+    return data;
+  }
+
+  function fmtUsd(n){
+    if(n == null) return '—';
+    const s = n < 0 ? '-$' : '+$';
+    return s + Math.abs(n).toFixed(2);
+  }
+  function fmtAgo(ms){
+    if(!ms) return '—';
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if(s < 60) return s + 's ago';
+    if(s < 3600) return Math.round(s / 60) + 'm ago';
+    return Math.round(s / 3600) + 'h ago';
+  }
+
+  function renderStatus(status){
+    const badge = $('statusBadge');
+    const armed = !!status.armed;
+    badge.innerHTML = armed
+      ? '<span class="badge badge-armed">ARMED — ' + (status.exchange || '') + ' ' + (status.mode || '') + '</span>'
+      : '<span class="badge badge-disarmed">DISARMED</span>';
+
+    $('armBtn').disabled = armed;
+    $('disarmBtn').disabled = !armed;
+
+    let body = '';
+    if(armed || status.trades){
+      body += '<div class="kv"><span class="k">Last cycle</span><span>' + fmtAgo(status.lastCycleAtMs) + '</span></div>';
+      body += '<div class="kv"><span class="k">Trades / W / L</span><span>' + (status.trades||0) + ' / ' + (status.wins||0) + ' / ' + (status.losses||0) + '</span></div>';
+      body += '<div class="kv"><span class="k">Net P&amp;L (session)</span><span>' + fmtUsd(status.netPnlUsd) + '</span></div>';
+      if(status.lastMessage) body += '<div class="kv"><span class="k">Last message</span><span style="text-align:right;max-width:60%;">' + escapeHtml(status.lastMessage) + '</span></div>';
+    }
+    $('statusBody').innerHTML = body;
+
+    const posKeys = status.openPositions ? Object.keys(status.openPositions) : [];
+    if(posKeys.length){
+      $('posBody').innerHTML = posKeys.map(sym => {
+        const p = status.openPositions[sym];
+        return '<div class="pos"><b>' + sym + '</b> ' + (p.side||'') + ' ' + (p.qty||'') + ' @ ' + (p.entry||'')
+          + '<br>SL ' + (p.stopLossPrice ?? '—') + ' · TP1 ' + (p.tp1Price ?? '—') + ' · TP2 ' + (p.tp2Price ?? '—') + ' · TP3 ' + (p.tp3Price ?? '—') + '</div>';
+      }).join('');
+    } else {
+      $('posBody').innerHTML = '';
+    }
+
+    const trades = status.recentTrades || [];
+    $('tradesBody').innerHTML = trades.length
+      ? trades.map(t => '<div class="kv"><span class="k">' + t.symbol + ' ' + (t.side||'') + '</span><span>' + fmtUsd(t.netUsd) + '</span></div>').join('')
+      : 'No closed trades yet this session.';
+  }
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function appendLogs(lines){
+    if(!lines.length) return;
+    const el = $('log');
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
+    for(const l of lines){
+      const div = document.createElement('div');
+      div.className = 'line ' + (l.kind === 'error' ? 'err' : l.kind === 'success' ? 'ok' : '');
+      const t = new Date(l.ts).toLocaleTimeString();
+      div.innerHTML = '<span class="t">' + t + '</span>  ' + escapeHtml(l.msg);
+      el.appendChild(div);
+      lastLogTs = Math.max(lastLogTs, l.ts);
+    }
+    while(el.children.length > 300) el.removeChild(el.firstChild);
+    if(atBottom) el.scrollTop = el.scrollHeight;
+  }
+
+  async function poll(){
+    if(!proxyUrl()) return;
+    try{
+      const s = await call('/api/worker/status', 'GET');
+      if(s.ok) renderStatus(s.status);
+      const l = await call('/api/worker/logs?since=' + lastLogTs, 'GET');
+      if(l.ok) appendLogs(l.logs);
+    }catch(err){
+      $('statusBadge').innerHTML = '<span class="badge badge-disarmed">Can\'t reach server</span>';
+    }
+  }
+
+  function startPolling(){
+    if(pollTimer) clearInterval(pollTimer);
+    poll();
+    pollTimer = setInterval(poll, 5000);
+  }
+
+  $('exchange').addEventListener('change', () => {
+    const isBitget = $('exchange').value === 'bitget';
+    $('passLabel').textContent = isBitget ? 'Passphrase (required for Bitget)' : 'Passphrase (Bitget only)';
+  });
+
+  $('armBtn').addEventListener('click', async () => {
+    const msg = $('armMsg');
+    msg.textContent = ''; msg.className = 'msg';
+    if(!proxyUrl()){ msg.textContent = 'Set the verification proxy URL first.'; msg.className = 'msg err'; return; }
+    if(!$('apiKey').value || !$('secretKey').value){ msg.textContent = 'API key and secret key are required.'; msg.className = 'msg err'; return; }
+    if($('armPhrase').value.trim() !== 'PLACE REAL ORDERS'){ msg.textContent = 'Type the arm phrase exactly: PLACE REAL ORDERS'; msg.className = 'msg err'; return; }
+    savePrefs();
+    $('armBtn').disabled = true;
+    try{
+      const body = {
+        armPhrase: $('armPhrase').value.trim(),
+        exchange: $('exchange').value, mode: $('mode').value,
+        apiKey: $('apiKey').value.trim(), secretKey: $('secretKey').value.trim(), passphrase: $('passphrase').value.trim(),
+        leverage: Number($('leverage').value), riskPctPerTrade: Number($('riskPct').value),
+        minConfidence: Number($('minConfidence').value), minRiskReward: Number($('minRR').value),
+        dailyProfitTargetPct: Number($('dailyProfitTarget').value), maxDailyLossPct: Number($('maxDailyLoss').value),
+      };
+      const res = await call('/api/worker/arm', 'POST', body);
+      if(res.ok){
+        msg.textContent = 'Armed. Watching for entries every 8s.'; msg.className = 'msg ok';
+        $('secretKey').value = ''; $('passphrase').value = ''; // clear from the DOM once sent
+        renderStatus(res.status);
+      } else {
+        msg.textContent = res.message || 'Arm failed.'; msg.className = 'msg err';
+      }
+    }catch(err){
+      msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
+    }
+    $('armBtn').disabled = false;
+    poll();
+  });
+
+  $('disarmBtn').addEventListener('click', async () => {
+    const msg = $('armMsg');
+    $('disarmBtn').disabled = true;
+    try{
+      const res = await call('/api/worker/disarm', 'POST', {});
+      msg.textContent = 'Disarmed.'; msg.className = 'msg ok';
+      if(res.ok) renderStatus(res.status);
+    }catch(err){
+      msg.textContent = 'Request failed: ' + err.message; msg.className = 'msg err';
+    }
+    poll();
+  });
+
+  $('proxyUrl').addEventListener('change', () => { savePrefs(); startPolling(); });
+
+  loadPrefs();
+  $('disarmBtn').disabled = true;
+  startPolling();
+})();
+</script>
+</body>
+</html>
