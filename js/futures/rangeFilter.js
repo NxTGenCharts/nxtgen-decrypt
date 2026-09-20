@@ -71,7 +71,7 @@ export function smartRangeFilter(m5, direction, regime, opts){
   const adxRiseScore = ramp(adxDelta, 0, 4);
 
   // ---- 3. Efficiency ratio: does price actually travel, or just churn? ----
-  const er = efficiencyRatio(m5, 20) ?? 0;
+  const er = efficiencyRatio(cl, 20) ?? 0;
   const erScore = ramp(er, 0.20, 0.50);
 
   // ---- 4. Net displacement over the last 20 bars, in ATRs, in the trade's

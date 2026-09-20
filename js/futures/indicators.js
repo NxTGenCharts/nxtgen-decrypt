@@ -317,19 +317,17 @@ export function macdSeries(candles, fast, slow, signal){
   return out;
 }
 
-// Kaufman Efficiency Ratio over the last `period` bars: net price change
-// divided by the sum of every bar-to-bar move. 1 = a perfectly straight
-// line (pure trend), ~0 = price went nowhere despite lots of movement
-// (chop/range). Returns null with too little data.
-export function efficiencyRatio(candles, period){
-  period = period || 20;
-  if(candles.length < period + 1) return null;
-  const c = closes(candles);
-  const end = c.length - 1;
+// Kaufman Efficiency Ratio: net close-to-close move over `period` bars
+// divided by the sum of every bar-to-bar move in that window. ~1 = a clean
+// one-directional trend, ~0 = price went nowhere despite lots of movement
+// (i.e. chop / range). Returns null without enough history.
+export function efficiencyRatio(values, period){
+  if(values.length < period + 1) return null;
+  const end = values.length - 1;
+  const net = Math.abs(values[end] - values[end - period]);
   let path = 0;
-  for(let i = end - period + 1; i <= end; i++) path += Math.abs(c[i] - c[i - 1]);
-  if(path === 0) return 0;
-  return Math.abs(c[end] - c[end - period]) / path;
+  for(let k = end - period + 1; k <= end; k++) path += Math.abs(values[k] - values[k - 1]);
+  return path > 0 ? net / path : 0;
 }
 
 export function pctChange(from, to){
@@ -353,4 +351,33 @@ export function computeBtcShock(btcM5Candles){
   const lastRange = ranges.slice(-3).reduce((a, b) => a + b, 0) / 3;
   const movePct = ((recent[recent.length - 1].c - recent[0].c) / recent[0].c) * 100;
   return { shocked: avgRange > 0 && lastRange > avgRange * 2.2, movePct };
+}
+
+// Confirmed fractal swing points (default: 2 bars each side, strict) inside
+// [fromIdx, toIdx]. Returns [{ index, price }], oldest first. A swing at
+// bar j needs `right` bars after it to confirm, so callers should pass a
+// toIdx of at most (lastIdx - right).
+export function swingLowPoints(candles, fromIdx, toIdx, left, right){
+  left = left || 2; right = right || 2;
+  const out = [];
+  for(let j = Math.max(left, fromIdx); j <= Math.min(candles.length - 1 - right, toIdx); j++){
+    let ok = true;
+    for(let k = 1; k <= left && ok; k++) if(!(candles[j].l < candles[j - k].l)) ok = false;
+    for(let k = 1; k <= right && ok; k++) if(!(candles[j].l < candles[j + k].l)) ok = false;
+    if(ok) out.push({ index: j, price: candles[j].l });
+  }
+  return out;
+}
+
+
+export function swingHighPoints(candles, fromIdx, toIdx, left, right){
+  left = left || 2; right = right || 2;
+  const out = [];
+  for(let j = Math.max(left, fromIdx); j <= Math.min(candles.length - 1 - right, toIdx); j++){
+    let ok = true;
+    for(let k = 1; k <= left && ok; k++) if(!(candles[j].h > candles[j - k].h)) ok = false;
+    for(let k = 1; k <= right && ok; k++) if(!(candles[j].h > candles[j + k].h)) ok = false;
+    if(ok) out.push({ index: j, price: candles[j].h });
+  }
+  return out;
 }

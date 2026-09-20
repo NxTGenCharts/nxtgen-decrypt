@@ -27,6 +27,10 @@ import { positionSize, checkLiquidationSafety, RISK_DEFAULTS } from './risk.js';
 import { evaluateNoTradeFilters, SYMBOL_COOLDOWN_MINUTES } from './noTradeEngine.js';
 import { buildExplanation } from './explain.js';
 import { atr, swingLevels, volumeExpansion, clamp } from './indicators.js';
+import { QUANT_ID, QUANT_TYPE, quantSymbolSet, effectiveMinConfidence } from './quant/config.js';
+import { computeQuantRiskState, effectiveRiskPct, quantSize, quantEntryGate, quantExitPrice, quantTradeFields } from './quant/risk.js';
+import { buildQuantExplanation } from './quant/signal.js';
+import { qlog } from './quant/log.js';
 
 function getSnapshot(symbol){ return mockMarket.snapshot(symbol); }
 function getBtcShock(){ return mockMarket.btcShock(); }
@@ -203,11 +207,29 @@ function attachTpLevels(levels, direction, feeInputs){
   };
 }
 
+// NxTGen Quant Futures trades its OWN configurable symbol list (default
+// BTC/ETH/SOL/BNB/XRP), several of which the platform excludes from the six
+// original strategies for fee reasons (EXCLUDED_FUTURES_SYMBOLS). This adds
+// the Quant symbols to a scan list when — and only when — Quant is enabled.
+// evaluateSymbol restricts those symbols to the Quant detector alone, so the
+// exclusion still holds for every other strategy. CLUSDT (a TradFi-underlying
+// contract) stays excluded for everything, Quant included.
+export function isQuantEnabled(cfg){
+  const on = cfg && cfg.strategies ? !!cfg.strategies[QUANT_ID] : false;
+  return on && !!cfg.quant;
+}
+export function scanSymbolsWithQuant(baseSymbols, cfg){
+  if(!isQuantEnabled(cfg)) return baseSymbols;
+  const extra = Array.from(quantSymbolSet(cfg.quant)).filter(x => x !== 'CLUSDT' && !baseSymbols.includes(x));
+  return baseSymbols.concat(extra);
+}
+
 // Produces one row per symbol: APPROVED opportunities plus REJECTED
 // ones (kept so the scanner table can show "why not" transparently,
 // matching the No-Trade Engine's job of explaining a pass).
 export function runScanCycle(cfg, dayState, opts){
-  const symbols = (opts && opts.symbols) || TRADEABLE_FUTURES_SYMBOLS;
+  const symbols = (opts && opts.symbols) || scanSymbolsWithQuant(TRADEABLE_FUTURES_SYMBOLS, cfg);
+  if(dayState && !dayState.quantTrades) dayState.quantTrades = [];
   const snapshotFor = (opts && opts.getSnapshot) || getSnapshot;
   const nowFn = (opts && opts.now) || (() => mockMarket.now());
   const btcShock = (opts && opts.getBtcShock) ? opts.getBtcShock() : getBtcShock();
@@ -239,11 +261,33 @@ export function runScanCycle(cfg, dayState, opts){
 // controls the data source and "now" entirely) and returns one scanner
 // row, APPROVED or REJECTED, same shape either way.
 export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, nowMs){
-  const setups = detectAllSetups(snap, regime, cfg.strategies);
+  const quantApplies = isQuantEnabled(cfg) && quantSymbolSet(cfg.quant).has(symbol) && symbol !== 'CLUSDT';
+  const excluded = EXCLUDED_FUTURES_SYMBOLS.has(symbol);
+  if(excluded && !quantApplies) return baseRow(symbol, snap, regime, 'REJECTED', ['Symbol is excluded from scanning for the enabled strategies']);
+  let quantCtx = null;
+  if(quantApplies){
+    const fees = (cfg.feeConfig || DEFAULT_FEE_CONFIG)[cfg.exchange || 'binance'] || DEFAULT_FEE_CONFIG.binance;
+    const slipEst = clamp(snap.meta.spreadPct * 0.6, 0.005, 0.05);
+    // Conservative round-trip cost estimate (taker in, taker out) the score's RR-quality factor uses.
+    quantCtx = { qcfg: cfg.quant, ctx: { nowMs, log: !!cfg.quant.log, costPct: fees.takerPct * 2 + snap.meta.spreadPct + slipEst } };
+  }
+  const detected = detectAllSetups(snap, regime, cfg.strategies, quantCtx, excluded ? [QUANT_ID] : null);
+  // Quant Futures is a self-contained system (own stop, own risk engine, own exit): when it produces a
+  // qualifying signal it is evaluated on its own, not blended into the ensemble average.
+  const quantSig = detected.find(sg => sg.type === QUANT_TYPE && !(sg.vetoes && sg.vetoes.length));
+  if(quantSig) return evaluateQuantRow(symbol, snap, regime, cfg, dayState, btcShock, nowMs, quantSig);
+  // A detector can hand back a genuine trigger that one of ITS OWN filters
+  // vetoed (e.g. Quant's confluence/regime gates — a signal object with a
+  // `vetoes` list and no direction). Those never take part in the ensemble —
+  // they can't create a conflict or lend confidence — but their reasons are
+  // surfaced if nothing else qualified, so the scanner says WHY instead of a
+  // blank "no setup".
+  const vetoed = detected.filter(sg => sg.vetoes && sg.vetoes.length);
+  const setups = detected.filter(sg => !(sg.vetoes && sg.vetoes.length));
   const ensemble = combineEnsemble(setups);
 
   if(!ensemble){
-    return baseRow(symbol, snap, regime, 'REJECTED', ['No qualifying setup detected this cycle']);
+    return baseRow(symbol, snap, regime, 'REJECTED', vetoed.length ? vetoed.flatMap(sg => sg.vetoes) : ['No qualifying setup detected this cycle']);
   }
   if(ensemble.conflict){
     return baseRow(symbol, snap, regime, 'REJECTED', ['Setups disagree on direction — ensemble requires agreement']);
@@ -396,6 +440,84 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   return row;
 }
 
+// The Quant Futures pipeline: stop/target/score were already built by the
+// signal engine (quant/signal.js); this applies costs, the Quant risk engine
+// (drawdown-scaled risk, streak/daily pauses, correlation, margin), position
+// sizing, and the platform's shared no-trade gate, then shapes the same row
+// every other strategy produces. Entry is a taker fill at the slippage-adjusted
+// price; the single target is a resting limit (maker); the stop is a stop-market
+// (taker + slippage). No partials and no breakeven move — a partial would drag
+// the realized RR below the configured floor, which the spec forbids.
+function evaluateQuantRow(symbol, snap, regime, cfg, dayState, btcShock, nowMs, sig){
+  const m = sig.meta;
+  const qcfg = cfg.quant;
+  const direction = sig.direction;
+  const rejectFast = (msg) => baseRow(symbol, snap, regime, 'REJECTED', [msg]);
+  if(!Number.isFinite(m.stopPrice) || !Number.isFinite(m.entryFill)) return rejectFast('Quant: stop loss could not be calculated');
+  const rr = m.rewardRisk;
+  if(!(rr >= 2 - 1e-9)) return rejectFast(`Quant: risk/reward 1:${(rr || 0).toFixed(2)} is below the 1:2 minimum`);
+
+  const equity = dayState.equity;
+  const startEq = dayState.startingEquity || equity;
+  const riskState = computeQuantRiskState(dayState.quantTrades || [], startEq, nowMs, qcfg);
+  const riskPct = effectiveRiskPct(qcfg, riskState, m.regime.riskMult);
+  const leverage = clamp(cfg.leverage || RISK_DEFAULTS.defaultLeverage, 1, 10);
+
+  const feeLookup = (cfg.feeConfig || DEFAULT_FEE_CONFIG)[cfg.exchange || 'binance'] || DEFAULT_FEE_CONFIG.binance;
+  const entryFeePct = feeLookup.takerPct, exitFeePct = feeLookup.takerPct;
+  const stopDistancePct = m.stopDistPct;
+  const tpPct = stopDistancePct * rr;
+  const sign = direction === 'LONG' ? 1 : -1;
+  const tp1 = m.entryFill * (1 + sign * tpPct / 100);
+  const costs = estimateCosts({
+    exchange: cfg.exchange || 'binance', execution: 'TAKER', grossTargetPct: tpPct,
+    spreadPct: snap.meta.spreadPct, slippagePct: m.slipPct, fundingRatePct: snap.meta.fundingRatePct,
+    holdMinutes: Math.round(m.holdMinutes / 2), feeConfig: cfg.feeConfig || DEFAULT_FEE_CONFIG,
+  });
+  const liqSafety = checkLiquidationSafety({ entryPrice: m.entryFill, stopPrice: m.stopPrice, side: direction, leverage });
+  const sizing = quantSize({ equity, riskPct, entry: m.entryFill, stop: m.stopPrice, leverage, qcfg, contract: snap.meta && snap.meta.contract });
+  const feeToStopRatioPct = stopDistancePct > 0 ? ((costs.entryFeePct + costs.exitFeePct) / stopDistancePct) * 100 : null;
+
+  const gate = evaluateNoTradeFilters({
+    snap, regime, confidence: m.score, minConfidence: m.minConfidenceUsed,
+    netTargetPct: costs.netTargetPct, minNetProfitPct: cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT,
+    riskRewardRatio: rr, minRiskReward: 2.0 - 1e-9,
+    liquidationSafety: liqSafety, dayState, btcShock, isAltcoin: symbol !== 'BTCUSDT',
+    fundingCostPct: costs.fundingCostPct, grossTargetPct: tpPct,
+    nowMs, riskPctPerTrade: riskPct, feeToStopRatioPct,
+  });
+  const quantReasons = quantEntryGate({ qcfg, state: riskState, dayState, direction, symbol, sizing, equity, meta: { spreadPct: snap.meta.spreadPct, atrPct: m.atrPct, entryTf: m.entryTf } });
+  const reasons = [...gate.reasons, ...quantReasons];
+  const approved = reasons.length === 0;
+
+  const exitSlipPct = m.slipPct + snap.meta.spreadPct / 2;
+  const row = {
+    symbol, exchange: (cfg.exchange === 'gateio' ? 'GATE.IO' : (cfg.exchange || 'binance').toUpperCase()), direction,
+    setup: QUANT_TYPE, confidence: m.score,
+    entry: m.entryFill, stop: m.stopPrice, tp1, tp2: null, tp3: null,
+    tpFractions: { tp1: 1, tp2: 0, tp3: 0 }, breakevenStopPrice: null, singleTp: true,
+    rangeFilter: null,
+    expectedGrossPct: tpPct, estFeesPct: costs.entryFeePct + costs.exitFeePct,
+    estSlippagePct: costs.slippageCostPct, estFundingPct: costs.fundingCostPct,
+    expectedNetPct: costs.netTargetPct, riskReward: rr,
+    liquidityScore: snap.meta.liquidityScore, regime: m.regime.label,
+    status: approved ? 'APPROVED' : 'REJECTED', rejectReasons: reasons,
+    execution: 'TAKER', sizing, leverage, liqPrice: liqSafety.liqPrice,
+    makerFeePct: feeLookup.makerPct, reasons: sig.reasons, costsBreakdown: costs,
+    // Quant-specific
+    quantMeta: m, riskPctUsed: riskPct, quantRiskState: riskState,
+    quantExit: { exitSlipPct, timeStopMinutes: m.holdMinutes },
+    quantLog: !!qcfg.log,
+  };
+  row.explanation = buildQuantExplanation(row);
+  if(qcfg.log){
+    const k = `${symbol}|${m.setup}|${direction}|${m.candleTime}`;
+    if(approved) qlog(`${symbol} risk = ${riskPct.toFixed(2)}% ($${sizing ? sizing.riskAmountUsd.toFixed(2) : '—'}), tier ${riskState.tier}`);
+    else qlog(`${symbol} ${direction} signal REJECTED by risk/filters: ${reasons.join('; ')}`, 'warn');
+  }
+  return row;
+}
+
 function baseRow(symbol, snap, regime, status, rejectReasons){
   return {
     symbol, exchange: '—', direction: '—', setup: '—', confidence: 0,
@@ -427,6 +549,7 @@ export function openPosition(row, dayState){
     // otherwise left exactly as it was set at entry.
     tpFractions: row.tpFractions || { tp1: 0.30, tp2: 0.30, tp3: 0.40 },
     breakevenStopPrice: row.breakevenStopPrice, singleTarget: !!row.singleTarget,
+    singleTp: !!row.singleTp, // Quant Futures: one fixed exit (managePositions' singleTp branch)
     qty, notionalUsd: row.sizing ? row.sizing.notionalUsd : 0,
     leverage: row.leverage, execution: row.execution,
     entryFeePct: row.costsBreakdown.entryFeePct, exitFeePct: row.costsBreakdown.exitFeePct,
@@ -440,6 +563,24 @@ export function openPosition(row, dayState){
     openedAt: mockMarket.now(), remainingFraction: 1, partialsTaken: [], status: 'OPEN',
   };
   position.riskAmountUsd = row.sizing ? row.sizing.riskAmountUsd : 0;
+  if(row.quantMeta){
+    const m = row.quantMeta;
+    position.quant = {
+      setup: m.setup, setupName: m.setupName, score: m.score, regime: m.regime.label, entryTf: m.entryTf,
+      rewardRisk: m.rewardRisk, riskPctUsed: row.riskPctUsed, stopDistPct: m.stopDistPct, factors: m.factors,
+      exitSlipPct: row.quantExit.exitSlipPct,
+      entrySlipUsd: position.notionalUsd * (m.slipPct + m.spreadPct / 2) / 100,
+      log: row.quantLog,
+    };
+    position.timeStopMinutes = row.quantExit.timeStopMinutes;
+    position.tpLabel = `TAKE_PROFIT_${m.rewardRisk}R`;
+    if(row.quantLog){
+      qlog(`${row.symbol} order submitted: ${row.direction} qty ${position.qty.toPrecision(6)} @ ~${row.entry.toPrecision(7)} (paper)`);
+      qlog(`${row.symbol} position opened (${m.setupName}, score ${m.score})`);
+      qlog(`${row.symbol} stop loss set @ ${row.stop.toPrecision(7)} (${m.stopDistPct.toFixed(2)}%, ${m.stopBasis})`);
+      qlog(`${row.symbol} take profit set @ ${row.tp1.toPrecision(7)} (1:${m.rewardRisk})`);
+    }
+  }
   dayState.positions.push(position);
   recomputeOpenRisk(dayState);
   return position;
@@ -503,7 +644,8 @@ export function managePositions(dayState, tradeHistory, cfg){
     const hitTP = (price) => dir === 1 ? candle.h >= price : candle.l <= price;
     const hitSL = candle.h !== undefined && (dir === 1 ? candle.l <= pos.stop : candle.h >= pos.stop);
     const ageMinutes = (mockMarket.now() - pos.openedAt) / 60_000;
-    const timeStopMinutes = pos.setup === 'NxTGen Scalp' ? (cfg.aiScalpTimeStopMinutes || 40)
+    const timeStopMinutes = pos.quant ? pos.timeStopMinutes
+      : pos.setup === 'NxTGen Scalp' ? (cfg.aiScalpTimeStopMinutes || 40)
       // Nova Scalp has NO time stop in Paper (removed on request): it exits only at its
       // structure stop or its single 2R target. Infinity makes the age check below never
       // fire; set cfg.novaScalpTimeStopMinutes to a number to bring one back.
@@ -515,14 +657,40 @@ export function managePositions(dayState, tradeHistory, cfg){
     const events = [];
 
     if(hitSL){
-      const pnl = netPnlForFraction(pos, pos.stop, pos.remainingFraction, dayState, false);
-      closeTrade(pos, pos.stop, pnl, 'STOP_LOSS', dayState, tradeHistory);
+      // Quant: a stop-market fill slips against the position (other strategies keep their original fill-at-stop behavior).
+      const slipPx = quantExitPrice(pos, pos.stop, 'STOP');
+      const pnl = netPnlForFraction(pos, slipPx, pos.remainingFraction, dayState, false);
+      closeTrade(pos, slipPx, pnl, 'STOP_LOSS', dayState, tradeHistory, undefined, pos.quant ? Math.abs(slipPx - pos.stop) / pos.entry * pos.notionalUsd * pos.remainingFraction : 0);
       setSymbolCooldown(dayState, pos.symbol);
       continue;
     }
 
     const tp1Fraction = pos.tpFractions ? pos.tpFractions.tp1 : 0.30;
     const tp2Fraction = pos.tpFractions ? pos.tpFractions.tp2 : 0.30;
+
+    // Quant Futures: one fixed target (>= 1:2) for the whole position. No partials,
+    // no breakeven move — a partial would drag the realized RR under the configured
+    // floor. (Nova Scalp's own single 2R exit is the tp3-only path further down, and is
+    // controlled by `singleTarget`, not this branch.) The time stop here is Quant's own
+    // 6h/12h limit (pos.timeStopMinutes).
+    if(pos.singleTp){
+      if(hitTP(pos.tp1)){
+        const pnl = netPnlForFraction(pos, pos.tp1, pos.remainingFraction, dayState, true);
+        closeTrade(pos, pos.tp1, pnl, pos.tpLabel || 'TAKE_PROFIT_2R', dayState, tradeHistory, [pos.quant ? `Fixed ${pos.quant.rewardRisk}R target hit` : 'Fixed 2R target hit']);
+        setSymbolCooldown(dayState, pos.symbol);
+        continue;
+      }
+      if(ageMinutes > timeStopMinutes){
+        const slipPx = quantExitPrice(pos, snap.price, 'MARKET');
+        const pnl = netPnlForFraction(pos, slipPx, pos.remainingFraction, dayState, false);
+        closeTrade(pos, slipPx, pnl, 'TIME_STOP', dayState, tradeHistory, events, pos.quant ? Math.abs(slipPx - snap.price) / pos.entry * pos.notionalUsd * pos.remainingFraction : 0);
+        setSymbolCooldown(dayState, pos.symbol);
+        continue;
+      }
+      pos.lastEvents = events;
+      stillOpen.push(pos);
+      continue;
+    }
 
     if(tp1Fraction > 0 && !pos.partialsTaken.includes('tp1') && hitTP(pos.tp1)){
       const pnl = netPnlForFraction(pos, pos.tp1, tp1Fraction, dayState, true);
@@ -584,7 +752,7 @@ export function managePositions(dayState, tradeHistory, cfg){
   recomputeOpenRisk(dayState);
 }
 
-function closeTrade(pos, exitPrice, pnl, exitReason, dayState, tradeHistory, extraEvents){
+function closeTrade(pos, exitPrice, pnl, exitReason, dayState, tradeHistory, extraEvents, exitSlipUsd){
   dayState.realizedNetUsd += pnl.netUsd;
   dayState.realizedGrossUsd += pnl.grossUsd;
   dayState.feesUsd += pnl.feesUsd;
@@ -619,12 +787,25 @@ function closeTrade(pos, exitPrice, pnl, exitReason, dayState, tradeHistory, ext
   dayState.peakEquity = Math.max(dayState.peakEquity, dayState.equity);
   dayState.maxDrawdownPct = Math.max(dayState.maxDrawdownPct, ((dayState.peakEquity - dayState.equity) / dayState.peakEquity) * 100);
 
+  if(pos.quant){
+    // Quant's own ledger: risk state (drawdown tiers, streak pause, daily/weekly limits) replays from this.
+    dayState.quantTrades = dayState.quantTrades || [];
+    dayState.quantTrades.push({ closedAtMs: mockMarket.now(), netUsd: pos.finalNetUsd });
+    dayState.slippageUsd = (dayState.slippageUsd || 0) + (pos.quant.entrySlipUsd || 0) + (exitSlipUsd || 0);
+    if(pos.quant.log){
+      qlog(`${pos.symbol} position closed @ ${exitPrice.toPrecision(7)} (${exitReason})`);
+      qlog(`${pos.symbol} realized PnL = ${pos.finalNetUsd >= 0 ? '+' : ''}$${pos.finalNetUsd.toFixed(2)} (${pos.riskAmountUsd > 0 ? (pos.finalNetUsd / pos.riskAmountUsd).toFixed(2) : '—'}R, fees $${totalFeesUsd.toFixed(2)})`);
+      qlog(`${pos.symbol} trade result: ${pos.finalNetUsd > 0 ? 'WIN' : 'LOSS'}`);
+      qlog(`Strategy statistics updated (${dayState.quantTrades.length} Quant trade(s) this session)`);
+    }
+  }
   tradeHistory.unshift({
     timestamp: mockMarket.now(), exchange: pos.exchange, symbol: pos.symbol, direction: pos.direction,
     entry: pos.entry, exit: exitPrice, qty: pos.qty, leverage: pos.leverage,
     grossPnlUsd: totalGrossUsd, feesUsd: totalFeesUsd, fundingUsd: totalFundingUsd, netPnlUsd: pos.finalNetUsd,
     confidence: pos.confidence, strategy: pos.setup, reasonEntry: (pos.reasons || []).join('; '),
     reasonExit: exitReason, durationMin: Math.round((mockMarket.now() - pos.openedAt) / 60_000),
+    ...quantTradeFields(pos, pos.finalNetUsd, exitSlipUsd),
   });
   if(tradeHistory.length > 200) tradeHistory.length = 200;
 }

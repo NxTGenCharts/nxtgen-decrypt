@@ -206,6 +206,7 @@ class MockMarket {
         fundingRatePct: s.fundingRate * 100,      // per 8h funding interval, in %
         openInterestUsd: s.openInterestUsd,
         volRegime: s.volRegime,
+        candlesClosed: true, // synthetic candles are complete by construction (real feeds include the forming candle)
       },
     };
   }

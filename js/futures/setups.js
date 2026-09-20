@@ -8,6 +8,8 @@
 import { ema, emaSeries, atr, rsi, macdHistogram, vwap, swingLevels, volumeExpansion, relativeVolumePercentile, closes, clamp, parabolicSar, awesomeOscillator, macdSeries } from './indicators.js';
 import { REGIMES } from './regime.js';
 import { smartRangeFilter } from './rangeFilter.js';
+import { QUANT_ID, QUANT_TYPE, quantSymbolSet } from './quant/config.js';
+import { detectQuantFutures } from './quant/signal.js';
 
 const TREND_REGIMES = new Set([REGIMES.STRONG_BULL, REGIMES.WEAK_BULL, REGIMES.STRONG_BEAR, REGIMES.WEAK_BEAR]);
 const BULL_REGIMES = new Set([REGIMES.STRONG_BULL, REGIMES.WEAK_BULL]);
@@ -289,9 +291,21 @@ export const STRATEGY_REGISTRY = [
     label: 'Breakout + Retest',
     description: 'Consolidation, then a breakout, then a retest of that level with volume confirmation. Entry trigger now runs on M5 (was M15 — see detectBreakoutRetest\'s comment). Off by default: conceptually close to NxTGen Scalp\'s own momentum-chasing character, so it adds less diversification than the two enabled by default.',
   },
+  {
+    id: QUANT_ID, type: QUANT_TYPE, detector: 'detectQuantFutures', defaultRR: 2.0, defaultEnabled: false,
+    rrOptions: [2, 2.5, 3, 4], // Quant Futures never opens below 1:2 (see quant/config.js HARD_LIMITS)
+    label: 'NxTGen Quant Futures',
+    description: 'Quantitative multi-factor crypto futures strategy combining market regime detection, trend, momentum, volatility, liquidity, volume and multi-timeframe structure to identify selective 5m/15m futures setups with a minimum 1:2 risk/reward target. Deterministic 0-100 confluence score, adaptive structure+ATR stops, drawdown-scaled risk. Off by default — configure it in the Quant Futures panel below, then enable.',
+  },
 ];
 
-export function detectAllSetups(snap, regime, strategyConfig){
+// quantCtx (optional): { qcfg, ctx } — the sanitized Quant Futures config and
+// its per-call context ({ nowMs, log, costPct }). Without it the Quant detector
+// simply returns nothing, so every existing caller is unaffected.
+// onlyIds (optional): restrict to these strategy ids — used for symbols that
+// the platform excludes from the six original strategies but that Quant Futures
+// is explicitly configured to trade (BTC/ETH/SOL/BNB).
+export function detectAllSetups(snap, regime, strategyConfig, quantCtx, onlyIds){
   // strategyConfig: { [id]: boolean } — which strategies from
   // STRATEGY_REGISTRY above are enabled. Defaults to each strategy's own
   // defaultEnabled when no config is passed (e.g. Paper mode calling this
@@ -309,6 +323,9 @@ export function detectAllSetups(snap, regime, strategyConfig){
     liquiditySweep: detectLiquiditySweep,
     rangeReversal: detectRangeReversal,
     breakoutRetest: detectBreakoutRetest,
+    [QUANT_ID]: (sn, rg) => (quantCtx && quantCtx.qcfg && quantSymbolSet(quantCtx.qcfg).has(sn.symbol))
+      ? detectQuantFutures(sn, rg, quantCtx.qcfg, quantCtx.ctx)
+      : null,
   };
   // combineEnsemble (engine.js) already handles multiple setups firing on
   // the same symbol/cycle — agreement blends confidence, disagreement is
@@ -324,7 +341,7 @@ export function detectAllSetups(snap, regime, strategyConfig){
   // only honest measure of how it's actually doing — not a backtest
   // number quoted here or anywhere in this UI.
   return STRATEGY_REGISTRY
-    .filter(s => enabled(s.id))
+    .filter(s => enabled(s.id) && (!onlyIds || onlyIds.includes(s.id)))
     .map(s => DETECTORS[s.id](snap, regime))
     .filter(Boolean);
 }

@@ -16,6 +16,16 @@
 const VERSION = 'nxtgen-shell-v1';
 const NETWORK_TIMEOUT_MS = 3500;
 const PRECACHE = [
+  "/js/futures/quant/config.js",
+  "/js/futures/quant/features.js",
+  "/js/futures/quant/log.js",
+  "/js/futures/quant/regime.js",
+  "/js/futures/quant/risk.js",
+  "/js/futures/quant/setups.js",
+  "/js/futures/quant/signal.js",
+  "/js/futures/quant/stats.js",
+  "/js/futures/quant/validation.js",
+  "/js/quant-ui.js",
   "/",
   "/triangular-arbitrage/",
   "/cross-arbitrage/",

@@ -20,7 +20,10 @@
 // =============================================================
 import { els, state } from './state.js';
 import { fmtPct } from './utils.js';
-import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS } from './futures/engine.js';
+import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS, scanSymbolsWithQuant } from './futures/engine.js';
+import { QUANT_ID, QUANT_TYPE } from './futures/quant/config.js';
+import { qlog } from './futures/quant/log.js';
+import { initQuantUI, getQuantCfg, setQuantProviders, setQuantConfigListener, renderQuantStats, quantCardStatsLine, getQuantRewardRisk, updateQuantConfig } from './quant-ui.js';
 import { mockMarket } from './futures/mockMarket.js';
 import { RISK_DEFAULTS, estimateLiquidationPrice } from './futures/risk.js';
 import { DEFAULT_WEIGHTS } from './futures/scoring.js';
@@ -103,7 +106,7 @@ function ensureDayState(){
     trades: 0, wins: 0, losses: 0, consecutiveLosses: 0, lastLossAt: null,
     dailyPnlPct: 0, maxDrawdownPct: 0,
     realizedGrossUsd: 0, realizedNetUsd: 0, feesUsd: 0, fundingUsd: 0, slippageUsd: 0,
-    openPositions: 0, openRiskPct: 0, positions: [],
+    openPositions: 0, openRiskPct: 0, positions: [], quantTrades: [],
   };
   return fu().dayState;
 }
@@ -127,7 +130,7 @@ function resetSession(){
     trades: 0, wins: 0, losses: 0, consecutiveLosses: 0, lastLossAt: null,
     dailyPnlPct: 0, maxDrawdownPct: 0,
     realizedGrossUsd: 0, realizedNetUsd: 0, feesUsd: 0, fundingUsd: 0, slippageUsd: 0,
-    openPositions: 0, openRiskPct: 0, positions: [],
+    openPositions: 0, openRiskPct: 0, positions: [], quantTrades: [],
   };
   f.tradeHistory = [];
   f.lastRows = [];
@@ -538,6 +541,7 @@ function runCycle(){
     minConfidence: f.minConfidence, minRiskReward: f.minRiskReward, minNetProfitPct: f.minNetProfitPct,
     riskPctPerTrade: f.riskPctPerTrade, leverage: f.leverage,
     strategies: f.strategies, strategyRR: f.strategyRR,
+    quant: getQuantCfg({ log: true }), // NxTGen Quant Futures' own config (ignored unless it is enabled)
   };
   const { rows } = runScanCycle(cfg, dayState);
   f.lastRows = rows;
@@ -594,6 +598,7 @@ function render(){
   // the sample-size counter and "best so far" line update live while
   // Paper mode runs, not just when a checkbox/dropdown is touched.
   renderStrategyRows();
+  renderQuantStats();
   renderGridDashboard();
 }
 
@@ -735,8 +740,16 @@ function buildLiveDayStateShim(equity){
   const openSymbols = Object.keys(f.livePositions);
   const positions = openSymbols.map(symbol => {
     const p = f.livePositions[symbol];
-    return { symbol, riskAmountUsd: p.riskAmountUsd || 0 };
+    return {
+      symbol, riskAmountUsd: p.riskAmountUsd || 0,
+      // Portfolio context for the Quant risk gates (correlated exposure, margin, max positions).
+      direction: p.side === 'Buy' ? 'LONG' : 'SHORT', setup: p.setupType,
+      notionalUsd: (p.qty || 0) * (p.entry || 0), leverage: p.leverage || 1,
+    };
   });
+  // Quant Futures' own closed-trade ledger, oldest first, from the real trade log — its
+  // drawdown tiers / streak pause / daily+weekly limits replay from this (see quant/risk.js).
+  const quantTrades = f.liveTradeHistory.filter(t => t.setupType === QUANT_TYPE).map(t => ({ closedAtMs: t.closedAtMs, netUsd: t.netUsd || 0 })).reverse();
   // Recomputed from the real trade log's tail each cycle, rather than
   // tracked as separately-mutable state that could drift out of sync with it.
   let consecutiveLosses = 0, lastLossAt = null;
@@ -750,7 +763,7 @@ function buildLiveDayStateShim(equity){
     trades: f.liveTrades, wins: 0, losses: 0, consecutiveLosses, lastLossAt,
     dailyPnlPct, maxDrawdownPct: 0,
     realizedGrossUsd: 0, realizedNetUsd: f.liveNetPnlUsd, feesUsd: 0, fundingUsd: 0, slippageUsd: 0,
-    openPositions: openSymbols.length, openRiskPct, positions,
+    openPositions: openSymbols.length, openRiskPct, positions, quantTrades,
     // Per-symbol re-entry cooldown (set in runLiveCycle's close-detection
     // above) — read by evaluateNoTradeFilters (noTradeEngine.js) exactly
     // like Paper mode's own dayState.cooldownUntilBySymbol.
@@ -770,6 +783,12 @@ function buildLiveDayStateShim(equity){
 // exchange, all indistinguishable from here) AND closeLivePosition below
 // (the in-app "Close Position" button), so both paths book the trade
 // identically and neither can drift out of sync with the other.
+// Quant context copied onto a closed live trade so R-multiples / regime attribution survive in the Trade Log.
+function quantClosureFields(tracked, netUsd){
+  if(!tracked.quant) return {};
+  return { quant: { ...tracked.quant, riskUsd: tracked.riskAmountUsd || 0, realizedR: tracked.riskAmountUsd > 0 ? netUsd / tracked.riskAmountUsd : null } };
+}
+
 function recordLiveClosure(f, symbol, tracked, closed){
   const netUsd = closed ? closed.closedPnl : 0;
   // grossPnl/feesUsd can still come back null for any exchange on
@@ -792,7 +811,7 @@ function recordLiveClosure(f, symbol, tracked, closed){
     entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
     exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
     leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-    setupType: tracked.setupType, durationMin,
+    setupType: tracked.setupType, durationMin, ...quantClosureFields(tracked, netUsd),
   });
   // Same trade, also written to the cross-session Trade Log (see
   // appendPersistentTrade above) — independent of the session-scoped
@@ -802,8 +821,14 @@ function recordLiveClosure(f, symbol, tracked, closed){
     entry: closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry,
     exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
     leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-    setupType: tracked.setupType, durationMin,
+    setupType: tracked.setupType, durationMin, ...quantClosureFields(tracked, netUsd),
   });
+  if(tracked.quant){
+    qlog(`${symbol} position closed`);
+    qlog(`${symbol} realized PnL = ${netUsd >= 0 ? '+' : ''}$${Number(netUsd).toFixed(2)}${tracked.riskAmountUsd > 0 ? ` (${(netUsd / tracked.riskAmountUsd).toFixed(2)}R)` : ''}`);
+    qlog(`${symbol} trade result: ${netUsd > 0 ? 'WIN' : 'LOSS'}`);
+    qlog('Strategy statistics updated (Live/Demo)');
+  }
   f.liveTrades++;
   if(netUsd > 0) f.liveWins++; else f.liveLosses++;
   f.liveNetPnlUsd += netUsd;
@@ -1169,7 +1194,11 @@ async function runLiveCycleInner(){
     showLiveMessage(`Could not fetch the ${exchange} futures symbol list this cycle — skipping.`, 'error');
     return;
   }
-  const fetchSymbols = ['BTCUSDT', ...universe.top.filter(s => s !== 'BTCUSDT')];
+  // Quant Futures scans its own symbol list (BTC/ETH/SOL/BNB/XRP by default) on top of the volume-ranked
+  // universe — only when it is enabled; otherwise this is exactly the original list.
+  const quantProbe = { strategies: fu().strategies, quant: getQuantCfg() };
+  const scanList = scanSymbolsWithQuant(universe.top, quantProbe);
+  const fetchSymbols = ['BTCUSDT', ...scanList.filter(s => s !== 'BTCUSDT')];
   const snapshots = {};
   // Locked to 5m everywhere — see initLiveTimeframeInput's comment.
   const timeframe = '5m';
@@ -1193,10 +1222,11 @@ async function runLiveCycleInner(){
     minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
     riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage,
     strategies: f2.strategies, strategyRR: f2.strategyRR,
+    quant: getQuantCfg({ log: true }),
   };
   const dayStateShim = buildLiveDayStateShim(equity);
   const { rows } = runScanCycle(cfg, dayStateShim, {
-    symbols: universe.top,
+    symbols: scanList,
     getSnapshot: symbol => snapshots[symbol] || null,
     now: () => Date.now(),
     getBtcShock: () => computeBtcShock(snapshots.BTCUSDT.m5),
@@ -1265,10 +1295,11 @@ const DURATION_TRACKED_EXCHANGES = ['binance', 'bybit'];
 async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, equity){
   const f = fu();
   const openedAtMs = Date.now();
-  // singleTarget (Nova Scalp: whole position exits at one 2R target) deliberately
-  // takes the single-TP path below, not the 30/30/40 legs — zero-size legs are
-  // rejected by the server, and the TP2-fill breakeven automation would misfire.
-  const usePartialTp = PARTIAL_TP_EXCHANGES.includes(exchange) && approved.tpFractions && !approved.singleTarget;
+  // Single-exit trades go through the single take-profit order path below, not the 30/30/40 legs
+  // (zero-size legs are rejected by the server and the TP2-fill breakeven automation would misfire):
+  //   approved.singleTarget — Nova Scalp: whole position exits at one 2R target
+  //   approved.singleTp     — NxTGen Quant Futures: one fixed target (>= 1:2), no partials/breakeven
+  const usePartialTp = PARTIAL_TP_EXCHANGES.includes(exchange) && approved.tpFractions && !approved.singleTarget && !approved.singleTp;
   try{
     showLiveMessage(`Placing a real ${mode} order on ${exchange}: ${approved.symbol} ${side} @ ~${approved.entry}…`);
     const orderBody = {
@@ -1332,6 +1363,11 @@ async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, eq
       tp3Price: usePartialTp ? approved.tp3 : null,
       riskAmountUsd: approved.sizing.riskAmountUsd, openedAtMs, balanceBeforeUsd: equity,
       setupType: approved.setup,
+      ...(approved.quantMeta ? { quant: {
+        setup: approved.quantMeta.setup, setupName: approved.quantMeta.setupName, score: approved.quantMeta.score,
+        regime: approved.quantMeta.regime.label, entryTf: approved.quantMeta.entryTf, initialRR: approved.quantMeta.rewardRisk,
+        riskPctUsed: approved.riskPctUsed, stopDistPct: approved.quantMeta.stopDistPct, factors: approved.quantMeta.factors,
+      } } : {}),
       // Fields only meaningful when usePartialTp is true — used by
       // runLiveCycle's position-size polling to detect when TP2 has
       // fully filled and trigger the breakeven move exactly once.
@@ -1351,6 +1387,12 @@ async function placeLiveEntryOrder(approved, side, exchange, mode, cred, cfg, eq
     const tpNote = usePartialTp
       ? `TP1 ${approved.tp1} (30%) / TP2 ${approved.tp2} (30%) / TP3 ${approved.tp3} (40%)`
       : `TP ${result.takeProfitPrice}`;
+    if(approved.quantMeta){
+      qlog(`${approved.symbol} order submitted: ${approved.direction} qty ${result.filledQty} (${mode}, ${exchange})`);
+      qlog(`${approved.symbol} position opened @ ${result.avgPrice} (${approved.quantMeta.setupName}, score ${approved.quantMeta.score}, risk ${approved.riskPctUsed.toFixed(2)}%)`);
+      qlog(`${approved.symbol} stop loss set @ ${result.stopLossPrice}`);
+      qlog(`${approved.symbol} take profit set @ ${result.takeProfitPrice} (1:${approved.quantMeta.rewardRisk})`);
+    }
     showLiveMessage(`Real ${mode} position opened: ${approved.symbol} ${side} ${result.filledQty} @ ${result.avgPrice}, SL ${result.stopLossPrice} / ${tpNote} (order ${result.orderId}).`);
   }catch(err){
     showLiveMessage(`Order failed: ${err.message}`, 'error');
@@ -1406,6 +1448,7 @@ async function executeLivePendingSignal(){
     minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
     riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage,
     strategies: f2.strategies, strategyRR: f2.strategyRR,
+    quant: getQuantCfg({ log: true }),
   };
   let snap, btcSnap;
   const tf = '5m'; // locked everywhere — see initLiveTimeframeInput's comment
@@ -1890,7 +1933,7 @@ function renderStrategyRows(){
       ? `🏆 Best so far (Paper, ${best.stats.trades} trades): <b>${best.strategy.label}</b> — ${best.stats.winRatePct.toFixed(0)}% win rate, ${fmtUsd(best.stats.netUsd)} net${best.stats.profitFactor != null && isFinite(best.stats.profitFactor) ? `, ${best.stats.profitFactor.toFixed(2)} profit factor` : ''}`
       : `No strategy has reached ${MIN_SIGNIFICANT_TRADES} paper trades yet — run Paper mode to build a real sample before trusting any win-rate comparison.`;
   }
-  const strategyRowsHtml = STRATEGY_REGISTRY.map(s => {
+  const renderStratRow = (s) => {
     const stats = computeStrategyStats(s.type);
     let statsLine;
     if(stats.trades === 0){
@@ -1902,7 +1945,11 @@ function renderStrategyRows(){
     }
     const enabled = f.strategies[s.id] ?? s.defaultEnabled;
     if(enabled) enabledCount++;
-    const rr = f.strategyRR[s.id] ?? s.defaultRR;
+    const isQuant = s.id === QUANT_ID;
+    // Quant Futures owns its RR (1:2 minimum) and its stats wording (INSUFFICIENT SAMPLE) — see quant-ui.js.
+    const rr = isQuant ? getQuantRewardRisk() : (f.strategyRR[s.id] ?? s.defaultRR);
+    const rrOptions = s.rrOptions || [1, 1.5, 2, 2.5, 3];
+    if(isQuant) statsLine = quantCardStatsLine();
     return `
       <div class="ov-block" style="margin-bottom:10px;padding:12px;border-color:${enabled ? 'var(--line)' : 'var(--line-dim, var(--line))'};opacity:${enabled ? '1' : '.6'};">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
@@ -1916,14 +1963,17 @@ function renderStrategyRows(){
           <div style="min-width:150px;">
             <label style="font-size:11px;color:var(--dim);display:block;margin-bottom:4px;">Reward:Risk</label>
             <select class="fu-strategy-rr" data-id="${s.id}">
-              ${[1, 1.5, 2, 2.5, 3].map(v => `<option value="${v}" ${Math.abs(v-rr)<0.01 ? 'selected' : ''}>1:${v}</option>`).join('')}
+              ${rrOptions.map(v => `<option value="${v}" ${Math.abs(v-rr)<0.01 ? 'selected' : ''}>1:${v}</option>`).join('')}
             </select>
           </div>
         </div>
         <div style="font-size:11px;margin-top:8px;">${statsLine}</div>
       </div>
     `;
-  }).join('');
+  };
+  // Original six first, then NxTGen Grid, then NxTGen Quant Futures — so Quant is the 8th strategy in the list.
+  const strategyRowsHtml = STRATEGY_REGISTRY.filter(s => s.id !== QUANT_ID).map(renderStratRow).join('');
+  const quantRowHtml = STRATEGY_REGISTRY.filter(s => s.id === QUANT_ID).map(renderStratRow).join('');
 
   // NxTGen Grid — a 7th strategy, structurally different enough (many
   // simultaneous levels vs. one signal/entry) that its detailed config
@@ -1960,7 +2010,7 @@ function renderStrategyRows(){
     </div>
   `;
 
-  els.fuStrategyRows.innerHTML = strategyRowsHtml + gridRowHtml;
+  els.fuStrategyRows.innerHTML = strategyRowsHtml + gridRowHtml + quantRowHtml;
   // Shown next to "Strategies" in the collapsed <summary> row (see
   // index.html/css/components.css) so collapsing the section to save
   // space doesn't hide which/how many strategies are actually live.
@@ -2006,8 +2056,8 @@ function initStrategySelector(){
         }
         renderStrategyRows();
       } else if(e.target.classList.contains('fu-strategy-rr')){
-        f.strategyRR[e.target.dataset.id] = parseFloat(e.target.value);
-        persistStrategyConfig();
+        if(e.target.dataset.id === QUANT_ID){ updateQuantConfig({ rewardRisk: parseFloat(e.target.value) }); }
+        else { f.strategyRR[e.target.dataset.id] = parseFloat(e.target.value); persistStrategyConfig(); }
         renderStrategyRows();
       }
     });
@@ -4272,7 +4322,13 @@ export function initFuturesEngine(){
   initLiveDailyProfitTargetInput();
   initLiveMaxDailyLossInput();
   initLiveTimeframeInput();
+  setQuantProviders({
+    paperLog: () => loadPaperTradeLog(), liveLog: () => loadPersistentTradeLog(),
+    dayState: () => fu().dayState, liveStart: () => fu().liveStartingEquity,
+  });
+  setQuantConfigListener(() => renderStrategyRows()); // keeps the strategy card's RR dropdown in sync with the panel
   initStrategySelector();
+  initQuantUI();
   initGridPanel();
   initTradingBots();
   initLiveTradingControls();
