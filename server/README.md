@@ -140,8 +140,8 @@ browser open.
 - `GET /api/worker/status` — armed state, open position(s), running totals (trades/wins/losses/PnL), last message, recent closed trades.
 - `GET /api/worker/logs?since=<epoch_ms>` — log lines since that time, for a "what happened while I was away" view.
 
-**Credentials are never persisted** — same rule as the rest of this
-proxy. They live in a variable in this process for as long as it's
+**Credentials are never persisted by this code** — same rule as the rest of this
+proxy (unless you opt in to server-saved settings below). They live in a variable in this process for as long as it's
 armed, and nothing else. That means:
 
 - A process restart (redeploy, crash, host maintenance) clears the
@@ -154,6 +154,35 @@ armed, and nothing else. That means:
   `ALLOWED_ORIGIN`/HTTPS/no-withdrawal-permission points under
   "Deploying it for real" above are what actually protect this once
   it's reachable by more than just you.
+
+## Access tokens, saved settings and auto-arm (for hands-off use)
+
+All `/api/worker/*` routes now require an access token, sent as the
+`X-Worker-Token` header (or `Authorization: Bearer <token>`). **With no
+`WORKER_TOKEN` set, the routes answer 503 and the worker is locked** — a fresh
+deploy can't be reached by accident. Set these in the host's environment
+(Render: your service → **Environment**). None of them is ever returned to a
+browser, and none is written to disk by this code.
+
+| Variable | What it does |
+|---|---|
+| `WORKER_TOKEN` | **Required.** Admin token, at least 20 random characters. Can arm, disarm and watch. |
+| `WORKER_VIEW_TOKEN` | Optional read-only token (status + logs only). Safe to give to someone who should watch but not control. |
+| `WORKER_EXCHANGE` | `bybit`, `binance`, `gateio`, `mexc` or `bitget` |
+| `WORKER_MODE` | `demo` (default) or `live` |
+| `WORKER_API_KEY`, `WORKER_SECRET_KEY`, `WORKER_PASSPHRASE` | The credential the worker trades with (passphrase: Bitget only). |
+| `WORKER_LEVERAGE`, `WORKER_RISK_PCT`, `WORKER_MIN_CONFIDENCE`, `WORKER_MIN_RR`, `WORKER_MIN_NET_PROFIT_PCT`, `WORKER_DAILY_PROFIT_TARGET_PCT`, `WORKER_MAX_DAILY_LOSS_PCT`, `WORKER_HIGH_SELECTIVITY` | Optional — same meaning as the dashboard's risk settings; unset ones use the defaults. |
+| `WORKER_STRATEGIES` | Optional JSON of strategy on/off, e.g. `{"novaScalp":true,"rangeReversal":true,"quantFutures":true}`. Ids: `aiScalp`, `novaScalp`, `trendContinuation`, `liquiditySweep`, `rangeReversal`, `breakoutRetest`, `quantFutures`. Unlisted ids use their defaults. |
+| `WORKER_AUTOARM` | `true` = arm automatically ~3 s after every server start, using the saved settings above. |
+
+When `WORKER_EXCHANGE` + `WORKER_API_KEY` + `WORKER_SECRET_KEY` are set:
+
+- The dashboard hides the key/exchange/risk fields and arms with `{ armPhrase, useServerKeys: true }` — no key ever crosses the browser again. The arm phrase is still typed by a person.
+- With `WORKER_AUTOARM=true` the worker survives restarts/redeploys/crashes on its own. **That also means it resumes trading with no human present — including in `live` mode. Use `demo` until you trust it.** Disarming from the dashboard holds only until the next restart.
+- Session counters (daily profit/loss tracking, trade totals, cooldowns) live in the process, so they reset on every restart.
+- A free Render instance sleeps when idle and the worker sleeps with it; wake-up re-arms it (if auto-arm is on), but it isn't trading while asleep. Use an always-on instance for real 24/7.
+
+**Sharing the dashboard.** `nxtgendecrypt.site/worker/#token=<token>&proxy=<server url>` opens pre-filled: the page saves both on that device and removes them from the address bar immediately (the part after `#` is never sent to any server). Give people the `WORKER_VIEW_TOKEN` version unless they should be able to arm/disarm — the admin token can start and stop trading on your account.
 
 **Dashboard:** `worker/index.html` (repo root) is a self-contained mobile-friendly page for this — point it at your deployed proxy URL, arm/disarm, and watch status + the activity log live. Deploy it alongside the rest of the static site (or open the file directly) — it only talks to the endpoints above, nothing else to configure.
 

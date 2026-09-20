@@ -20,6 +20,7 @@
 // (see server/README.md) — never written to disk. A process restart
 // clears the armed session; nothing re-arms itself.
 // =============================================================
+import crypto from 'node:crypto';
 import {
   ARM_PHRASE, LIVE_CYCLE_MS, LIVE_TRADEABLE_EXCHANGES, LIVE_ONLY_EXCHANGES,
   runLiveCycleInner, getTradeableSymbols,
@@ -111,6 +112,140 @@ async function runCycle(){
   }
 }
 
+
+// -------------------------------------------------------------
+// Server-side saved settings + access tokens
+//
+// Everything below is opt-in via environment variables set on the host
+// (Render: service -> Environment). Nothing here is written to disk by this
+// code, and nothing is ever sent back to a browser — the dashboard only learns
+// THAT keys are configured (and for which exchange/mode), never what they are.
+//
+//   WORKER_TOKEN        admin access token (>= 20 chars). Required for every
+//                       /api/worker/* call — without it the routes answer 503.
+//   WORKER_VIEW_TOKEN   optional read-only token (status + logs only) — safe to
+//                       hand to someone who should watch but not arm/disarm.
+//   WORKER_EXCHANGE, WORKER_MODE, WORKER_API_KEY, WORKER_SECRET_KEY,
+//   WORKER_PASSPHRASE   the credential the worker trades with.
+//   WORKER_LEVERAGE, WORKER_RISK_PCT, WORKER_MIN_CONFIDENCE, WORKER_MIN_RR,
+//   WORKER_MIN_NET_PROFIT_PCT, WORKER_DAILY_PROFIT_TARGET_PCT,
+//   WORKER_MAX_DAILY_LOSS_PCT, WORKER_HIGH_SELECTIVITY, WORKER_STRATEGIES
+//                       optional settings (WORKER_STRATEGIES is JSON, e.g.
+//                       {"novaScalp":true,"quantFutures":true}).
+//   WORKER_AUTOARM=true arm automatically on every server start.
+// -------------------------------------------------------------
+const MIN_TOKEN_LEN = 20;
+
+function envNum(name){
+  const v = process.env[name];
+  if(v == null || String(v).trim() === '') return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function envStrategies(){
+  const raw = process.env.WORKER_STRATEGIES;
+  if(!raw || !raw.trim()) return undefined;
+  try{
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : undefined;
+  }catch(e){
+    console.log('[worker] WORKER_STRATEGIES is not valid JSON — ignoring it (strategy defaults will be used).');
+    return undefined;
+  }
+}
+
+function hasEnvCreds(){
+  const e = process.env;
+  return !!(e.WORKER_EXCHANGE && e.WORKER_API_KEY && e.WORKER_SECRET_KEY);
+}
+
+// The armSession() params built from the WORKER_* env vars, or null if the
+// credential trio isn't there. `armPhrase` is filled in by the caller: a
+// dashboard arm passes what the person typed; auto-arm passes ARM_PHRASE
+// itself, because setting WORKER_AUTOARM=true IS the operator's explicit opt-in.
+function envParams(armPhrase){
+  if(!hasEnvCreds()) return null;
+  const e = process.env;
+  return {
+    armPhrase,
+    exchange: String(e.WORKER_EXCHANGE).trim().toLowerCase(),
+    mode: String(e.WORKER_MODE || 'demo').trim().toLowerCase(),
+    apiKey: String(e.WORKER_API_KEY).trim(),
+    secretKey: String(e.WORKER_SECRET_KEY).trim(),
+    passphrase: String(e.WORKER_PASSPHRASE || '').trim(),
+    leverage: envNum('WORKER_LEVERAGE'),
+    riskPctPerTrade: envNum('WORKER_RISK_PCT'),
+    minConfidence: envNum('WORKER_MIN_CONFIDENCE'),
+    minRiskReward: envNum('WORKER_MIN_RR'),
+    minNetProfitPct: envNum('WORKER_MIN_NET_PROFIT_PCT'),
+    dailyProfitTargetPct: envNum('WORKER_DAILY_PROFIT_TARGET_PCT'),
+    maxDailyLossPct: envNum('WORKER_MAX_DAILY_LOSS_PCT'),
+    highSelectivity: String(e.WORKER_HIGH_SELECTIVITY || '').toLowerCase() === 'true',
+    strategies: envStrategies(),
+  };
+}
+
+// Non-secret facts about the server's saved config — what the dashboard uses to
+// decide whether to show key fields at all.
+function serverInfo(){
+  const e = process.env;
+  return {
+    envConfigured: hasEnvCreds(),
+    envExchange: hasEnvCreds() ? String(e.WORKER_EXCHANGE).trim().toLowerCase() : null,
+    envMode: hasEnvCreds() ? String(e.WORKER_MODE || 'demo').trim().toLowerCase() : null,
+    autoArm: String(e.WORKER_AUTOARM || '').toLowerCase() === 'true',
+  };
+}
+
+function safeEq(a, b){
+  const A = Buffer.from(String(a || ''));
+  const B = Buffer.from(String(b || ''));
+  return A.length === B.length && crypto.timingSafeEqual(A, B);
+}
+
+function roleFor(req){
+  const admin = process.env.WORKER_TOKEN;
+  const view = process.env.WORKER_VIEW_TOKEN;
+  const presented = req.get('x-worker-token') || (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  if(!presented) return null;
+  if(admin && admin.length >= MIN_TOKEN_LEN && safeEq(presented, admin)) return 'admin';
+  if(view && view.length >= MIN_TOKEN_LEN && safeEq(presented, view)) return 'view';
+  return null;
+}
+
+// Fails closed: with no (or a too-short) WORKER_TOKEN nothing under
+// /api/worker/* answers, so a fresh deploy can never expose the worker by accident.
+function requireRole(min){
+  return (req, res, next) => {
+    const adminTok = process.env.WORKER_TOKEN;
+    if(!adminTok || adminTok.length < MIN_TOKEN_LEN){
+      return res.status(503).json({ ok: false, code: 'no_token_configured',
+        message: `Set WORKER_TOKEN (at least ${MIN_TOKEN_LEN} characters) in the server's environment — the worker is locked until you do.` });
+    }
+    const role = roleFor(req);
+    if(!role) return res.status(401).json({ ok: false, code: 'unauthorized', message: 'Missing or incorrect access token.' });
+    if(min === 'admin' && role !== 'admin') return res.status(403).json({ ok: false, code: 'forbidden', message: 'This token is read-only — it can watch the worker but not arm or disarm it.' });
+    req.workerRole = role;
+    next();
+  };
+}
+
+function scheduleAutoArm(){
+  if(String(process.env.WORKER_AUTOARM || '').toLowerCase() !== 'true') return;
+  const params = envParams(ARM_PHRASE);
+  if(!params){
+    console.log('[worker] WORKER_AUTOARM=true but WORKER_EXCHANGE / WORKER_API_KEY / WORKER_SECRET_KEY are not all set — staying disarmed.');
+    return;
+  }
+  // Wait a moment so this server is listening before the first cycle's loopback calls.
+  setTimeout(() => {
+    const r = armSession(params);
+    if(r.ok){ log('Auto-armed on server start from the server\'s saved settings (WORKER_AUTOARM=true).', 'success'); }
+    else console.log('[worker] Auto-arm failed: ' + r.message);
+  }, 3000);
+}
+
 export function armSession(params){
   const {
     armPhrase, exchange, mode, apiKey, secretKey, passphrase,
@@ -178,9 +313,10 @@ export function disarmSession(){
 
 export function getStatus(){
   if(!session){
-    return { armed: false };
+    return { armed: false, ...serverInfo() };
   }
   return {
+    ...serverInfo(),
     armed: session.liveArmed, exchange: session.exchange, mode: session.mode,
     armedAtMs: session.armedAtMs, lastCycleAtMs: session.lastCycleAtMs,
     lastMessage: session.lastMessage, lastMessageKind: session.lastMessageKind,
@@ -205,20 +341,33 @@ export function getLogs(sinceMs){
 export function attachWorker(app, baseUrl){
   selfBaseUrl = baseUrl;
 
-  app.post('/api/worker/arm', (req, res) => {
-    const result = armSession(req.body || {});
-    res.json(result);
+  app.post('/api/worker/arm', requireRole('admin'), (req, res) => {
+    const body = req.body || {};
+    if(body.useServerKeys){
+      // Arm with the credential + settings saved in the server's environment —
+      // no key ever crosses the browser. The arm phrase is still typed by a person.
+      const params = envParams(body.armPhrase);
+      if(!params) return res.json({ ok: false, message: 'The server has no saved credential (WORKER_EXCHANGE / WORKER_API_KEY / WORKER_SECRET_KEY are not set).' });
+      return res.json(armSession(params));
+    }
+    res.json(armSession(body));
   });
 
-  app.post('/api/worker/disarm', (req, res) => {
-    res.json(disarmSession());
+  app.post('/api/worker/disarm', requireRole('admin'), (req, res) => {
+    const out = disarmSession();
+    if(serverInfo().autoArm){
+      log('Note: WORKER_AUTOARM is on, so the worker will arm itself again the next time this server restarts.');
+    }
+    res.json(out);
   });
 
-  app.get('/api/worker/status', (req, res) => {
-    res.json({ ok: true, status: getStatus() });
+  app.get('/api/worker/status', requireRole('view'), (req, res) => {
+    res.json({ ok: true, role: req.workerRole, status: getStatus() });
   });
 
-  app.get('/api/worker/logs', (req, res) => {
+  app.get('/api/worker/logs', requireRole('view'), (req, res) => {
     res.json({ ok: true, logs: getLogs(req.query.since) });
   });
+
+  scheduleAutoArm();
 }
