@@ -169,10 +169,14 @@ const announceStatus = () => document.dispatchEvent(new CustomEvent('nxtgen-serv
 
 // A message belongs to the exchange/network it was raised for — switching the row clears it,
 // so an old "no verified live key" can never linger under a Demo selection.
+// Success notes ("Running on the server…") fade after a few seconds — they described a moment, and left up they kept
+// claiming it long after the server had stopped. Errors stay until the state changes.
 function setMsg(text, kind, src){
-  msg = { text: text || '', kind: kind || '', key: selKey(), src: src || '' };
+  msg = { text: text || '', kind: kind || '', key: selKey(), src: src || '', until: kind === 'ok' ? Date.now() + 7000 : 0 };
   render();
 }
+// Set when a session this page saw running is no longer running on the server and the user didn't stop it here.
+let lostNote = null; // { exchange, mode }
 
 let lastStateKey = null;
 function render(){
@@ -211,12 +215,17 @@ function render(){
   $('swSub').textContent = sub;
 
   let text = '', kind = '';
-  if(msg.text && msg.key === selKey()){ text = msg.text; kind = msg.kind; }
+  if(msg.text && msg.key === selKey() && (!msg.until || Date.now() < msg.until)){ text = msg.text; kind = msg.kind; }
   if(!text && serverOn && tabOn && f.liveRunning){
     text = 'This tab is also armed and running on this exchange — switch off and on again, or trades will double up.'; kind = 'error';
   }
   if(!text && readOnly){ text = 'This token is read-only: you can watch, not switch the server on or off.'; }
   if(!text && serverOn && sess.lastMessageKind === 'error' && sess.lastMessage){ text = sess.lastMessage; kind = 'error'; }
+  if(!text && lostNote && lostNote.exchange === sel.exchange && !on){
+    text = `The server is no longer running ${nameOf(lostNote.exchange)} (${lostNote.mode === 'live' ? 'LIVE' : 'Demo'}) — it restarted, went to sleep, or was stopped from another device. ` +
+      `An open position keeps its exchange-side SL/TP, so check it on the exchange. Flip the switch to start again.`;
+    kind = 'error';
+  }
   // Other exchanges the server is running (this device's row may be a different one) — so the page never looks "idle" while it isn't.
   const others = lastStatus && lastStatus.sessions ? Object.values(lastStatus.sessions).filter(x => x.armed && x.exchange !== sel.exchange) : [];
   if(!text && others.length) text = 'Also running on the server: ' + others.map(x => `${nameOf(x.exchange)} · ${x.mode === 'live' ? 'LIVE' : 'Demo'}`).join(', ') + '.';
@@ -239,8 +248,16 @@ async function poll(){
   try{
     const r = await wcall('/api/worker/status', 'GET', null, tok);
     if(!r.ok){ setMsg(failText(r, 'The server refused the request.'), 'error', 'poll'); return; }
+    const prev = lastStatus;
     lastStatus = r.status;
     readOnly = r.role === 'view';
+    if(prev && prev.sessions){
+      for(const [ex, p] of Object.entries(prev.sessions)){
+        const now = r.status.sessions && r.status.sessions[ex];
+        if(p.armed && !(now && now.armed)) lostNote = { exchange: ex, mode: p.mode };
+      }
+    }
+    if(lostNote && r.status.sessions && r.status.sessions[lostNote.exchange] && r.status.sessions[lostNote.exchange].armed) lostNote = null;
     if(msg.src === 'poll') msg = { text: '', kind: '', key: '', src: '' }; // the earlier poll problem is gone
     render();
     announceStatus();
@@ -324,7 +341,7 @@ async function turnOff(){
 async function onToggle(){
   if(busy) return;
   const want = $('swToggle').checked;
-  busy = true; msg = { text: '', kind: '', key: '', src: '' }; render();
+  busy = true; msg = { text: '', kind: '', key: '', src: '' }; lostNote = null; render();
   try{
     if(!want) await turnOff();
     else if(fu().liveTradeMode === 'manual') turnOnTab();
