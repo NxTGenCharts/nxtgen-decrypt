@@ -23,8 +23,9 @@ import { fmtPct } from './utils.js';
 import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS, scanSymbolsWithQuant } from './futures/engine.js';
 import { QUANT_ID, QUANT_TYPE } from './futures/quant/config.js';
 import { qlog } from './futures/quant/log.js';
-import { initQuantUI, getQuantCfg, setQuantProviders, setQuantConfigListener, renderQuantStats, quantCardStatsLine, getQuantRewardRisk, updateQuantConfig } from './quant-ui.js';
+import { getQuantCfg, setQuantProviders, setQuantConfigListener, quantCardStatsLine, getQuantRewardRisk, updateQuantConfig } from './quant-ui.js';
 import { mockMarket } from './futures/mockMarket.js';
+import { WATCHLIST_TOP_N, rankTopByVolume } from './futures/watchlist.js';
 import { RISK_DEFAULTS, estimateLiquidationPrice } from './futures/risk.js';
 import { DEFAULT_WEIGHTS } from './futures/scoring.js';
 import { computeBtcShock } from './futures/indicators.js';
@@ -65,14 +66,19 @@ const LIVE_SYMBOL_COOLDOWN_MS = 30 * 60_000;
 // breadth and are comfortable with the added API weight per cycle; the
 // exchange-side weight comments above (and the Binance ban postmortem)
 // are the ceiling to reason against before raising it much further.
-const LIVE_SCAN_TOP_N = 15;
+// The watchlist size is shared with Paper and Backtest (js/futures/watchlist.js: top 25 by 24h volume, the
+// platform's excluded pairs removed). At ~9 Binance weight per symbol per 8s cycle, 25 symbols is roughly
+// 1,700 weight/min against Binance's 2,400 cap — under server.js's 1,900 soft cap, but with less headroom
+// than the old 15 had; if that guard starts pausing Binance calls, lower WATCHLIST_TOP_N.
+const LIVE_SCAN_TOP_N = WATCHLIST_TOP_N;
 const LIVE_UNIVERSE_TTL_MS = 45_000; // matches server.js's own cache window — no reason to ask more often than the server would give a fresh answer anyway
 const liveUniverseCache = {}; // { [exchange]: { symbols: [{symbol, volume24hUsd}], atMs } }
 
 // Fetches (or reuses a cached) ranked, exclusion-filtered symbol list for
 // `exchange`. Returns { top: string[], totalAvailable: number } — `top`
 // is what actually gets scanned this cycle, `totalAvailable` is the full
-// post-exclusion count, purely for the status message ("15 of 247").
+// post-exclusion count, purely for the status message ("25 of 247"). `entries` is the same top list with
+// each pair's 24h volume and last price (Paper uses those to mirror the pairs with synthetic candles).
 // Returns null only if there's no usable list at all (first-ever fetch on
 // this exchange failed) — callers treat that as "can't scan yet".
 async function getLiveTradeableSymbols(exchange){
@@ -90,9 +96,40 @@ async function getLiveTradeableSymbols(exchange){
       else return null;
     }
   }
-  const eligible = list.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s.symbol));
-  eligible.sort((a, b) => (b.volume24hUsd || 0) - (a.volume24hUsd || 0));
-  return { top: eligible.slice(0, LIVE_SCAN_TOP_N).map(s => s.symbol), totalAvailable: eligible.length };
+  const ranked = rankTopByVolume(list, LIVE_SCAN_TOP_N);
+  return { top: ranked.top.map(s => s.symbol), entries: ranked.top, totalAvailable: ranked.totalAvailable };
+}
+
+// ---- Paper watchlist ----
+// Paper mirrors the selected exchange's REAL current top-25 pairs by 24h volume (same ranking Live/Demo
+// scans), with SYNTHETIC candles: the real pair only seeds each random walk's starting price and liquidity
+// (mockMarket.ensureSymbol). The lookup is a fire-and-forget public call — the Paper cycle never waits on it —
+// and if it can't run (no proxy configured, network error, a server that predates lastPrice) Paper keeps
+// scanning whatever it already had, ultimately the built-in synthetic list, exactly as before.
+const paperWatch = { exchange: null, symbols: null, total: 0, atMs: 0, pending: false };
+
+function refreshPaperWatchlist(){
+  const exchange = fu().exchange;
+  const fresh = paperWatch.exchange === exchange && Date.now() - paperWatch.atMs < LIVE_UNIVERSE_TTL_MS;
+  if(paperWatch.pending || fresh) return;
+  paperWatch.pending = true;
+  getLiveTradeableSymbols(exchange).then(u => {
+    if(!u || !u.entries || !u.entries.length) return;
+    const usable = u.entries
+      .filter(e => mockMarket.ensureSymbol(e.symbol, { price: e.lastPrice, volume24hUsd: e.volume24hUsd }))
+      .map(e => e.symbol);
+    paperWatch.exchange = exchange; paperWatch.symbols = usable; paperWatch.total = u.entries.length; paperWatch.atMs = Date.now();
+    const note = document.getElementById('fuWatchlistNote');
+    if(note) note.textContent = usable.length
+      ? `Paper watchlist: ${usable.length} of the top ${u.entries.length} ${exchange} pairs by 24h volume (excluded pairs removed) — real pair names, synthetic prices.${usable.length < u.entries.length ? ' The rest could not be seeded (the proxy may need updating).' : ''}`
+      : '';
+  }).catch(() => { /* keep the previous list / built-in synthetic list */ }).finally(() => { paperWatch.pending = false; });
+}
+
+// The symbols the Paper cycle scans this tick, or undefined to use the engine's built-in list.
+function paperScanSymbols(f){
+  if(paperWatch.exchange !== f.exchange || !paperWatch.symbols || !paperWatch.symbols.length) return undefined;
+  return scanSymbolsWithQuant(paperWatch.symbols, { strategies: f.strategies, quant: getQuantCfg() });
 }
 const ARM_PHRASE = 'PLACE REAL ORDERS';
 
@@ -160,7 +197,7 @@ function readSettingsFromInputs(){
   // Clamped server-side-of-the-UI (not just via the input's min/max
   // attributes) so a 0/negative/absurd value typed directly, or the
   // attributes being bypassed, can never size a trade — the user can
-  // still choose anywhere from 1% to RISK_DEFAULTS.maxRiskPctPerTrade
+  // still choose anywhere from 0.25% to RISK_DEFAULTS.maxRiskPctPerTrade
   // (50%) of the selected exchange's futures-account equity.
   // Risk per trade (%) has TWO inputs — fuRiskPct (Paper Engine
   // section, above) and fuLiveRiskPct (Live/Demo Trading section,
@@ -169,7 +206,7 @@ function readSettingsFromInputs(){
   // f.riskPctPerTrade value. syncRiskPctInputs (below, wired to each
   // field's own input listener) is what keeps them mirrored; this just
   // reads whichever was most recently edited/is currently in the DOM.
-  if(els.fuRiskPct) f.riskPctPerTrade = Math.min(RISK_DEFAULTS.maxRiskPctPerTrade, Math.max(1, Number(els.fuRiskPct.value) || 1.0));
+  if(els.fuRiskPct) f.riskPctPerTrade = Math.min(RISK_DEFAULTS.maxRiskPctPerTrade, Math.max(0.25, Number(els.fuRiskPct.value) || 1.0));
   if(els.fuLeverage) f.leverage = Number(els.fuLeverage.value) || RISK_DEFAULTS.defaultLeverage;
   f.highSelectivity = !!(els.fuSelectivityToggle && els.fuSelectivityToggle.checked);
 }
@@ -541,9 +578,12 @@ function runCycle(){
     minConfidence: f.minConfidence, minRiskReward: f.minRiskReward, minNetProfitPct: f.minNetProfitPct,
     riskPctPerTrade: f.riskPctPerTrade, leverage: f.leverage,
     strategies: f.strategies, strategyRR: f.strategyRR,
-    quant: getQuantCfg({ log: true }), // NxTGen Quant Futures' own config (ignored unless it is enabled)
+    // NxTGen Quant Futures (ignored unless enabled) takes Min confidence / Risk per trade / High Selectivity
+    // from the same top controls as every other strategy — there is no separate Quant panel.
+    quant: getQuantCfg({ log: true, minConfidence: f.minConfidence, riskPct: f.riskPctPerTrade, highSelectivity: f.highSelectivity }),
   };
-  const { rows } = runScanCycle(cfg, dayState);
+  refreshPaperWatchlist();
+  const { rows } = runScanCycle(cfg, dayState, { symbols: paperScanSymbols(f) });
   f.lastRows = rows;
 
   // Open at most one new position per APPROVED symbol not already held,
@@ -598,7 +638,6 @@ function render(){
   // the sample-size counter and "best so far" line update live while
   // Paper mode runs, not just when a checkbox/dropdown is touched.
   renderStrategyRows();
-  renderQuantStats();
   renderGridDashboard();
 }
 
@@ -1222,7 +1261,8 @@ async function runLiveCycleInner(){
     minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
     riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage,
     strategies: f2.strategies, strategyRR: f2.strategyRR,
-    quant: getQuantCfg({ log: true }),
+    // Quant follows the same shared top controls — including the live adaptive confidence boost above.
+    quant: getQuantCfg({ log: true, minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost), riskPct: f2.riskPctPerTrade, highSelectivity: f2.highSelectivity }),
   };
   const dayStateShim = buildLiveDayStateShim(equity);
   const { rows } = runScanCycle(cfg, dayStateShim, {
@@ -1448,7 +1488,8 @@ async function executeLivePendingSignal(){
     minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
     riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage,
     strategies: f2.strategies, strategyRR: f2.strategyRR,
-    quant: getQuantCfg({ log: true }),
+    // Quant follows the same shared top controls — including the live adaptive confidence boost above.
+    quant: getQuantCfg({ log: true, minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost), riskPct: f2.riskPctPerTrade, highSelectivity: f2.highSelectivity }),
   };
   let snap, btcSnap;
   const tf = '5m'; // locked everywhere — see initLiveTimeframeInput's comment
@@ -2853,7 +2894,7 @@ function toggleRunning(){
 // one the user just edited.
 function syncRiskPctInputs(rawValue){
   const f = fu();
-  const clamped = Math.min(RISK_DEFAULTS.maxRiskPctPerTrade, Math.max(1, Number(rawValue) || 1.0));
+  const clamped = Math.min(RISK_DEFAULTS.maxRiskPctPerTrade, Math.max(0.25, Number(rawValue) || 1.0));
   f.riskPctPerTrade = clamped;
   if(els.fuRiskPct) els.fuRiskPct.value = clamped;
   if(els.fuLiveRiskPct) els.fuLiveRiskPct.value = clamped;
@@ -4326,9 +4367,8 @@ export function initFuturesEngine(){
     paperLog: () => loadPaperTradeLog(), liveLog: () => loadPersistentTradeLog(),
     dayState: () => fu().dayState, liveStart: () => fu().liveStartingEquity,
   });
-  setQuantConfigListener(() => renderStrategyRows()); // keeps the strategy card's RR dropdown in sync with the panel
+  setQuantConfigListener(() => renderStrategyRows()); // keeps the strategy card's RR dropdown in sync with the saved Quant RR
   initStrategySelector();
-  initQuantUI();
   initGridPanel();
   initTradingBots();
   initLiveTradingControls();

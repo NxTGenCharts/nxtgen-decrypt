@@ -4,7 +4,7 @@
 // The codebase has no central log service (Paper uses the scanner table +
 // explanation pane; Live uses a single status label), so this is a small,
 // scoped one: an in-memory ring buffer + console output + optional
-// subscribers (the Quant panel's log viewer subscribes). It is OFF for
+// subscribers (the Quant panel that used to show this log was removed; the console channel remains). It is OFF for
 // Backtest (thousands of bars would drown it) — callers opt in via
 // cfg.quant.log.
 //

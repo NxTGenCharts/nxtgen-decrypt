@@ -23,16 +23,30 @@ An additional strategy in the existing AI Futures Engine (Strategies list → *N
 | `quant/stats.js` | Stats, equity curve, sample rule, ratios |
 | `quant/validation.js` | 70/30 split, Monte Carlo (bootstrap), real walk-forward (parameters chosen on train only, traded on the next unseen window) |
 | `quant/log.js` | `[QUANT]` log channel (the codebase had no central logger) |
-| `js/quant-ui.js` | Config panel, risk state, stats/equity curve, log viewer, backtest validation section |
+| `js/quant-ui.js` | Merges the page's shared settings into Quant's config (`getQuantCfg`), the Strategies-card stats line, and the Backtest tab's validation section |
 
 Modified (additively): `setups.js` (registry entry), `engine.js` (Quant branch, open/close), `backtest.js`, `mockMarket.js` (1 flag), `futures-ui.js`, `backtest-ui.js`, `index.html`, `sw.js` (precache). Non-Quant positions take the identical code path as before.
 
-## Score (defaults, configurable, renormalized to 100)
+## Settings (no separate Quant panel)
+There is no Quant configuration panel. Quant reads the same controls as every other strategy:
+
+| Setting | Where it comes from |
+|---|---|
+| Min confidence | Top **Min confidence** field (Backtest tab: its own Min confidence field). Clamped to 60–95 for Quant |
+| Risk per trade | Top **Risk per trade (%)** field (Backtest tab: its own field). **Capped at Quant's 1% hard ceiling**, then scaled down by the drawdown tiers / high-volatility multiplier as before |
+| Selectivity | Top **High Selectivity Mode** toggle: on → *High* tier (score ≥ 80, 5/6 categories, 5 confirmations); off → *Normal*. Backtest always uses Normal. (*Very High* is no longer selectable) |
+| Reward:Risk | The Reward:Risk dropdown on Quant's own Strategies card (1:2 minimum) |
+| Leverage, min net profit, exchange | Already shared top controls |
+| Everything else (entry timeframe, symbols, long/short, setups A–D, max positions, daily/weekly loss limits, loss-streak pause + cooldown, drawdown tiers, auto-resume, funding confirmation, adaptive RR) | No inputs. Uses the defaults in `quant/config.js`, or whatever was previously saved under `nxtgen_quant_futures_config_v1` |
+
+The Quant-only performance table, risk-state readout, equity curve and `[QUANT]` log viewer that lived in that panel were removed with it. The Strategies card still shows a one-line Paper / Live/Demo / Backtest summary, the Backtest tab still shows the full validation section, and `[QUANT]` events still go to the browser console.
+
+## Score (defaults, renormalized to 100)
 Trend 20 · Structure 15 · Momentum 15 · Volume/liquidity 10 · Volatility regime 10 · Higher-TF alignment 15 · Entry quality 10 · RR quality 5, ± funding adjustment (−6…+2) when the feed provides it.
 Min confidence 70 (60–95); High Selectivity ≥ 80, Very High ≥ 85, both also demanding more agreeing confluence categories/confirmations; +5 in High Volatility.
 
 ## Risk
-* Risk/trade 0.5% (0.25/0.5/0.75/1.0), ×0.7 at 3% drawdown, ×0.5 at 5%, **pause** at 8% (auto-resume after 48 h at ×0.5 for the next 5 trades), ×0.6 in High Volatility. No martingale, no size-up after losses, no averaging.
+* Risk/trade = the shared Risk per trade field, capped at 1.0% (old Quant default: 0.5% — set the field to 0.5 for that), ×0.7 at 3% drawdown, ×0.5 at 5%, **pause** at 8% (auto-resume after 48 h at ×0.5 for the next 5 trades), ×0.6 in High Volatility. No martingale, no size-up after losses, no averaging.
 * Pause after 3 consecutive losses (cooldown 240 min), daily loss limit 2%, weekly 5%, max 3 positions, same-direction risk ≤ 2× per-trade risk (BTC/ETH/SOL are one correlated bet), margin check, per-symbol notional cap.
 * These are **strategy-scoped**: they never block other strategies. The shared no-trade gate (fee-to-stop ≤ 25%, min net target, spread, liquidity, portfolio open-risk cap, global daily limits) still applies on top.
 * Entry = taker fill at slippage-adjusted price; single limit target; stop-market fill slips against you; no partials/breakeven (they would push realized RR under 1:2).
@@ -51,3 +65,6 @@ This copy carries the Quant strategy on top of the current Nova Scalp (PSAR/EMA5
 * **Quant Futures** → `singleTp` (one target in `tp1`, handled by the `singleTp` branch in `engine.js` / `backtest.js`, with Quant's own 6h/12h time-stop and slippage model).
 Live/Demo routes both through the single take-profit order path (`usePartialTp` is off when either flag is set).
 Shared helpers in `indicators.js`: `efficiencyRatio(values, period)` (takes a values array — the Smart Range Filter calls it with closes), `swingLowPoints` / `swingHighPoints`.
+
+## Watchlist (Paper / Backtest / Live-Demo)
+All three modes use the same list: the selected exchange's **top 25 USDT perpetuals by 24h volume**, minus the platform-wide excluded pairs (`js/futures/watchlist.js`, fed by `/api/futures/universe`). Live/Demo scans it directly. Backtest loads it into the symbol picker (all ticked; "Reload top 25" re-fetches; falls back to the built-in list if the proxy is unreachable) — note it is *today's* ranking applied to the whole date range. Paper mirrors the real pair names with synthetic candles (the pair's real last price/volume only seed the random walk); it needs a proxy running the updated `server.js` (which now returns `lastPrice`) and otherwise falls back to the built-in synthetic list. Quant's own symbols are still added on top of whichever list is in use.

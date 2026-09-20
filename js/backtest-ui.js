@@ -10,6 +10,7 @@
 import { els } from './state.js';
 import { callProxy, fmtUsd } from './futures-ui.js';
 import { TRADEABLE_FUTURES_SYMBOLS } from './futures/engine.js';
+import { WATCHLIST_TOP_N, rankTopByVolume } from './futures/watchlist.js';
 import { STRATEGY_REGISTRY } from './futures/setups.js';
 import { DEFAULT_FEE_CONFIG } from './futures/costs.js';
 import { runBacktest, summarizeTrades } from './futures/backtest.js';
@@ -27,26 +28,53 @@ function showBtMessage(msg, kind){
   els.btMessages.style.color = kind === 'error' ? 'var(--red)' : (kind === 'ok' ? 'var(--green)' : 'var(--dim)');
 }
 
-function populateSymbolChecks(){
+// Backtest's symbol list is the same watchlist Live/Demo and Paper use: the selected exchange's top
+// WATCHLIST_TOP_N USDT perpetuals by 24h volume, excluded pairs removed (js/futures/watchlist.js), all ticked.
+// If the exchange list can't be fetched (no proxy configured, network error) it falls back to the built-in
+// TRADEABLE_FUTURES_SYMBOLS list with the first 10 ticked, which is how this picker always worked.
+//
+// One caveat worth knowing: the ranking is TODAY's 24h volume, applied to the whole date range being
+// tested. Pairs that were small or not yet listed earlier in the range come back as "no data" and are
+// skipped by the run; pairs that have since dropped out of the top 25 are not tested at all. That is a
+// survivorship/look-ahead bias in WHICH pairs are tested (not in the entries or exits on them).
+let symbolLoadToken = 0;
+
+function renderSymbolChecks(symbols, checked, noteText){
+  if(els.btSymbolChecks){
+    const on = new Set(checked);
+    els.btSymbolChecks.innerHTML = symbols.map(sym => `
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;">
+        <input type="checkbox" class="bt-symbol-check" value="${sym}" ${on.has(sym) ? 'checked' : ''}>${sym}
+      </label>
+    `).join('');
+  }
+  const note = document.getElementById('btSymbolsNote');
+  if(note) note.textContent = noteText || '';
+}
+
+function renderFallbackSymbolChecks(reason){
+  const builtIn = TRADEABLE_FUTURES_SYMBOLS;
+  renderSymbolChecks(builtIn, builtIn.slice(0, 10), `${reason} Showing the built-in list instead.`);
+}
+
+async function populateSymbolChecks(){
   if(!els.btSymbolChecks) return;
-  // TRADEABLE_FUTURES_SYMBOLS deliberately EXCLUDES the majors
-  // (BTCUSDT/ETHUSDT/SOLUSDT/BNBUSDT/etc — see engine.js's
-  // EXCLUDED_FUTURES_SYMBOLS) because the six single-entry strategies
-  // trade momentum/reversal patterns those cleaner-moving majors don't
-  // suit as well. NxTGen Grid now shares this exact same watchlist
-  // (grid.js's GRID_SYMBOLS === TRADEABLE_FUTURES_SYMBOLS) rather than
-  // its own majors-only list, so those excluded majors stay excluded
-  // here too — no separate union/asterisk needed any more.
-  const allSymbols = TRADEABLE_FUTURES_SYMBOLS;
-  // A reasonable default selection (not literally every symbol) so a
-  // first run finishes in a sensible time — Select All/None below make
-  // widening or narrowing it a one-click choice.
-  const defaultOn = new Set(TRADEABLE_FUTURES_SYMBOLS.slice(0, 10));
-  els.btSymbolChecks.innerHTML = allSymbols.map(sym => `
-    <label style="display:flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;">
-      <input type="checkbox" class="bt-symbol-check" value="${sym}" ${defaultOn.has(sym) ? 'checked' : ''}>${sym}
-    </label>
-  `).join('');
+  const exchange = els.btExchange ? els.btExchange.value : 'binance';
+  const token = ++symbolLoadToken; // a slower earlier response must not overwrite a newer exchange's list
+  renderFallbackSymbolChecks(`Loading the top ${WATCHLIST_TOP_N} ${exchange} pairs by 24h volume…`);
+  try{
+    const data = await callProxy('/api/futures/universe', { exchange });
+    if(token !== symbolLoadToken) return;
+    if(!data.ok) throw new Error(data.message || 'Universe fetch failed.');
+    const { top } = rankTopByVolume(data.symbols, WATCHLIST_TOP_N);
+    if(!top.length) throw new Error('The exchange returned no usable pairs.');
+    const names = top.map(s => s.symbol);
+    renderSymbolChecks(names, names,
+      `Top ${names.length} ${exchange} USDT perpetuals by current 24h volume, excluded pairs removed. The ranking is today's, applied to the whole date range — pairs that were smaller or unlisted earlier are skipped if they have no data.`);
+  }catch(err){
+    if(token !== symbolLoadToken) return;
+    renderFallbackSymbolChecks(`Could not load the exchange's top ${WATCHLIST_TOP_N} (${err.message}).`);
+  }
 }
 
 function populateStrategyChecks(){
@@ -118,8 +146,8 @@ async function runBacktestFlow(){
   // NxTGen Quant Futures trades its own configured symbol list (XRP/ADA/AVAX/LINK/DOT by default). Those are
   // added to the run automatically when Quant is ticked. The platform's excluded pairs (BTC/ETH/SOL/LTC/DOGE/
   // BNB/CL) are stripped from that list by sanitizeQuantConfig and skipped by the backtest loop regardless.
-  const quantCfgForRun = getQuantCfg({ log: false });
-  if(strategies[QUANT_ID]) symbols = Array.from(new Set([...symbols, ...quantCfgForRun.symbols]));
+  const quantSymbolCfg = getQuantCfg({ log: false });
+  if(strategies[QUANT_ID]) symbols = Array.from(new Set([...symbols, ...quantSymbolCfg.symbols]));
   if(!symbols.length){ showBtMessage('Select at least one symbol to test.', 'error'); return; }
   if(!Object.values(strategies).some(Boolean)){ showBtMessage('Enable at least one strategy to test.', 'error'); return; }
 
@@ -180,11 +208,13 @@ async function runBacktestFlow(){
   }).join(', ');
   console.log(`[Backtest] Requested ~${requestedDays.toFixed(1)}d — got: ${coverage}${usableSymbols.length > 4 ? ', …' : ''}`);
 
+  const quantCfgForRun = getQuantCfg({ log: false, minConfidence, riskPct: riskPctPerTrade, highSelectivity: false });
   const cfg = {
     exchange, strategies, minConfidence, riskPctPerTrade, leverage,
     feeConfig: { ...DEFAULT_FEE_CONFIG, [exchange]: { makerPct, takerPct } },
-    // Quant Futures uses its OWN risk/confidence/RR settings (Quant panel), not this page's shared
-    // Risk per trade / Min confidence fields; fees, spread, funding, leverage and balance here still apply.
+    // Quant Futures uses this page's Risk per trade / Min confidence (its own 1% risk ceiling still applies),
+    // no selectivity tier (like the other strategies here), and the Reward:Risk set on its Strategies card;
+    // fees, spread, funding, leverage and balance here apply as for every strategy.
     quant: quantCfgForRun,
   };
 
@@ -524,7 +554,7 @@ export function initBacktestUI(){
   updateFeeDefaults();
   updateGridParamsNote();
 
-  if(els.btExchange) els.btExchange.addEventListener('change', updateFeeDefaults);
+  if(els.btExchange) els.btExchange.addEventListener('change', () => { updateFeeDefaults(); populateSymbolChecks(); });
   if(els.btRangePreset) els.btRangePreset.addEventListener('change', () => {
     const custom = els.btRangePreset.value === 'custom';
     if(els.btCustomFromField) els.btCustomFromField.style.display = custom ? '' : 'none';
@@ -533,6 +563,8 @@ export function initBacktestUI(){
   if(els.btSymbolsAllBtn) els.btSymbolsAllBtn.addEventListener('click', () => {
     document.querySelectorAll('.bt-symbol-check').forEach(el => { el.checked = true; });
   });
+  const reloadBtn = document.getElementById('btSymbolsReloadBtn');
+  if(reloadBtn) reloadBtn.addEventListener('click', populateSymbolChecks);
   if(els.btSymbolsNoneBtn) els.btSymbolsNoneBtn.addEventListener('click', () => {
     document.querySelectorAll('.bt-symbol-check').forEach(el => { el.checked = false; });
   });

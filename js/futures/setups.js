@@ -295,7 +295,7 @@ export const STRATEGY_REGISTRY = [
     id: QUANT_ID, type: QUANT_TYPE, detector: 'detectQuantFutures', defaultRR: 2.0, defaultEnabled: false,
     rrOptions: [2, 2.5, 3, 4], // Quant Futures never opens below 1:2 (see quant/config.js HARD_LIMITS)
     label: 'NxTGen Quant Futures',
-    description: 'Quantitative multi-factor crypto futures strategy combining market regime detection, trend, momentum, volatility, liquidity, volume and multi-timeframe structure to identify selective 5m/15m futures setups with a minimum 1:2 risk/reward target. Deterministic 0-100 confluence score, adaptive structure+ATR stops, drawdown-scaled risk. Off by default — configure it in the Quant Futures panel below, then enable.',
+    description: 'Quantitative multi-factor crypto futures strategy combining market regime detection, trend, momentum, volatility, liquidity, volume and multi-timeframe structure to identify selective 5m/15m futures setups with a minimum 1:2 risk/reward target. Deterministic 0-100 confluence score, adaptive structure+ATR stops, drawdown-scaled risk. Off by default. It uses the Min confidence, Risk per trade (capped at 1%) and High Selectivity settings at the top of this tab, plus the Reward:Risk on this card; tick it to enable.',
   },
 ];
 

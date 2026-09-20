@@ -217,7 +217,7 @@
         <select id="fuExchange"><option value="binance">Binance Futures</option><option value="bybit">Bybit Derivatives</option><option value="mexc">MEXC Futures</option><option value="gateio">Gate.io Futures</option><option value="bitget">Bitget Futures</option></select>
       </div>
       <div class="field">
-        <label for="fuMinConfidence" title="AI Scalp's confidence score ranges 60 (bare momentum, zero RSI/volume confirmation) to 87 (fully confirmed) — 60 was the floor of that range, so it filtered nothing. 70 requires at least one real confirmation (RSI alignment, or strong momentum + volume together).">Min confidence</label>
+        <label for="fuMinConfidence" title="Also the minimum score for NxTGen Quant Futures. AI Scalp's confidence score ranges 60 (bare momentum, zero RSI/volume confirmation) to 87 (fully confirmed) — 60 was the floor of that range, so it filtered nothing. 70 requires at least one real confirmation (RSI alignment, or strong momentum + volume together).">Min confidence</label>
         <input id="fuMinConfidence" type="number" min="0" max="100" step="1" value="70">
       </div>
       <div class="field">
@@ -229,15 +229,15 @@
         <input id="fuMinNetProfit" type="number" min="0" max="3" step="0.05" value="0.30">
       </div>
       <div class="field">
-        <label for="fuRiskPct" title="Max % of the selected exchange's futures-account equity lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount. Adjustable 1-80%.">Risk per trade (%)</label>
-        <input id="fuRiskPct" type="number" min="1" max="80" step="0.5" value="1">
+        <label for="fuRiskPct" title="Max % of the selected exchange's futures-account equity lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount. Adjustable 0.25-80%. NxTGen Quant Futures follows this value but never risks more than 1% per trade.">Risk per trade (%)</label>
+        <input id="fuRiskPct" type="number" min="0.25" max="80" step="0.25" value="1">
       </div>
       <div class="field">
         <label for="fuLeverage">Leverage</label>
         <input id="fuLeverage" type="number" min="1" max="10" step="1" value="5">
       </div>
       <div class="field">
-        <label for="fuSelectivityToggle" title="Minimum confidence 82 and every other filter tightened (reward:risk is already fixed at 1:2 for everyone — this toggle no longer changes it). May take zero trades for long stretches — that's by design.">High Selectivity Mode</label>
+        <label for="fuSelectivityToggle" title="Also switches NxTGen Quant Futures to its High Selectivity tier (score >= 80, 5 of 6 confluence categories, 5 confirmations). Minimum confidence 82 and every other filter tightened (reward:risk is already fixed at 1:2 for everyone — this toggle no longer changes it). May take zero trades for long stretches — that's by design.">High Selectivity Mode</label>
         <label class="toggle-check">
           <input id="fuSelectivityToggle" type="checkbox">
           <span>fewer, higher-conviction setups only</span>
@@ -256,11 +256,6 @@
       <div id="fuStrategiesBest" style="font-size:12.5px;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:var(--r-md);padding:8px 12px;margin-bottom:10px;"></div>
       <div id="fuStrategyRows"></div>
       <div id="fuGridPanel"></div>
-    </details>
-
-    <details class="ov-block fu-strategies" id="fuQuantDetails" style="margin-bottom:18px;">
-      <summary class="ov-block-title">NxTGen Quant Futures — configuration &amp; performance</summary>
-      <div id="fuQuantPanel"></div>
     </details>
 
     <details class="ov-block fu-strategies" id="fuTradingBotsDetails" style="margin-bottom:18px;">
@@ -297,6 +292,7 @@
 
     <div class="ov-block" style="margin-top:18px;">
       <div class="ov-block-title">Live Opportunity Scanner</div>
+      <div id="fuWatchlistNote" style="font-size:11.5px;color:var(--dim);margin:0 0 8px;"></div>
       <!-- .table-scroll: lets this 14-column row scroll horizontally on
            narrow viewports instead of squeezing unreadable or overflowing
            the page — see css/futures.css. -->
@@ -328,8 +324,8 @@
       <div class="fu-live-exch-rows" id="fuLiveExchRows"><!-- rendered by js/futures-ui.js — one row per exchange, click to select, click Live/Demo to set that exchange's network --></div>
 
       <div class="field" style="max-width:320px;margin:14px 0 10px;">
-        <label for="fuLiveRiskPct" title="Max % of the SELECTED exchange's real futures-account equity (the Real Balance figure below) lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount. Adjustable 1-80%. Same setting as the Paper Engine's 'Risk per trade' field above — changing either one updates both.">Risk per trade (%)</label>
-        <input id="fuLiveRiskPct" type="number" min="1" max="80" step="0.5" value="1">
+        <label for="fuLiveRiskPct" title="Max % of the SELECTED exchange's real futures-account equity (the Real Balance figure below) lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount. Adjustable 0.25-80%. Same setting as the Paper Engine's 'Risk per trade' field above — changing either one updates both.">Risk per trade (%)</label>
+        <input id="fuLiveRiskPct" type="number" min="0.25" max="80" step="0.25" value="1">
       </div>
 
       <div class="field" style="max-width:320px;margin-bottom:10px;">
@@ -531,10 +527,12 @@
 
       <div class="field" style="margin-bottom:14px;">
         <label>Symbols to test</label>
+        <div id="btSymbolsNote" style="font-size:11.5px;color:var(--dim);margin:0 0 6px;"></div>
         <div id="btSymbolChecks" style="display:flex;flex-wrap:wrap;gap:6px 14px;max-height:140px;overflow:auto;border:1px solid var(--line);border-radius:var(--r-md);padding:10px;background:var(--panel2);"></div>
         <div class="btn-row" style="margin-top:6px;gap:8px;">
           <button type="button" class="primary ghost" id="btSymbolsAllBtn">Select All</button>
           <button type="button" class="primary ghost" id="btSymbolsNoneBtn">Select None</button>
+          <button type="button" class="primary ghost" id="btSymbolsReloadBtn" title="Re-fetch the exchange's current top 25 by 24h volume (also happens whenever the exchange above changes)">Reload top 25</button>
         </div>
       </div>
 

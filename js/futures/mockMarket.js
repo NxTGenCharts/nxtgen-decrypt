@@ -34,6 +34,7 @@ const SYMBOLS = [
   'TONUSDT', 'ICPUSDT', 'HBARUSDT', 'RENDERUSDT', 'RUNEUSDT',
 ];
 const SEED_MINUTES = 4000;    // ~2.8 days of 1m backstory generated on load
+const MAX_DYNAMIC_SYMBOLS = 60; // real-pair series added at runtime by ensureSymbol()
 const MAX_CANDLES_KEPT = 6500; // rolling window kept after seeding, comfortably above what H1x60 aggregation needs
 
 const BASE_PRICE = {
@@ -63,7 +64,10 @@ function mulberry32(seed){
 }
 
 class SymbolSeries {
-  constructor(symbol, seed){
+  // endTs (optional): timestamp the LAST seeded 1m candle should land on. Series created after the
+  // synthetic clock has already advanced pass the market's current time so every symbol shares one clock
+  // (otherwise the newcomer's candles would look hours stale next to the others).
+  constructor(symbol, seed, endTs){
     this.symbol = symbol;
     this.rng = mulberry32(seed);
     this.price = BASE_PRICE[symbol];
@@ -75,16 +79,16 @@ class SymbolSeries {
     this.m1Candles = [];
     this.fundingRate = 0.0001 * (this.rng() - 0.5) * 2; // ~ -0.01%..+0.01% / 8h
     this.openInterestUsd = BASE_VOL_24H_USD[symbol] * (0.15 + this.rng() * 0.1);
-    this._seedHistory();
+    this._seedHistory(endTs);
   }
 
-  _seedHistory(){
+  _seedHistory(endTs){
     // Build ~4000 1-minute candles (~2.8 days) of backstory. The H1
     // regime classifier wants 30-60 H1 candles for its EMA20/EMA50 read,
     // which means 1800-3600 minutes of underlying 1m history — this
     // seeds comfortably past that so every symbol has a real regime
     // read (not "insufficient history") from the very first render.
-    const now = Date.now() - SEED_MINUTES * 60_000;
+    const now = Number.isFinite(endTs) ? endTs - (SEED_MINUTES - 1) * 60_000 : Date.now() - SEED_MINUTES * 60_000;
     for(let i = 0; i < SEED_MINUTES; i++) this._stepOneMinute(now + i * 60_000);
   }
 
@@ -165,6 +169,25 @@ class MockMarket {
   }
 
   get symbols(){ return SYMBOLS.slice(); }
+
+  hasSymbol(symbol){ return this.series.has(symbol); }
+
+  // Paper mode can mirror an exchange's REAL current top-volume pairs (see js/futures/watchlist.js). The
+  // prices/candles stay synthetic — the pair's real last price and 24h volume only seed the random walk's
+  // starting level and liquidity figure, so the numbers look like the real pair without being real data.
+  // Returns true if the symbol has a series afterwards. Existing (built-in) symbols are left untouched.
+  // Capped so a long session on a volatile ranking can't grow the series set without bound.
+  ensureSymbol(symbol, { price, volume24hUsd } = {}){
+    if(this.series.has(symbol)) return true;
+    if(!/^[A-Z0-9]{2,20}USDT$/.test(symbol)) return false;
+    if(!(Number.isFinite(price) && price > 0) || !(Number.isFinite(volume24hUsd) && volume24hUsd >= 0)) return false;
+    if(this.series.size >= SYMBOLS.length + MAX_DYNAMIC_SYMBOLS) return false;
+    BASE_PRICE[symbol] = price;
+    BASE_VOL_24H_USD[symbol] = Math.max(volume24hUsd, 1e6);
+    let h = 2166136261; for(const ch of symbol){ h = Math.imul(h ^ ch.charCodeAt(0), 16777619); }
+    this.series.set(symbol, new SymbolSeries(symbol, ((Date.now() & 0xffffffff) + h) | 0, this.now()));
+    return true;
+  }
 
   // The synthetic market clock — all symbols tick in lockstep (tick() below
   // advances every series by the same number of minutes), so any one

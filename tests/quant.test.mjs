@@ -24,6 +24,8 @@ import { mockMarket } from '../js/futures/mockMarket.js';
 import { runScanCycle, openPosition, managePositions, evaluateSymbol, scanSymbolsWithQuant } from '../js/futures/engine.js';
 import { runBacktest } from '../js/futures/backtest.js';
 import { setQuantConsole } from '../js/futures/quant/log.js';
+import { getQuantCfg } from '../js/quant-ui.js';
+import { WATCHLIST_TOP_N, rankTopByVolume } from '../js/futures/watchlist.js';
 setQuantConsole(false);
 
 let passed = 0;
@@ -288,6 +290,50 @@ await test('EXCLUDED pairs are never traded by Quant: Backtest skips them even w
   const cfg = { exchange: 'binance', strategies: { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true }, minConfidence: 60, riskPctPerTrade: 0.5, leverage: 5, minNetProfitPct: 0.3, quant: dirty };
   const res = await runBacktest({ candlesBySymbol: cb, symbols: symsAll, cfg, startingEquity: 10000, intervalMinutes: 5, maxDailyLossPct: 5, dailyProfitTargetPct: 50 });
   assert.ok(!res.trades.some(t => EXCLUDED_FUTURES_SYMBOLS.has(t.symbol)), 'backtest traded an excluded pair');
+});
+
+await test('shared top settings drive Quant: min confidence, risk (still capped at 1%), selectivity; no shared values -> saved config', () => {
+  const base = getQuantCfg({ log: false });
+  assert.equal(base.riskPct, QUANT_DEFAULTS.riskPct, 'saved/default config used when nothing is passed');
+  const a = getQuantCfg({ minConfidence: 76, riskPct: 0.5, highSelectivity: false });
+  assert.equal(a.minConfidence, 76); assert.equal(a.riskPct, 0.5); assert.equal(a.selectivity, 'off');
+  const b = getQuantCfg({ minConfidence: 76, riskPct: 5, highSelectivity: true });
+  assert.equal(b.riskPct, HARD_LIMITS.maxRiskPct, 'a 5% top-level risk must clamp to Quant\'s 1% ceiling');
+  assert.equal(b.selectivity, 'high');
+  assert.ok(effectiveMinConfidence(b) >= 80, 'High Selectivity raises the floor to 80');
+  const c = getQuantCfg({ minConfidence: 0, riskPct: 0.01 });
+  assert.equal(c.minConfidence, HARD_LIMITS.minConfidence); assert.equal(c.riskPct, HARD_LIMITS.minRiskPct);
+  assert.equal(getQuantCfg({ log: true }).log, true); assert.equal(getQuantCfg({}).log, false);
+});
+
+await test('watchlist: top 25 by 24h volume, excluded pairs removed, input not mutated', () => {
+  assert.equal(WATCHLIST_TOP_N, 25);
+  const uni = [];
+  for(let i = 0; i < 60; i++) uni.push({ symbol: `COIN${i}USDT`, volume24hUsd: (i + 1) * 1e6, lastPrice: 1 });
+  uni.push({ symbol: 'BTCUSDT', volume24hUsd: 9e12 }, { symbol: 'ETHUSDT', volume24hUsd: 8e12 }, { symbol: 'CLUSDT', volume24hUsd: 7e12 }, { symbol: 'FOOUSD', volume24hUsd: 6e12 });
+  const before = uni.map(u => u.symbol).join();
+  const r = rankTopByVolume(uni);
+  assert.equal(r.top.length, 25); assert.equal(r.totalAvailable, 60);
+  assert.equal(r.top[0].symbol, 'COIN59USDT'); assert.equal(r.top[24].symbol, 'COIN35USDT');
+  assert.ok(!r.top.some(t => EXCLUDED_FUTURES_SYMBOLS.has(t.symbol)), 'an excluded pair made the watchlist');
+  assert.equal(uni.map(u => u.symbol).join(), before, 'input was reordered');
+  assert.deepEqual(rankTopByVolume(null).top, []);
+});
+
+await test('paper: real top-25 pairs get synthetic series on the shared clock and go through the normal scan', () => {
+  mockMarket.tick(37); // move the synthetic clock off wall-clock, like a running Paper session
+  assert.equal(mockMarket.ensureSymbol('NOTINLISTUSDT', { price: 12.34, volume24hUsd: 5e7 }), true);
+  assert.equal(mockMarket.ensureSymbol('BADUSDT', { price: 0, volume24hUsd: 5e7 }), false, 'a missing/zero price must be rejected');
+  assert.equal(mockMarket.ensureSymbol('lowercase', { price: 1, volume24hUsd: 1 }), false);
+  assert.equal(mockMarket.ensureSymbol('XRPUSDT', {}), true, 'built-in symbols are left untouched');
+  const snap = mockMarket.snapshot('NOTINLISTUSDT'), ref = mockMarket.snapshot('XRPUSDT');
+  assert.ok(Math.abs(snap.price - 12.34) / 12.34 < 0.5, 'random walk should start near the seeded real price');
+  // (built-in series were seeded a few ms apart at load, so compare with a 1s tolerance — the bug this guards is a multi-minute skew)
+  assert.ok(Math.abs(snap.m5[snap.m5.length - 1].t - ref.m5[ref.m5.length - 1].t) < 1000, 'new series must be on the same clock as the others (else its candles look stale)');
+  const dayState = { equity: 10000, startingEquity: 10000, positions: [], openPositions: 0, openRiskPct: 0, quantTrades: [], consecutiveLosses: 0, tradesToday: 0, wins: 0, losses: 0, grossPnl: 0, feesUsd: 0, fundingUsd: 0, slippageUsd: 0, netPnl: 0 };
+  const cfg = { exchange: 'binance', weights: undefined, minConfidence: 70, minRiskReward: 2, minNetProfitPct: 0.3, riskPctPerTrade: 1, leverage: 5, strategies: {}, strategyRR: {} };
+  const { rows } = runScanCycle(cfg, dayState, { symbols: ['NOTINLISTUSDT', 'XRPUSDT'] });
+  assert.deepEqual(rows.map(r => r.symbol).sort(), ['NOTINLISTUSDT', 'XRPUSDT']);
 });
 
 console.log(`\n${passed} tests passed${process.exitCode ? ' — WITH FAILURES' : ''}`);

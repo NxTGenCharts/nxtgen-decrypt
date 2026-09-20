@@ -3226,7 +3226,7 @@ async function binanceFuturesUniverse(){
     .map(s => s.symbol));
   return (tickers || [])
     .filter(t => tradeable.has(t.symbol))
-    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.quoteVolume || '0') }));
+    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.quoteVolume || '0'), lastPrice: parseFloat(t.lastPrice || '0') }));
 }
 
 async function bybitFuturesUniverse(){
@@ -3266,7 +3266,7 @@ async function bybitFuturesUniverse(){
     .map(s => s.symbol));
   return (tickers?.result?.list || [])
     .filter(t => tradeable.has(t.symbol))
-    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.turnover24h || '0') }));
+    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.turnover24h || '0'), lastPrice: parseFloat(t.lastPrice || '0') }));
 }
 
 async function gateioFuturesUniverse(){
@@ -3280,7 +3280,7 @@ async function gateioFuturesUniverse(){
     .map(c => c.name));
   return (Array.isArray(tickers) ? tickers : [])
     .filter(t => tradeable.has(t.contract))
-    .map(t => ({ symbol: fromGateioContract(t.contract), volume24hUsd: parseFloat(t.volume_24h_quote || t.volume_24h_settle || '0') }));
+    .map(t => ({ symbol: fromGateioContract(t.contract), volume24hUsd: parseFloat(t.volume_24h_quote || t.volume_24h_settle || '0'), lastPrice: parseFloat(t.last || t.mark_price || '0') }));
 }
 
 async function mexcFuturesUniverse(){
@@ -3293,7 +3293,7 @@ async function mexcFuturesUniverse(){
     .map(c => c.symbol));
   return (tickers?.data || [])
     .filter(t => tradeable.has(t.symbol))
-    .map(t => ({ symbol: fromMexcContract(t.symbol), volume24hUsd: parseFloat(t.amount24 || t.volume24 || '0') }));
+    .map(t => ({ symbol: fromMexcContract(t.symbol), volume24hUsd: parseFloat(t.amount24 || t.volume24 || '0'), lastPrice: parseFloat(t.lastPrice || '0') }));
 }
 
 async function bitgetFuturesUniverse(){
@@ -3315,7 +3315,7 @@ async function bitgetFuturesUniverse(){
     .map(c => c.symbol));
   return (tickers?.data || [])
     .filter(t => tradeable.has(t.symbol))
-    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.usdtVolume || t.quoteVolume || '0') }));
+    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.usdtVolume || t.quoteVolume || '0'), lastPrice: parseFloat(t.lastPr || t.markPrice || '0') }));
 }
 
 const FUTURES_UNIVERSE_GETTERS = {

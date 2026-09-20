@@ -57,6 +57,7 @@ const PRECACHE = [
   "/js/futures/grid.js",
   "/js/futures/indicators.js",
   "/js/futures/mockMarket.js",
+  "/js/futures/watchlist.js",
   "/js/futures/noTradeEngine.js",
   "/js/futures/excludedSymbols.js",
   "/js/futures/rangeFilter.js",
