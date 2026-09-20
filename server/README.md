@@ -121,3 +121,17 @@ is the actual safety boundary once you deploy this somewhere reachable by
 more than just you. Start in Demo mode with Test Mode on, watch it place a
 few forced-test cycles, and confirm the fills look right before ever
 pointing a Live key at an armed session.
+
+## Binance "shared IP weight usage" / IP-restricted key errors
+
+Binance counts request weight per **IP address** (2,400/min). On a shared host (e.g. Render's default outbound
+IPs, which are shared with other customers in the region) other tenants' traffic counts against the same cap, and
+the app's proactive guard then pauses Binance calls — you'll see *"Binance's shared IP weight usage is at N/2400 …"*
+even though this app alone sends far less. If your Binance key is also set to "Restrict access to trusted IPs
+only", the shared/rotating IP can't be whitelisted reliably either.
+
+Permanent fix: run this proxy on a host with its **own fixed IPv4** (a small VPS, or Render Dedicated IPs), start it
+with `NODE_OPTIONS=--dns-result-order=ipv4first`, put HTTPS in front of it, and whitelist that IP on the Binance key.
+This app's own Binance scan cost is kept low by sharing bookTicker/premiumIndex/24h-volume calls across symbols and
+caching the 15m/1h context candles briefly (see "Binance scan-weight reduction" in `server.js`) — about 650-800
+weight/min for a 25-pair watchlist.

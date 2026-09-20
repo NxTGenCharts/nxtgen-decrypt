@@ -67,9 +67,11 @@ const LIVE_SYMBOL_COOLDOWN_MS = 30 * 60_000;
 // exchange-side weight comments above (and the Binance ban postmortem)
 // are the ceiling to reason against before raising it much further.
 // The watchlist size is shared with Paper and Backtest (js/futures/watchlist.js: top 25 by 24h volume, the
-// platform's excluded pairs removed). At ~9 Binance weight per symbol per 8s cycle, 25 symbols is roughly
-// 1,700 weight/min against Binance's 2,400 cap — under server.js's 1,900 soft cap, but with less headroom
-// than the old 15 had; if that guard starts pausing Binance calls, lower WATCHLIST_TOP_N.
+// platform's excluded pairs removed). Binance's scan used to cost ~9 weight per symbol per 8s cycle (~1,700/min
+// at 25 pairs, against a 2,400/min per-IP cap); server.js now shares the bookTicker/premiumIndex/24h-volume calls
+// across symbols and briefly caches the 15m/1h candles, which brings 25 pairs to roughly 650-800/min. If the
+// guard still pauses Binance calls, the shared host IP is the cause (other tenants' traffic counts against the
+// same cap) — run the proxy on a dedicated IP, see server/README.md.
 const LIVE_SCAN_TOP_N = WATCHLIST_TOP_N;
 const LIVE_UNIVERSE_TTL_MS = 45_000; // matches server.js's own cache window — no reason to ask more often than the server would give a fresh answer anyway
 const liveUniverseCache = {}; // { [exchange]: { symbols: [{symbol, volume24hUsd}], atMs } }

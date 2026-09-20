@@ -1334,19 +1334,80 @@ function binanceCandlesFromKline(raw){
     t: row[0], o: parseFloat(row[1]), h: parseFloat(row[2]), l: parseFloat(row[3]), c: parseFloat(row[4]), v: parseFloat(row[5]),
   }));
 }
+// ---- Binance scan-weight reduction ------------------------------------------------------------
+// Per symbol per cycle the scan used to cost ~9 IP weight (three klines 2+2+1, bookTicker 2, premiumIndex 1,
+// 24hr ticker 1). With a 25-pair watchlist on an 8s cycle that is ~1,700/min against Binance's 2,400/min
+// per-IP cap — and on a shared host IP other tenants add to the same counter. So everything that does NOT
+// need to be per-symbol-per-cycle is now shared:
+//   * bookTicker and premiumIndex: ONE all-symbols call (weight 5 / 10) serves every symbol in the cycle
+//     (3s / 5s cache) instead of 25 single-symbol calls (weight 50 / 25). Falls back to the per-symbol call if
+//     the batch call fails or the symbol is missing from it.
+//   * 24h volume / last price: read from the cached futures universe (already fetched for the watchlist)
+//     instead of a per-symbol 24hr ticker call; falls back to the per-symbol call if it isn't cached.
+//   * 15m and 1h context candles: cached briefly (20s / 90s). Only the 5m entry candle is fetched fresh
+//     every cycle. The context candles feed regime/trend reads, which don't need sub-minute freshness.
+// Net: roughly 700 weight/min for 25 pairs instead of ~1,700. Every cache is in this process only and keyed by
+// symbol, so multiple browser tabs share it too.
+const BINANCE_BOOK_TTL_MS = 3_000;
+const BINANCE_PREMIUM_TTL_MS = 5_000;
+const BINANCE_KLINE_15M_TTL_MS = 20_000;
+const BINANCE_KLINE_1H_TTL_MS = 90_000;
+const BINANCE_UNIVERSE_MAX_AGE_MS = 10 * 60_000;
+const binanceBatchCache = {};        // slot -> { atMs, map, pending }
+const binanceKlineCache = new Map(); // `${symbol}:${interval}` -> { atMs, rows }
+
+async function binanceBatchMap(slot, path, ttlMs){
+  const c = binanceBatchCache[slot] || (binanceBatchCache[slot] = { atMs: 0, map: null, pending: null });
+  if(c.map && Date.now() - c.atMs < ttlMs) return c.map;
+  if(!c.pending){
+    // One in-flight request shared by every symbol asking in the same moment (25 snapshots start together).
+    c.pending = fetchJSON(`${BINANCE_FAPI_BASE.live}${path}`, 10_000, h => recordBinanceWeight('live', h))
+      .then(rows => {
+        const m = new Map();
+        for(const r of (Array.isArray(rows) ? rows : [])) if(r && r.symbol) m.set(r.symbol, r);
+        c.map = m; c.atMs = Date.now();
+        return m;
+      })
+      .finally(() => { c.pending = null; });
+  }
+  return c.pending;
+}
+
+async function binanceCachedKlines(symbol, interval, limit, ttlMs){
+  const key = `${symbol}:${interval}`;
+  const hit = binanceKlineCache.get(key);
+  if(hit && Date.now() - hit.atMs < ttlMs) return hit.rows;
+  const rows = await fetchJSON(`${BINANCE_FAPI_BASE.live}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`, 10_000, h => recordBinanceWeight('live', h));
+  if(binanceKlineCache.size >= 400) binanceKlineCache.delete(binanceKlineCache.keys().next().value); // bounded
+  binanceKlineCache.set(key, { atMs: Date.now(), rows });
+  return rows;
+}
+
+// 24h volume + last price for `symbol` from the cached universe (null if it isn't cached / is too old).
+function binanceUniverseEntry(symbol){
+  const c = FUTURES_UNIVERSE_CACHE.binance;
+  if(!c || Date.now() - c.atMs > BINANCE_UNIVERSE_MAX_AGE_MS) return null;
+  if(!c.bySymbol) c.bySymbol = new Map(c.symbols.map(x => [x.symbol, x]));
+  return c.bySymbol.get(symbol) || null;
+}
+
 async function binanceBuildFuturesSnapshot(symbol, timeframe){
   checkBinanceBan('live'); // public data always hits the live host regardless of Live/Demo trading mode — see the base comment below
   const base = BINANCE_FAPI_BASE.live; // public market data — same regardless of Live/Demo trading mode
   const { native: m5Interval, fallback } = resolveSnapshotTimeframe('binance', timeframe);
+  const single = (path) => fetchJSON(`${base}${path}?symbol=${symbol}`, 10_000, h => recordBinanceWeight('live', h));
+  const uni = binanceUniverseEntry(symbol);
   let m5Raw, m15Raw, h1Raw, book, premium, ticker24h;
   try{
     [m5Raw, m15Raw, h1Raw, book, premium, ticker24h] = await Promise.all([
       fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=${m5Interval}&limit=150`, 10_000, h => recordBinanceWeight('live', h)),
-      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=15m&limit=150`, 10_000, h => recordBinanceWeight('live', h)),
-      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=80`, 10_000, h => recordBinanceWeight('live', h)),
-      fetchJSON(`${base}/fapi/v1/ticker/bookTicker?symbol=${symbol}`, 10_000, h => recordBinanceWeight('live', h)),
-      fetchJSON(`${base}/fapi/v1/premiumIndex?symbol=${symbol}`, 10_000, h => recordBinanceWeight('live', h)),
-      fetchJSON(`${base}/fapi/v1/ticker/24hr?symbol=${symbol}`, 10_000, h => recordBinanceWeight('live', h)),
+      binanceCachedKlines(symbol, '15m', 150, BINANCE_KLINE_15M_TTL_MS),
+      binanceCachedKlines(symbol, '1h', 80, BINANCE_KLINE_1H_TTL_MS),
+      binanceBatchMap('book', '/fapi/v1/ticker/bookTicker', BINANCE_BOOK_TTL_MS).then(m => m.get(symbol) || null).catch(() => null)
+        .then(b => b || single('/fapi/v1/ticker/bookTicker')),
+      binanceBatchMap('premium', '/fapi/v1/premiumIndex', BINANCE_PREMIUM_TTL_MS).then(m => m.get(symbol) || null).catch(() => null)
+        .then(p => p || single('/fapi/v1/premiumIndex')),
+      uni ? Promise.resolve({ quoteVolume: uni.volume24hUsd, lastPrice: uni.lastPrice }) : single('/fapi/v1/ticker/24hr'),
     ]);
   }catch(err){
     recordBinanceBanIfPresent('live', err.message);
