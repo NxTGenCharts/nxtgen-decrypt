@@ -1786,9 +1786,67 @@ async function fetchGateioFuturesKlines(symbol, interval, startMs, endMs){
   return dedup;
 }
 
+// Bitget USDT-M futures history: GET /api/v2/mix/market/history-candles, up to 200 rows per request, rows are
+// [ts(ms), open, high, low, close, baseVolume, quoteVolume]. Like Binance/Bybit/MEXC above, a window wider than
+// one page anchors to `endTime` (Bitget's own examples/community tooling page BACKWARD from the end), so this
+// pages backward from endMs. Only `endTime` is sent on purpose: sending `startTime` too risks a "time range too
+// large" rejection on long ranges, and the loop stops on its own once a page reaches startMs. A 30-day 5m
+// range is ~8,640 bars = ~44 pages per symbol, so pages are paced (Bitget's public market-data limit is ~20
+// requests/sec/IP) and a rate-limited page (HTTP 429 / code 429xx) gets one short retry.
+const BITGET_KLINE_INTERVAL = { '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1H' };
+const BITGET_HISTORY_PAGE_LIMIT = 200;
+const BITGET_HISTORY_PAGE_DELAY_MS = 120;
+const sleepMs = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function fetchBitgetFuturesKlines(symbol, interval, startMs, endMs){
+  const granularity = BITGET_KLINE_INTERVAL[interval];
+  if(!granularity) throw new Error(`Bitget's futures candle API has no ${interval} granularity — try 3m, 5m, 15m, 30m, or 1h.`);
+  const pages = []; // oldest page unshifted to the front, so pages[0] is the oldest chunk once the loop ends
+  let cursorEnd = endMs;
+  let guard = 0;
+  while(cursorEnd > startMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
+    guard++;
+    const url = `${BITGET_BASE}/api/v2/mix/market/history-candles?symbol=${encodeURIComponent(symbol)}&productType=USDT-FUTURES&granularity=${granularity}&endTime=${cursorEnd}&limit=${BITGET_HISTORY_PAGE_LIMIT}`;
+    let body = null;
+    for(let attempt = 0; attempt < 2; attempt++){
+      const r = await fetch(url);
+      if(r.status === 429 && attempt === 0){ await sleepMs(1000); continue; }
+      if(!r.ok) throw new Error(`Bitget klines HTTP ${r.status}`);
+      body = await r.json();
+      if(body && /^429/.test(String(body.code)) && attempt === 0){ await sleepMs(1000); continue; }
+      break;
+    }
+    if(!body || body.code !== '00000') throw new Error(`Bitget klines: ${(body && body.msg) || 'unexpected response'}`);
+    const rows = Array.isArray(body.data) ? body.data : [];
+    if(!rows.length) break;
+    const chron = rows
+      .map(row => ({ t: parseInt(row[0], 10), o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] }))
+      .filter(c => Number.isFinite(c.t) && Number.isFinite(c.c))
+      .sort((a, b) => a.t - b.t); // sorted defensively — don't rely on the page's own order
+    if(!chron.length) break;
+    pages.unshift(chron);
+    const oldestT = chron[0].t;
+    if(oldestT <= startMs) break; // this page already reached back to (or past) the requested start — done
+    if(oldestT >= cursorEnd) break; // stuck page (didn't move backward at all) — stop rather than loop forever
+    cursorEnd = oldestT - 1; // next page: everything up to just before this page's oldest bar
+    await sleepMs(BITGET_HISTORY_PAGE_DELAY_MS);
+  }
+  const seenT = new Set();
+  const out = [];
+  for(const page of pages){
+    for(const c of page){
+      if(c.t < startMs || c.t > endMs || seenT.has(c.t)) continue;
+      seenT.add(c.t);
+      out.push(c);
+    }
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+
 const BACKTEST_KLINE_FETCHERS = {
   binance: fetchBinanceFuturesKlines, bybit: fetchBybitLinearKlines,
-  mexc: fetchMexcFuturesKlines, gateio: fetchGateioFuturesKlines,
+  mexc: fetchMexcFuturesKlines, gateio: fetchGateioFuturesKlines, bitget: fetchBitgetFuturesKlines,
 };
 
 app.post('/api/backtest/klines', async (req, res) => {
