@@ -151,6 +151,22 @@ export function computeQuantStats(trades, startingEquity){
   };
 }
 
+// Same trades, grouped by symbol — answers "which pairs is this favorable on"
+// from a real run, rather than a guess. Each symbol usually won't individually
+// reach MIN_SAMPLE_TRADES within one backtest window; computeQuantStats already
+// reports that honestly (`sufficient: false`, winRate: null) per symbol, same
+// as it does for the combined total.
+export function computeQuantStatsBySymbol(trades, startingEquity){
+  const bySymbol = new Map();
+  for(const t of trades){
+    if(!bySymbol.has(t.symbol)) bySymbol.set(t.symbol, []);
+    bySymbol.get(t.symbol).push(t);
+  }
+  return Array.from(bySymbol.entries())
+    .map(([symbol, rows]) => ({ symbol, stats: computeQuantStats(rows, startingEquity) }))
+    .sort((a, b) => (b.stats.observedWinRate || 0) - (a.stats.observedWinRate || 0));
+}
+
 // Text for the win-rate cell — the ONE place the sample rule is applied for display.
 export function winRateLabel(stats){
   if(!stats || stats.trades === 0) return 'No trades yet';

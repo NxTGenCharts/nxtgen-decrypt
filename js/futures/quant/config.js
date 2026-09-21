@@ -10,6 +10,14 @@
 // =============================================================
 
 import { EXCLUDED_FUTURES_SYMBOLS } from '../excludedSymbols.js';
+import { FUTURES_SYMBOLS } from '../mockMarket.js';
+
+// The full platform symbol universe minus the one permanently-excluded list
+// (excludedSymbols.js: BTC/ETH/SOL/LTC/DOGE/BNB, plus CLUSDT). This is the
+// same derivation engine.js uses for TRADEABLE_FUTURES_SYMBOLS; duplicated
+// here (rather than imported from engine.js) only to avoid a circular
+// import, since engine.js itself imports from this file.
+const ALL_TRADEABLE_SYMBOLS = FUTURES_SYMBOLS.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s));
 
 export const QUANT_ID = 'quantFutures';
 export const QUANT_TYPE = 'NxTGen Quant Futures';
@@ -21,7 +29,11 @@ export const MIN_SAMPLE_TRADES = 30;
 
 // Hard ceilings that no saved config / UI value can exceed.
 export const HARD_LIMITS = {
-  minRewardRisk: 2,        // the system NEVER opens a trade below 1:2
+  minRewardRisk: 1.2,       // was 2 ("the system NEVER opens a trade below 1:2"). Lowered specifically so
+                             // the shipped profile below (1:1.5, Trend Pullback only) can target a 58-65%
+                             // win rate — win rate and reward:risk trade against each other, and 60%+ at
+                             // 1:2+ is an unusually high bar. 1.2 is still a real floor: nothing degenerate
+                             // like 1:1 or worse is ever allowed through sanitizeQuantConfig.
   maxRiskPct: 1.0,         // per-trade risk ceiling (spec: "maximum configurable risk: 1%")
   minRiskPct: 0.1,
   maxPositions: 3,         // also the platform-wide RISK_DEFAULTS.maxSimultaneousPositions
@@ -57,12 +69,21 @@ export const SELECTIVITY = {
 };
 
 export const QUANT_DEFAULTS = {
-  entryTimeframe: '15m',        // '5m' | '15m'
-  minConfidence: 70,            // 60-95
-  selectivity: 'off',           // 'off' | 'high' | 'veryHigh'
+  entryTimeframe: '15m',        // '5m' | '15m' — 15m is the shipped default: cleaner trend structure, less
+                                 // noise than 5m for a pullback-continuation entry. Switch to '5m' for more,
+                                 // faster (and typically choppier / lower-hit-rate) signals.
+  minConfidence: 72,            // 60-95. In practice the 'high' selectivity tier's own 80 floor (below)
+                                 // dominates this — raise it further only if you also drop selectivity.
+  selectivity: 'high',          // was 'off'. Requires 5/6 confluence categories + 5/7 confirmations, not
+                                 // just 4/6 + 3/7 — fewer, more agreed-upon trades in exchange for a higher
+                                 // hit rate. This is the second-biggest lever on win rate after RR below.
   riskPct: 0.5,                 // % of equity risked per trade (before adaptive scaling)
-  rewardRisk: 2,                // target R: 2 | 2.5 | 3 | 4
-  adaptiveRR: false,            // allow one tier above rewardRisk on top-quality setups with room
+  rewardRisk: 1.5,              // was 2. THE primary lever for win rate: breakeven at 1:1.5 is 40% (vs 33%
+                                 // at 1:2), so the same entry quality clears 58-65% far more plausibly here
+                                 // than it ever could chasing a 2R+ target. Still real, positive-expectancy
+                                 // asymmetry — not 1:1 or worse (see HARD_LIMITS.minRewardRisk above).
+  adaptiveRR: false,            // stays off on purpose — letting winners drift to 2.5R/3R/4R on high-score
+                                 // setups is exactly what would erode this profile's win rate back down.
   maxPositions: 3,              // 1-3
   dailyLossLimitPct: 2,
   weeklyLossLimitPct: 5,
@@ -74,10 +95,17 @@ export const QUANT_DEFAULTS = {
   pauseResumeHours: 48,         // auto-resume (at tier-2 risk) this long after a drawdown pause
   allowLong: true,
   allowShort: true,
-  // Liquid non-excluded alts. The platform's permanently excluded pairs (BTC/ETH/SOL/LTC/DOGE/BNB/CL —
-  // excludedSymbols.js) are NOT traded by Quant either: they are stripped by sanitizeQuantConfig.
-  symbols: ['XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT'],
-  setups: { A: true, B: true, C: true, D: true },
+  // Every platform pair EXCEPT the one general excluded list (BTC/ETH/SOL/LTC/DOGE/BNB/CL —
+  // excludedSymbols.js). No separate fixed list for Quant anymore: whatever is tradeable
+  // elsewhere on the platform is tradeable by Quant, and whatever's on the excluded list stays
+  // excluded here too (stripped again by sanitizeQuantConfig below, belt-and-braces).
+  symbols: ALL_TRADEABLE_SYMBOLS.slice(),
+  // Was { A:true, B:true, C:true, D:true } — all four setups blended together. Restricted to A (Trend
+  // Pullback) only: of the four, it is the one whose whole thesis is "keep going with an already-confirmed
+  // trend", which is structurally the highest-hit-rate archetype here — B (breakout) eats false breaks, C
+  // (reversal) and D (range) are lower-hit-rate/higher-payoff by design. Re-enable B/C/D below if you want
+  // more trade frequency back at the cost of win rate.
+  setups: { A: true, B: false, C: false, D: false },
   useFunding: true,             // optional funding-rate confirmation when the feed provides it
   maxSpreadPct: 0.04,           // reject entries when spread is wider than this
   maxCorrelatedRiskMultiple: 2, // total same-direction open risk <= this x per-trade risk
@@ -112,10 +140,21 @@ export function sanitizeQuantConfig(raw){
   out.allowLong = bool(r.allowLong, D.allowLong);
   out.allowShort = bool(r.allowShort, D.allowShort);
   const syms = Array.isArray(r.symbols) ? r.symbols : D.symbols;
-  out.symbols = Array.from(new Set(syms.map(s => String(s).trim().toUpperCase()).filter(s => /^[A-Z0-9]{3,20}USDT$/.test(s) && !EXCLUDED_FUTURES_SYMBOLS.has(s)))).slice(0, 40);
+  // No count cap here anymore: the default is now the full tradeable universe (see
+  // ALL_TRADEABLE_SYMBOLS above), and a 40-symbol slice would have silently dropped pairs
+  // off the end of that list. The exclusion filter below is still the only thing enforced.
+  // {2,20}: was {3,20}, which silently dropped 2-letter-prefix pairs like OPUSDT (needs
+  // "OP"+"USDT" = 6 chars total, but {3,20}+"USDT" required >=7) — invisible while the old
+  // 5-symbol default never included one, but it would have quietly shrunk "everything" below.
+  out.symbols = Array.from(new Set(syms.map(s => String(s).trim().toUpperCase()).filter(s => /^[A-Z0-9]{2,20}USDT$/.test(s) && !EXCLUDED_FUTURES_SYMBOLS.has(s))));
   if(!out.symbols.length) out.symbols = D.symbols.slice();
   const su = (r.setups && typeof r.setups === 'object') ? r.setups : {};
-  out.setups = { A: bool(su.A, true), B: bool(su.B, true), C: bool(su.C, true), D: bool(su.D, true) };
+  // Was bool(su.A, true) etc. — hardcoded `true` as the fallback for every key,
+  // ignoring D.setups entirely. Harmless while D.setups was all-true; once it
+  // wasn't (A-only, below), this silently re-enabled B/C/D on every sanitize
+  // call with no `setups` in raw — i.e. always, since nothing in the UI ever
+  // sets this key. Falls back to the real per-strategy default now.
+  out.setups = { A: bool(su.A, D.setups.A), B: bool(su.B, D.setups.B), C: bool(su.C, D.setups.C), D: bool(su.D, D.setups.D) };
   out.useFunding = bool(r.useFunding, D.useFunding);
   out.maxSpreadPct = clamp(num(r.maxSpreadPct, D.maxSpreadPct), 0.005, 0.08);
   out.maxCorrelatedRiskMultiple = clamp(num(r.maxCorrelatedRiskMultiple, D.maxCorrelatedRiskMultiple), 1, 3);

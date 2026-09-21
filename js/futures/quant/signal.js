@@ -13,7 +13,7 @@
 // ({type, direction, rawConfidence, reasons, meta, vetoes?}) so it flows
 // through engine.js's existing ensemble/cost/risk/no-trade pipeline.
 // =============================================================
-import { QUANT_TYPE, SELECTIVITY, effectiveMinConfidence } from './config.js';
+import { QUANT_TYPE, SELECTIVITY, HARD_LIMITS, effectiveMinConfidence } from './config.js';
 import { buildFeatures, clamp, mean } from './features.js';
 import { classifyQuantRegime } from './regime.js';
 import { SETUP_DETECTORS } from './setups.js';
@@ -153,7 +153,10 @@ function pickRR(qcfg, sc, trade){
     const next = RR_TIERS.find(t => t > rr);
     if(next && trade.clearance.r >= next + 0.5) rr = next;
   }
-  return Math.max(2, Math.min(4, rr));
+  // Was hardcoded to Math.max(2, ...) — silently re-forced every trade to at least
+  // 1:2 regardless of qcfg.rewardRisk, which would have quietly undone the shipped
+  // 1:1.5 profile above. Floors on the real config ceiling instead.
+  return Math.max(HARD_LIMITS.minRewardRisk, Math.min(4, rr));
 }
 
 export function detectQuantFutures(snap, baseRegime, qcfg, ctx){
