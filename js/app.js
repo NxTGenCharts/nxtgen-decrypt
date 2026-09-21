@@ -19,7 +19,6 @@ import { initFuturesEngine } from './futures-ui.js';
 import { initAiSignal } from './ai-signal.js';
 import { initBacktestUI } from './backtest-ui.js';
 import { initMobileNav } from './nav.js';
-import { initServerWorker } from './server-worker.js';
 
 // ---- Overview page ----
 // "Run Full Scan" runs both engines to refresh the dashboard cards. Overview
@@ -57,4 +56,3 @@ initFuturesEngine();
 initAiSignal();
 initBacktestUI();
 initMobileNav();
-initServerWorker(); // no-op except on the Autotrade & Futures page

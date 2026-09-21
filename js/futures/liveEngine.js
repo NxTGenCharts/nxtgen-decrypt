@@ -1,10 +1,8 @@
 // =============================================================
 // liveEngine.js — the ORCHESTRATION for Live/Demo Auto-mode trading,
 // extracted from js/futures-ui.js's runLiveCycleInner/placeLiveEntryOrder
-// so the browser tab and the server-side worker (server/worker.js) run
-// the exact same code, not two hand-synced copies of it. Manual mode
-// (click-to-execute) stays in futures-ui.js — it's a UI concept with no
-// server equivalent.
+// into one DOM-free module. Manual mode (click-to-execute) stays in
+// futures-ui.js — it's a UI concept.
 //
 // This module never touches the DOM, localStorage, or fetch directly.
 // Every side effect goes through `adapter` (see the shape documented
@@ -12,10 +10,7 @@
 // `session`, a plain object using the SAME field names
 // js/state.js's state.futures object already uses (liveArmed,
 // liveExchange, livePositions, liveTradeHistory, ...) — the browser
-// passes state.futures itself as `session`, unchanged; server/worker.js
-// builds a plain object with matching field names. That's what keeps
-// this one module usable by both without a translation layer that could
-// itself drift.
+// passes state.futures itself as `session`, unchanged.
 //
 // Scoring/detection (what counts as a signal) is NOT here — that's
 // js/futures/engine.js and friends, imported directly below, same as

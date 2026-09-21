@@ -24,7 +24,6 @@ import { icon } from './icons.js';
 import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS, scanSymbolsWithQuant } from './futures/engine.js';
 import { QUANT_ID, QUANT_TYPE } from './futures/quant/config.js';
 import { qlog } from './futures/quant/log.js';
-import { isServerArmed, getServerSession, setBrowserArmHooks } from './server-worker.js';
 import { getQuantCfg, setQuantProviders, setQuantConfigListener, quantCardStatsLine, getQuantRewardRisk, updateQuantConfig } from './quant-ui.js';
 import { mockMarket } from './futures/mockMarket.js';
 import { WATCHLIST_TOP_N, rankTopByVolume } from './futures/watchlist.js';
@@ -72,11 +71,8 @@ const ORDER_RULE_REJECT_RE = /precision|lot size|minimum|min(imum)?\s*(size|qty|
 // Bridges this browser tab's own helpers (DOM, localStorage, the proxy
 // fetch wrappers already defined further down in this file — all plain
 // `function` declarations, so hoisting makes them callable here despite
-// appearing later) into the shape js/futures/liveEngine.js expects. The
-// SAME shared module is what server/worker.js's Node adapter also feeds —
-// this is the one place that difference is bridged, so the actual
-// scan/decide/place logic itself is identical code, not a hand-kept-in-
-// sync copy of it.
+// appearing later) into the shape js/futures/liveEngine.js expects. This is the one
+// place that difference is bridged.
 function buildBrowserLiveAdapter(){
   return {
     proxyCall: callProxy,
@@ -99,7 +95,7 @@ function buildBrowserLiveAdapter(){
 }
 
 // noteLiveOrderFailure/applyOrderFailureSkips: the real logic now lives in
-// js/futures/liveEngine.js (shared with server/worker.js) — these are thin
+// js/futures/liveEngine.js — these are thin
 // wrappers so every existing call site in this file keeps working unchanged.
 function noteLiveOrderFailure(symbol, message, kind){
   return sharedNoteLiveOrderFailure(fu(), symbol, message, kind);
@@ -147,9 +143,7 @@ const liveUniverseCache = {}; // { [exchange]: { symbols: [{symbol, volume24hUsd
 // Returns null only if there's no usable list at all (first-ever fetch on
 // this exchange failed) — callers treat that as "can't scan yet".
 // The actual fetch+cache logic now lives in liveEngine.js (its own
-// module-scoped cache — separate from, and not shared with, the one
-// server/worker.js gets from importing the same module, since each runs
-// in its own process). Thin wrapper so every call site here is unchanged.
+// module-scoped cache). Thin wrapper so every call site here is unchanged.
 async function getLiveTradeableSymbols(exchange){
   return sharedGetTradeableSymbols(buildBrowserLiveAdapter(), exchange);
 }
@@ -842,10 +836,7 @@ function recordLiveClosure(f, symbol, tracked, closed){
 // updating are not always the same instant.
 async function closeLivePosition(symbol){
   const f = fu();
-  const sv = getServerSession(f.liveExchange);
-  const svPos = !f.livePositions[symbol] && sv && sv.openPositions ? sv.openPositions[symbol] : null;
-  const fromServer = !!svPos; // the server is managing this one — it books the closure itself on its next cycle
-  const tracked = f.livePositions[symbol] || (svPos ? { ...svPos, exchange: svPos.exchange || sv.exchange, mode: svPos.mode || sv.mode } : null);
+  const tracked = f.livePositions[symbol];
   if(!tracked) return;
   const row = els.fuLiveCloseRow;
   const btn = row && row.querySelector(`.fu-close-pos-btn[data-symbol="${CSS.escape(symbol)}"]`);
@@ -886,11 +877,6 @@ async function closeLivePosition(symbol){
       if(btn){ btn.disabled = false; btn.textContent = `Close ${symbol}`; }
       return;
     }
-    if(fromServer){
-      showLiveMessage(`${symbol} position closed — the server will log it on its next cycle.`, 'success');
-      if(btn){ btn.disabled = false; btn.textContent = `Close ${symbol}`; }
-      return;
-    }
     recordLiveClosure(f, symbol, tracked, closedData);
     showLiveMessage(`${symbol} position closed.`, 'success');
     renderLive();
@@ -913,10 +899,7 @@ function renderLiveCloseButtons(){
   const f = fu();
   const row = els.fuLiveCloseRow;
   if(!row) return;
-  // This tab's own positions, or — when the server is running the exchange — the server's (same fields).
-  const sv = getServerSession(f.liveExchange);
-  const own = Object.keys(f.livePositions).length > 0;
-  const positions = own ? f.livePositions : (sv && sv.openPositions ? sv.openPositions : {});
+  const positions = f.livePositions;
   const symbols = Object.keys(positions);
   if(symbols.length === 0){
     row.style.display = 'none';
@@ -927,10 +910,10 @@ function renderLiveCloseButtons(){
   row.style.display = 'flex';
   row.innerHTML = symbols.map(s => {
     const p = positions[s];
-    const ex = p.exchange || (sv && sv.exchange) || '';
+    const ex = p.exchange || '';
     return `<div class="fu-pos-detail" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;width:100%;">
       <span style="font-size:11px;color:var(--dim);">
-        Entry ${dash(p.entry)} &middot; SL ${dash(p.stopLossPrice)} &middot; TP1 ${dash(p.tp1Price)} &middot; TP2 ${dash(p.tp2Price)} &middot; TP3 ${dash(p.tp3Price)}${own ? '' : ' &middot; <i>running on the server</i>'}
+        Entry ${dash(p.entry)} &middot; SL ${dash(p.stopLossPrice)} &middot; TP1 ${dash(p.tp1Price)} &middot; TP2 ${dash(p.tp2Price)} &middot; TP3 ${dash(p.tp3Price)}
       </span>
       <button type="button" class="primary ghost fu-close-pos-btn" data-symbol="${s}" style="font-size:11px;padding:4px 10px;" title="Close the open ${s} ${p.side || ''} position on ${ex}">Close ${s}</button>
     </div>`;
@@ -2030,8 +2013,7 @@ function initTradeLog(){
 
 function renderLiveHistory(){
   if(!els.fuLiveHistoryRows) return;
-  const sv = getServerSession(fu().liveExchange);
-  const history = sv ? (sv.recentTrades || []) : fu().liveTradeHistory;
+  const history = fu().liveTradeHistory;
   if(!history.length){ els.fuLiveHistoryRows.innerHTML = '<div class="fu-empty">No live/demo trades yet this session.</div>'; return; }
   els.fuLiveHistoryRows.innerHTML = history.slice(0, 50).map(t => `
     <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr 1.4fr;">
@@ -2098,7 +2080,6 @@ function clearSavedLivePositions(){
   try{ localStorage.removeItem(LIVE_POSITIONS_KEY); }catch(e){ /* non-fatal */ }
 }
 
-let renderedFromServer = false; // did the last renderLive() paint the server's numbers? (so its balance isn't left behind when the session ends)
 function renderLive(){
   const f = fu();
   // f.livePositions itself was previously in-memory only, so a page
@@ -2111,22 +2092,13 @@ function renderLive(){
   // here keeps this in sync everywhere without scattering save calls
   // through runLiveCycleInner and placeLiveEntryOrder individually.
   saveLivePositions();
-  // When the SERVER is running this exchange the tab's own counters are all zero, so paint the server's numbers
-  // (from /api/worker/status, refreshed every few seconds) into the same cards instead.
-  const sv = getServerSession(f.liveExchange);
-  const startEq = sv ? sv.startingBalanceUsd : f.liveStartingEquity;
-  const trades = sv ? (sv.trades || 0) : f.liveTrades;
-  const wins = sv ? (sv.wins || 0) : f.liveWins;
-  const gross = sv ? (sv.grossPnlUsd || 0) : f.liveGrossPnlUsd;
-  const fees = sv ? (sv.feesUsd || 0) : f.liveFeesUsd;
-  const net = sv ? (sv.netPnlUsd || 0) : f.liveNetPnlUsd;
+  const startEq = f.liveStartingEquity;
+  const trades = f.liveTrades;
+  const wins = f.liveWins;
+  const gross = f.liveGrossPnlUsd;
+  const fees = f.liveFeesUsd;
+  const net = f.liveNetPnlUsd;
   const usd = n => '$' + n.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
-  if(sv){
-    if(els.fuLiveBalance) els.fuLiveBalance.textContent = sv.balanceUsd != null ? usd(sv.balanceUsd) : '—';
-  } else if(renderedFromServer && els.fuLiveBalance){
-    els.fuLiveBalance.textContent = '—'; // the server session ended — don't leave its last balance sitting there
-  }
-  renderedFromServer = !!sv;
   if(els.fuLiveStartingBalance) els.fuLiveStartingBalance.textContent = startEq != null ? usd(startEq) : '—';
   if(els.fuLiveTrades) els.fuLiveTrades.textContent = String(trades);
   if(els.fuLiveWinRate) els.fuLiveWinRate.textContent = trades ? ((wins / trades) * 100).toFixed(1) + '%' : '—';
@@ -2134,17 +2106,13 @@ function renderLive(){
   if(els.fuLiveFees) els.fuLiveFees.textContent = fmtUsd(fees);
   if(els.fuLiveNetPnl) els.fuLiveNetPnl.textContent = fmtUsd(net);
   if(els.fuLiveOpenPosition){
-    const svPos = sv ? Object.entries(sv.openPositions || {}) : [];
-    if(svPos.length){
-      els.fuLiveOpenPosition.textContent = svPos.map(([sym, p]) => openPositionText(p.exchange || sv.exchange, sym, p)).join(' · ');
-    } else if(Object.keys(f.livePositions).length === 0){
-      els.fuLiveOpenPosition.textContent = 'None';
-    }
+    if(Object.keys(f.livePositions).length === 0) els.fuLiveOpenPosition.textContent = 'None';
   }
   renderLiveCloseButtons();
   renderLiveHistory();
   renderTradeLog();
   renderStrategyRows();
+  syncLiveSwitch();
 }
 
 // =============================================================
@@ -2242,22 +2210,73 @@ function updateLiveModeUI(){
   const exchange = f.liveExchange;
   const mode = f.liveModeByExchange[exchange] || 'live';
   const name = EXCHANGE_DISPLAY_NAMES[exchange] || exchange;
-  const onServer = isServerArmed(exchange);
   if(els.fuLiveArmWrap) els.fuLiveArmWrap.style.display = '';
-  if(onServer){
-    const svMode = (getServerSession(exchange) || {}).mode || mode; // the server's network, not whatever this device's row happens to be set to
-    showLiveMessage(`Running on the server for ${name} (${svMode === 'live' ? 'LIVE — real funds' : 'Demo'}) — you can close this tab. Use the switch below to stop it.`);
-  } else if(!f.liveArmed){
-    showLiveMessage(`${name} (${mode === 'live' ? 'Live' : 'Demo'}) selected but not armed — flip the switch below to arm.`);
+  if(!f.liveArmed){
+    showLiveMessage(`${name} (${mode === 'live' ? 'Live' : 'Demo'}) selected but not running — turn the switch on to start.`);
   } else {
-    showLiveMessage(`Armed for ${mode === 'live' ? 'LIVE (real funds)' : 'Demo'} trading on ${name}.`);
+    showLiveMessage(`Running ${mode === 'live' ? 'LIVE (real funds)' : 'Demo'} trading on ${name}.`);
   }
-  // While the server runs this exchange the tab must not start its own loop on the same account.
-  if(els.fuLiveToggleBtn){
-    const blocked = onServer && !f.liveRunning;
-    els.fuLiveToggleBtn.disabled = blocked;
-    els.fuLiveToggleBtn.title = blocked ? 'This exchange is already running on the server — switch that off first, or two bots would trade the same account.' : '';
+  syncLiveSwitch();
+}
+
+// The ONE Live/Demo control: a switch. ON = armed and scanning in this tab (Auto places orders itself, Manual waits for your
+// Execute click); OFF = no new entries. It only runs while this tab is open. An open position always keeps its exchange-side
+// SL/TP, and the tab keeps monitoring it until it closes even after the switch goes OFF.
+function syncLiveSwitch(){
+  const sw = els.fuLiveSwitch;
+  if(!sw) return;
+  const f = fu();
+  const name = EXCHANGE_DISPLAY_NAMES[f.liveExchange] || f.liveExchange;
+  const mode = f.liveModeByExchange[f.liveExchange] || 'live';
+  sw.checked = !!f.liveArmed;
+  if(!els.fuLiveSwitchSub) return;
+  const holding = Object.keys(f.livePositions).length > 0;
+  let text;
+  if(f.liveArmed){
+    text = f.liveTradeMode === 'manual'
+      ? 'ON — scanning in this tab; signals wait for your Execute click. Keep this tab open.'
+      : 'ON — trading automatically while this tab stays open.';
+  } else if(holding){
+    text = 'OFF — no new entries. Still monitoring the open position (its exchange-side SL/TP stays active); keep this tab open until it closes.';
+  } else {
+    text = `OFF — turn on to trade ${name} (${mode === 'live' ? 'Live' : 'Demo'}) from this tab.`;
   }
+  els.fuLiveSwitchSub.textContent = text;
+}
+
+function onLiveSwitchChange(){
+  const sw = els.fuLiveSwitch;
+  if(!sw) return;
+  const f = fu();
+  if(!sw.checked){ stopLiveTrading(); return; }
+  const exchange = f.liveExchange;
+  const mode = LIVE_ONLY_EXCHANGES.includes(exchange) ? 'live' : (f.liveModeByExchange[exchange] || 'live');
+  const name = EXCHANGE_DISPLAY_NAMES[exchange] || exchange;
+  if(!liveCred(exchange, mode)){
+    sw.checked = false;
+    showLiveMessage(`No verified ${mode} key for ${name} in this browser — connect and verify one in API Keys first.`, 'error');
+    return;
+  }
+  if(mode === 'live' && !window.confirm(`Start LIVE trading on ${name} with REAL funds?\n\nReal orders will be placed from this tab while it stays open.`)){
+    sw.checked = false;
+    return;
+  }
+  f.liveArmed = true;
+  if(!f.liveRunning) toggleLiveRunning();
+  updateLiveModeUI();
+  renderLive();
+}
+
+function stopLiveTrading(){
+  const f = fu();
+  f.liveArmed = false;
+  f.livePendingSignal = null;
+  renderLivePendingSignal();
+  // Nothing open -> stop scanning now. With an open position the loop keeps monitoring it (closure detection, breakeven
+  // move, logging) and stops itself once it has closed (see onDisarmedIdle in buildBrowserLiveAdapter).
+  if(f.liveRunning && Object.keys(f.livePositions).length === 0) toggleLiveRunning();
+  updateLiveModeUI();
+  renderLive();
 }
 
 // =============================================================
@@ -2281,13 +2300,9 @@ let fastTickTimer = null;
 // server status refresh) can show them instead of blanking the live P&L between ticks.
 let liveMarks = {};
 
-// Positions to keep a live mark on: the ones this tab tracks, plus any the SERVER is running on the selected exchange.
+// Positions to keep a live mark on: the ones this tab tracks.
 function positionsForTick(){
-  const f = fu();
-  const out = Object.entries(f.livePositions);
-  const sv = getServerSession(f.liveExchange);
-  if(sv) for(const [sym, p] of Object.entries(sv.openPositions || {})) if(!f.livePositions[sym]) out.push([sym, { ...p, exchange: p.exchange || sv.exchange }]);
-  return out;
+  return Object.entries(fu().livePositions);
 }
 
 function openPositionText(exchange, symbol, p){
@@ -2324,25 +2339,18 @@ function stopFastTick(){
 
 function toggleLiveRunning(){
   const f = fu();
-  if(!f.liveRunning && isServerArmed(f.liveExchange)){
-    showLiveMessage(`${EXCHANGE_DISPLAY_NAMES[f.liveExchange] || f.liveExchange} is already running on the server — switch that off first; two bots on one account would double up trades.`, 'error');
-    return;
-  }
   f.liveRunning = !f.liveRunning;
   if(f.liveRunning){
     runLiveCycle();
     f.liveTimer = setInterval(runLiveCycle, LIVE_CYCLE_MS);
     startFastTick();
-    if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.querySelector('.btn-label').textContent = 'Stop Live/Demo Trading';
-    if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.classList.add('on');
   } else {
     clearInterval(f.liveTimer);
     f.liveTimer = null;
-    const svHere = getServerSession(f.liveExchange);
-    if(!(svHere && Object.keys(svHere.openPositions || {}).length)) stopFastTick(); // keep ticking if the server still holds a position
-    if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.querySelector('.btn-label').textContent = 'Start Live/Demo Trading';
-    if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.classList.remove('on');
+    stopFastTick();
+    liveMarks = {};
   }
+  syncLiveSwitch();
 }
 
 // Arming never survives an exchange OR network change — re-arming for a
@@ -2378,29 +2386,7 @@ function resetLiveSession(){
 
 function initLiveTradingControls(){
   initLiveExchangeRows();
-  // The single arm switch (js/server-worker.js) arms the server in Auto mode and THIS TAB in Manual mode;
-  // these are the tab-side pieces it calls. Un-arming only stops NEW entries — an open position keeps
-  // being monitored and keeps its exchange-side SL/TP.
-  setBrowserArmHooks({
-    isArmed: () => !!fu().liveArmed,
-    arm: () => { fu().liveArmed = true; updateLiveModeUI(); renderLive(); },
-    disarm: () => {
-      const f = fu();
-      f.liveArmed = false;
-      f.livePendingSignal = null;
-      renderLivePendingSignal();
-      updateLiveModeUI();
-      renderLive();
-    },
-  });
-  document.addEventListener('nxtgen-server-arm-changed', updateLiveModeUI);
-  document.addEventListener('nxtgen-server-status', () => {
-    renderLive(); // new numbers from the server -> repaint the balance / P&L cards
-    const sv = getServerSession(fu().liveExchange);
-    if(sv && Object.keys(sv.openPositions || {}).length) startFastTick(); // live mark price / uPnL for the server's open position
-    else if(!fu().liveRunning){ stopFastTick(); liveMarks = {}; }
-  });
-  if(els.fuLiveToggleBtn) els.fuLiveToggleBtn.addEventListener('click', toggleLiveRunning);
+  if(els.fuLiveSwitch) els.fuLiveSwitch.addEventListener('change', onLiveSwitchChange);
   // Delegated once from the row itself, since renderLiveCloseButtons()
   // rebuilds the buttons' innerHTML on every render (open/close/cycle) —
   // binding individual listeners there would mean rebinding (or leaking)
@@ -2445,6 +2431,7 @@ function setLiveTradeMode(newMode){
   if(els.fuLiveModeAutoBtn) els.fuLiveModeAutoBtn.classList.toggle('active', newMode === 'auto');
   if(els.fuLiveModeManualBtn) els.fuLiveModeManualBtn.classList.toggle('active', newMode === 'manual');
   renderLivePendingSignal();
+  syncLiveSwitch(); // the switch's caption differs between Auto and Manual
 }
 
 function toggleRunning(){
@@ -3926,8 +3913,8 @@ function restoreLivePositions(){
   if(!symbols.length) return;
   const f = fu();
   f.livePositions = saved;
-  showLiveMessage(`Restored tracking for ${symbols.length} real position(s) still open from before this reload (${symbols.join(', ')}) — monitoring resumed. No new orders will be placed until you re-arm.`, 'info');
-  if(!f.liveRunning) toggleLiveRunning(); // starts the same polling loop Start/Demo Trading uses — runLiveCycleInner already treats "has an open position" as enough reason to poll, even while liveArmed is false
+  showLiveMessage(`Restored tracking for ${symbols.length} real position(s) still open from before this reload (${symbols.join(', ')}) — monitoring resumed. No new orders will be placed until you turn trading on.`, 'info');
+  if(!f.liveRunning) toggleLiveRunning(); // starts the same polling loop the Live/Demo switch uses — runLiveCycleInner already treats "has an open position" as enough reason to poll, even while liveArmed is false
 }
 
 export function initFuturesEngine(){

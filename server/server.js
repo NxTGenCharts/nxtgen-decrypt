@@ -20,7 +20,6 @@ import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
-import { attachWorker } from './worker.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -1560,17 +1559,7 @@ async function getFuturesSnapshotCached(exchange, symbol, timeframe){
   }
 }
 
-// The 24/7 worker (worker.js) calls this route from INSIDE this process — BTC plus the top-25 scan list
-// every 8s cycle, ~195 calls/min, which is over the 120/min public limit. Once the limit was hit every
-// snapshot came back 429, the worker never got BTC data and skipped every cycle (no trades, no balance).
-// Calls that arrive on the loopback socket with no X-Forwarded-For header can only be this same process
-// (Render's proxy always adds that header, and a client can't reach the loopback socket from outside), so
-// they skip the limiter; everything from the network is limited exactly as before.
-const isInternalCall = req => {
-  const a = req.socket && req.socket.remoteAddress;
-  return (a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1') && !req.headers['x-forwarded-for'];
-};
-app.use('/api/futures/snapshot', rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false, skip: isInternalCall }));
+app.use('/api/futures/snapshot', rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
 app.get('/api/futures/snapshot', async (req, res) => {
   const symbol = req.query.symbol;
   const exchange = String(req.query.exchange || 'bybit');
@@ -4438,5 +4427,4 @@ app.use((err, req, res, next) => {
 });
 
 const port = process.env.PORT || 8787;
-attachWorker(app, `http://127.0.0.1:${port}`);
 app.listen(port, () => console.log(`nxtgen-verify-proxy listening on :${port}`));

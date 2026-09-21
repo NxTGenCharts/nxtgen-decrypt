@@ -75,7 +75,7 @@ export function evaluateNoTradeFilters({
     if(dayState.dailyPnlPct >= profitTargetPct) reasons.push(`Daily profit target (+${profitTargetPct}%) reached — trading stopped for the day`);
     // NOTE: there is deliberately no "N consecutive losses → cool off /
     // stop" filter here anymore. This bot is meant to run continuously —
-    // 24/7 — and only stop when the user clicks Stop Live/Demo Trading
+    // continuously — and only stop when the user turns the Live/Demo switch off
     // (or the daily loss/profit limits just above are hit); a losing
     // streak on its own should never pause or halt it. See
     // js/futures-ui.js's checkAdaptiveCircuitBreaker for the equivalent
