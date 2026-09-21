@@ -10,14 +10,6 @@
 // =============================================================
 
 import { EXCLUDED_FUTURES_SYMBOLS } from '../excludedSymbols.js';
-import { FUTURES_SYMBOLS } from '../mockMarket.js';
-
-// The full platform symbol universe minus the one permanently-excluded list
-// (excludedSymbols.js: BTC/ETH/SOL/LTC/DOGE/BNB, plus CLUSDT). This is the
-// same derivation engine.js uses for TRADEABLE_FUTURES_SYMBOLS; duplicated
-// here (rather than imported from engine.js) only to avoid a circular
-// import, since engine.js itself imports from this file.
-const ALL_TRADEABLE_SYMBOLS = FUTURES_SYMBOLS.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s));
 
 export const QUANT_ID = 'quantFutures';
 export const QUANT_TYPE = 'NxTGen Quant Futures';
@@ -95,11 +87,14 @@ export const QUANT_DEFAULTS = {
   pauseResumeHours: 48,         // auto-resume (at tier-2 risk) this long after a drawdown pause
   allowLong: true,
   allowShort: true,
-  // Every platform pair EXCEPT the one general excluded list (BTC/ETH/SOL/LTC/DOGE/BNB/CL —
-  // excludedSymbols.js). No separate fixed list for Quant anymore: whatever is tradeable
-  // elsewhere on the platform is tradeable by Quant, and whatever's on the excluded list stays
-  // excluded here too (stripped again by sanitizeQuantConfig below, belt-and-braces).
-  symbols: ALL_TRADEABLE_SYMBOLS.slice(),
+  // null = "every USDT perpetual the current mode scans, except the platform-wide excluded list
+  // (excludedSymbols.js: BTC/ETH/SOL/LTC/DOGE/BNB/CL)". This used to default to a fixed array built from the
+  // Paper-mode synthetic list (mockMarket.js), and that array was saved into localStorage with the rest of the
+  // config. The real exchange watchlists (Binance/Bybit top-25 by volume: ZEC, HYPE, ENA, TAO, WLD, TRUMP, PUMP,
+  // 1000PEPE, ...) are mostly NOT in that synthetic list, so Quant silently skipped most of the pairs actually
+  // being backtested / scanned live. Now a symbol is skipped only if it is excluded. To restrict Quant to a
+  // hand-picked list set `symbolFilter: ['XRPUSDT', ...]` (no UI for it; legacy saved `symbols` arrays are ignored).
+  symbolFilter: null,
   // Was { A:true, B:true, C:true, D:true } — all four setups blended together. Restricted to A (Trend
   // Pullback) only: of the four, it is the one whose whole thesis is "keep going with an already-confirmed
   // trend", which is structurally the highest-hit-rate archetype here — B (breakout) eats false breaks, C
@@ -114,6 +109,7 @@ export const QUANT_DEFAULTS = {
   weights: { ...QUANT_WEIGHTS_DEFAULT },
 };
 
+const SYMBOL_RE = /^[^\s]{1,30}USDT$/u; // any listed USDT perpetual (incl. 1000PEPEUSDT and non-ASCII new listings)
 const num = (v, d) => (Number.isFinite(Number(v)) && v !== '' && v !== null ? Number(v) : d);
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 const bool = (v, d) => (typeof v === 'boolean' ? v : d);
@@ -139,15 +135,11 @@ export function sanitizeQuantConfig(raw){
   out.pauseResumeHours = clamp(num(r.pauseResumeHours, D.pauseResumeHours), 1, 24 * 14);
   out.allowLong = bool(r.allowLong, D.allowLong);
   out.allowShort = bool(r.allowShort, D.allowShort);
-  const syms = Array.isArray(r.symbols) ? r.symbols : D.symbols;
-  // No count cap here anymore: the default is now the full tradeable universe (see
-  // ALL_TRADEABLE_SYMBOLS above), and a 40-symbol slice would have silently dropped pairs
-  // off the end of that list. The exclusion filter below is still the only thing enforced.
-  // {2,20}: was {3,20}, which silently dropped 2-letter-prefix pairs like OPUSDT (needs
-  // "OP"+"USDT" = 6 chars total, but {3,20}+"USDT" required >=7) — invisible while the old
-  // 5-symbol default never included one, but it would have quietly shrunk "everything" below.
-  out.symbols = Array.from(new Set(syms.map(s => String(s).trim().toUpperCase()).filter(s => /^[A-Z0-9]{2,20}USDT$/.test(s) && !EXCLUDED_FUTURES_SYMBOLS.has(s))));
-  if(!out.symbols.length) out.symbols = D.symbols.slice();
+  // Optional hand-picked restriction (see QUANT_DEFAULTS.symbolFilter). Excluded pairs are stripped either way.
+  if(Array.isArray(r.symbolFilter)){
+    const f = Array.from(new Set(r.symbolFilter.map(x => String(x).trim().toUpperCase()).filter(x => SYMBOL_RE.test(x) && !EXCLUDED_FUTURES_SYMBOLS.has(x))));
+    out.symbolFilter = f.length ? f : null; // an empty / all-excluded list means "no restriction", not "trade nothing"
+  } else out.symbolFilter = null;
   const su = (r.setups && typeof r.setups === 'object') ? r.setups : {};
   // Was bool(su.A, true) etc. — hardcoded `true` as the fallback for every key,
   // ignoring D.setups entirely. Harmless while D.setups was all-true; once it
@@ -184,11 +176,17 @@ export function effectiveMinConfidence(qcfg){
   return Math.max(qcfg.minConfidence, tier.floor);
 }
 
-// Which symbols does Quant Futures scan? User-configurable, but the platform's
-// permanently excluded pairs (excludedSymbols.js) are never in this set — even if
-// an old saved config or a hand-built cfg object still lists them.
+// Which symbols does Quant Futures trade? By default every non-excluded USDT perpetual (`has()` answers for any
+// symbol name, iteration is empty because there is nothing to ADD to a scan list — the mode's own watchlist is
+// used). With a `symbolFilter` it is exactly that list. The platform's permanently excluded pairs
+// (excludedSymbols.js) are never in it, even if an old saved config or a hand-built cfg lists them.
+class AnySymbolSet extends Set {
+  has(sym){ return typeof sym === 'string' && SYMBOL_RE.test(sym) && !EXCLUDED_FUTURES_SYMBOLS.has(sym); }
+}
+const ANY_SYMBOL = new AnySymbolSet();
 export function quantSymbolSet(qcfg){
-  return new Set(((qcfg && qcfg.symbols) || QUANT_DEFAULTS.symbols).filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s)));
+  const list = qcfg && Array.isArray(qcfg.symbolFilter) ? qcfg.symbolFilter.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s)) : null;
+  return list && list.length ? new Set(list) : ANY_SYMBOL;
 }
 
 // Symbols the user typed that the platform excludes (for the UI to tell them, not fail silently).

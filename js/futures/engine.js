@@ -27,7 +27,8 @@ import { positionSize, checkLiquidationSafety, RISK_DEFAULTS } from './risk.js';
 import { evaluateNoTradeFilters, SYMBOL_COOLDOWN_MINUTES } from './noTradeEngine.js';
 import { buildExplanation } from './explain.js';
 import { atr, swingLevels, volumeExpansion, clamp } from './indicators.js';
-import { QUANT_ID, QUANT_TYPE, quantSymbolSet, effectiveMinConfidence } from './quant/config.js';
+import { QUANT_ID, QUANT_TYPE, HARD_LIMITS, quantSymbolSet, effectiveMinConfidence } from './quant/config.js';
+import { diagVeto, diagSignal, diagEngineReject, diagCount } from './quant/diagnostics.js';
 import { computeQuantRiskState, effectiveRiskPct, quantSize, quantEntryGate, quantExitPrice, quantTradeFields } from './quant/risk.js';
 import { buildQuantExplanation } from './quant/signal.js';
 import { qlog } from './quant/log.js';
@@ -278,6 +279,11 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   // Quant Futures is a self-contained system (own stop, own risk engine, own exit): when it produces a
   // qualifying signal it is evaluated on its own, not blended into the ensemble average.
   const quantSig = detected.find(sg => sg.type === QUANT_TYPE && !(sg.vetoes && sg.vetoes.length));
+  const quantDiag = quantApplies ? cfg.quant.diag : null; // set only by Backtest (quant/diagnostics.js) — pure counters
+  if(quantDiag){
+    const qv = detected.find(sg => sg.type === QUANT_TYPE && sg.vetoes && sg.vetoes.length);
+    if(quantSig) diagSignal(quantDiag, quantSig.meta); else if(qv) diagVeto(quantDiag, qv.meta);
+  }
   if(quantSig) return evaluateQuantRow(symbol, snap, regime, cfg, dayState, btcShock, nowMs, quantSig);
   // A detector can hand back a genuine trigger that one of ITS OWN filters
   // vetoed (e.g. Quant's confluence/regime gates — a signal object with a
@@ -455,10 +461,14 @@ function evaluateQuantRow(symbol, snap, regime, cfg, dayState, btcShock, nowMs, 
   const m = sig.meta;
   const qcfg = cfg.quant;
   const direction = sig.direction;
-  const rejectFast = (msg) => baseRow(symbol, snap, regime, 'REJECTED', [msg]);
+  const rejectFast = (msg) => { if(qcfg.diag) diagEngineReject(qcfg.diag, [msg]); return baseRow(symbol, snap, regime, 'REJECTED', [msg]); };
   if(!Number.isFinite(m.stopPrice) || !Number.isFinite(m.entryFill)) return rejectFast('Quant: stop loss could not be calculated');
   const rr = m.rewardRisk;
-  if(!(rr >= 2 - 1e-9)) return rejectFast(`Quant: risk/reward 1:${(rr || 0).toFixed(2)} is below the 1:2 minimum`);
+  // Floor = Quant's own HARD_LIMITS.minRewardRisk (quant/config.js) — the same number signal.js's pickRR() and
+  // sanitizeQuantConfig() enforce. This used to be a hard-coded 2.0 that survived after the shipped profile moved
+  // to 1:1.5, so EVERY Quant signal (rr = 1.5) was rejected here and Paper/Backtest/Live never opened a trade.
+  const minRR = HARD_LIMITS.minRewardRisk;
+  if(!(rr >= minRR - 1e-9)) return rejectFast(`Quant: risk/reward 1:${(rr || 0).toFixed(2)} is below the 1:${minRR} minimum`);
 
   const equity = dayState.equity;
   const startEq = dayState.startingEquity || equity;
@@ -489,7 +499,7 @@ function evaluateQuantRow(symbol, snap, regime, cfg, dayState, btcShock, nowMs, 
   const gate = evaluateNoTradeFilters({
     snap, regime, confidence: m.score, minConfidence: m.minConfidenceUsed,
     netTargetPct: costs.netTargetPct, minNetProfitPct: cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT,
-    riskRewardRatio: rr, minRiskReward: 2.0 - 1e-9,
+    riskRewardRatio: rr, minRiskReward: minRR - 1e-9,
     liquidationSafety: liqSafety, dayState, btcShock, isAltcoin: symbol !== 'BTCUSDT',
     fundingCostPct: costs.fundingCostPct, grossTargetPct: tpPct,
     nowMs, riskPctPerTrade: riskPct, feeToStopRatioPct,
@@ -497,6 +507,7 @@ function evaluateQuantRow(symbol, snap, regime, cfg, dayState, btcShock, nowMs, 
   const quantReasons = quantEntryGate({ qcfg, state: riskState, dayState, direction, symbol, sizing, equity, meta: { spreadPct: snap.meta.spreadPct, atrPct: m.atrPct, entryTf: m.entryTf } });
   const reasons = [...gate.reasons, ...quantReasons];
   const approved = reasons.length === 0;
+  if(qcfg.diag){ if(approved) diagCount(qcfg.diag, 'approved'); else diagEngineReject(qcfg.diag, reasons); }
 
   const exitSlipPct = m.slipPct + snap.meta.spreadPct / 2;
   const row = {

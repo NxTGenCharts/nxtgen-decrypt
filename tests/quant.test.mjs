@@ -26,6 +26,8 @@ import { runBacktest } from '../js/futures/backtest.js';
 import { setQuantConsole } from '../js/futures/quant/log.js';
 import { getQuantCfg } from '../js/quant-ui.js';
 import { WATCHLIST_TOP_N, rankTopByVolume } from '../js/futures/watchlist.js';
+import { classifyRegime } from '../js/futures/regime.js';
+import { summarizeQuantDiag } from '../js/futures/quant/diagnostics.js';
 setQuantConsole(false);
 
 let passed = 0;
@@ -75,21 +77,31 @@ function squeezeBreakout(seed, s){
 
 console.log('NxTGen Quant Futures tests');
 
-await test('registered as a strategy, off by default, RR options 2/2.5/3/4', () => {
+await test('registered as a strategy, off by default, RR dropdown contains the default', () => {
   const s = STRATEGY_REGISTRY.find(x => x.id === QUANT_ID);
   assert.ok(s); assert.equal(s.type, 'NxTGen Quant Futures'); assert.equal(s.defaultEnabled, false);
-  assert.deepEqual(s.rrOptions, [2, 2.5, 3, 4]); assert.equal(STRATEGY_REGISTRY.length, 7); // + NxTGen Grid (own engine) = 8 in the UI
+  assert.deepEqual(s.rrOptions, [1.3, 1.5, 1.75, 2, 2.5, 3, 4]); assert.ok(s.rrOptions.includes(QUANT_DEFAULTS.rewardRisk), 'the dropdown must contain the default RR, or it displays a value that is not what runs'); assert.equal(s.defaultRR, QUANT_DEFAULTS.rewardRisk); assert.equal(STRATEGY_REGISTRY.length, 7); // + NxTGen Grid (own engine) = 8 in the UI
 });
 
-await test('config: every field clamped; RR never below 1:2; risk never above 1%; weights sum to 100', () => {
-  const c = sanitizeQuantConfig({ minConfidence: 5, riskPct: 9, rewardRisk: 0.5, maxPositions: 50, weights: { trend: 500, rr: 0 }, symbols: ['btcusdt', 'bad symbol', 'ETHUSDT', 'xrpusdt', 'adausdt'] });
-  assert.equal(c.minConfidence, 60); assert.equal(c.riskPct, HARD_LIMITS.maxRiskPct); assert.equal(c.rewardRisk, 2); assert.equal(c.maxPositions, 3);
-  assert.deepEqual(c.symbols, ['XRPUSDT', 'ADAUSDT'], 'excluded majors (BTC/ETH/...) are stripped; valid non-excluded pairs stay');
-  assert.deepEqual(sanitizeQuantConfig({ symbols: ['BTCUSDT', 'ETHUSDT'] }).symbols, QUANT_DEFAULTS.symbols, 'only-excluded list falls back to the (non-excluded) defaults');
-  assert.ok(QUANT_DEFAULTS.symbols.every(x => !EXCLUDED_FUTURES_SYMBOLS.has(x)), 'default Quant symbols contain no excluded pair');
+await test('config: every field clamped; RR never below the floor; risk never above 1%; weights sum to 100', () => {
+  const c = sanitizeQuantConfig({ minConfidence: 5, riskPct: 9, rewardRisk: 0.5, maxPositions: 50, weights: { trend: 500, rr: 0 }, symbolFilter: ['btcusdt', 'bad symbol', 'ETHUSDT', 'xrpusdt', 'adausdt'] });
+  assert.equal(c.minConfidence, 60); assert.equal(c.riskPct, HARD_LIMITS.maxRiskPct); assert.equal(c.rewardRisk, HARD_LIMITS.minRewardRisk); assert.equal(c.maxPositions, 3);
+  assert.deepEqual(c.symbolFilter, ['XRPUSDT', 'ADAUSDT'], 'excluded majors (BTC/ETH/...) are stripped; valid non-excluded pairs stay');
+  assert.equal(sanitizeQuantConfig({ symbolFilter: ['BTCUSDT', 'ETHUSDT'] }).symbolFilter, null, 'only-excluded list means "no restriction", not "trade nothing"');
+  assert.equal(QUANT_DEFAULTS.symbolFilter, null);
+  assert.equal(sanitizeQuantConfig({ symbols: ['XRPUSDT'] }).symbolFilter, null, 'legacy saved `symbols` arrays (the old synthetic-list default) are ignored');
   assert.ok(Math.abs(Object.values(c.weights).reduce((a, b) => a + b, 0) - 100) < 1e-9);
   assert.equal(effectiveMinConfidence(sanitizeQuantConfig({ selectivity: 'high' })), 80);
   assert.equal(effectiveMinConfidence(sanitizeQuantConfig({ selectivity: 'veryHigh' })), 85);
+});
+
+await test('Quant applies to every non-excluded pair the mode scans (real watchlist names outside the synthetic list), never to excluded ones', () => {
+  const q = sanitizeQuantConfig({});
+  for(const sym of ['ZECUSDT', 'HYPEUSDT', '1000PEPEUSDT', 'ENAUSDT', 'TAOUSDT', 'WLDUSDT', 'TRUMPUSDT', 'PUMPUSDT', 'XRPUSDT', '龙虾USDT']) assert.ok(quantSymbolSet(q).has(sym), `${sym} must be tradeable by Quant`);
+  for(const sym of EXCLUDED_FUTURES_SYMBOLS) assert.ok(!quantSymbolSet(q).has(sym), `${sym} must stay excluded`);
+  assert.deepEqual(Array.from(quantSymbolSet(q)), [], 'nothing is ADDED to a scan list in the default mode');
+  const only = sanitizeQuantConfig({ symbolFilter: ['XRPUSDT'] });
+  assert.ok(quantSymbolSet(only).has('XRPUSDT') && !quantSymbolSet(only).has('ZECUSDT'));
 });
 
 await test('Setup A (trend pullback) fires and its short mirror fires', () => {
@@ -104,7 +116,8 @@ await test('Setup A (trend pullback) fires and its short mirror fires', () => {
 await test('Setup B (squeeze breakout + retest) fires on both sides and yields a full signal', () => {
   let l = 0, s = 0, sigs = 0;
   for(let seed = 1; seed <= 20; seed++){
-    const a = inspect(squeezeBreakout(seed, 1)), b = inspect(squeezeBreakout(seed, -1));
+    const ALL = { setups: { A: true, B: true, C: true, D: true } }; // shipped default is A-only, B needs to be switched on
+    const a = inspect(squeezeBreakout(seed, 1), ALL), b = inspect(squeezeBreakout(seed, -1), ALL);
     if(a.res && a.res.BL) l++; if(b.res && b.res.BS) s++;
     if(a.sig && !a.sig.vetoes && a.sig.meta.setup === 'B') sigs++;
   }
@@ -124,12 +137,12 @@ await test('Setup D (range extreme) fires on a constructed range low and its mir
   assert.ok(hit >= 1, 'D never fired'); assert.equal(mir, hit);
 });
 
-await test('every signal that passes has RR >= 1:2, a stop on the correct side, and a target at exactly RR x risk', () => {
+await test('every signal that passes has RR >= the configured floor, a stop on the correct side, and a target at exactly RR x risk', () => {
   let n = 0;
   for(let seed = 1; seed <= 30; seed++) for(const E of [pullback(seed), squeezeBreakout(seed, 1), mirror(pullback(seed))]){
-    const r = inspect(E); if(!r.sig || r.sig.vetoes) continue; n++;
+    const r = inspect(E, { setups: { A: true, B: true, C: true, D: true } }); if(!r.sig || r.sig.vetoes) continue; n++;
     const m = r.sig.meta, s = r.sig.direction === 'LONG' ? 1 : -1;
-    assert.ok(m.rewardRisk >= 2 && m.rewardRisk <= 4);
+    assert.ok(m.rewardRisk >= HARD_LIMITS.minRewardRisk && m.rewardRisk <= 4);
     assert.ok(s * (m.entryFill - m.stopPrice) > 0, 'stop must be on the losing side');
     assert.ok(Math.abs(s * (m.targetPrice - m.entryFill) - m.rewardRisk * s * (m.entryFill - m.stopPrice)) < 1e-6 * m.entryFill);
     assert.ok(m.stopDistAtr >= 1.2 - 1e-9 && m.stopDistAtr <= 3.5 + 1e-9);
@@ -209,7 +222,7 @@ await test('sizing: risk comes from equity x risk% / stop distance; leverage nev
 });
 
 await test('paper engine: 2,500 cycles with Quant enabled -> no errors; closed trades carry R, regime, slippage; RR floor holds', () => {
-  const qcfg = sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60, symbols: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT'] });
+  const qcfg = sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60, symbolFilter: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT'] });
   const ds = { equity: 10000, startingEquity: 10000, peakEquity: 10000, trades: 0, wins: 0, losses: 0, consecutiveLosses: 0, lastLossAt: null, dailyPnlPct: 0, maxDrawdownPct: 0, realizedGrossUsd: 0, realizedNetUsd: 0, feesUsd: 0, fundingUsd: 0, slippageUsd: 0, openPositions: 0, openRiskPct: 0, positions: [], quantTrades: [] };
   const hist = []; const only = { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true };
   const cfg = { exchange: 'binance', strategies: only, minConfidence: 60, riskPctPerTrade: 1, leverage: 5, minNetProfitPct: 0.3, quant: qcfg };
@@ -219,7 +232,7 @@ await test('paper engine: 2,500 cycles with Quant enabled -> no errors; closed t
     const { rows } = runScanCycle(cfg, ds);
     for(const r of rows){
       if(r.status === 'APPROVED'){
-        assert.ok(r.riskReward >= 2 - 1e-9 && r.sizing.qty > 0 && r.sizing.riskAmountUsd <= ds.equity * 0.01 + 1e-6);
+        assert.ok(r.riskReward >= HARD_LIMITS.minRewardRisk - 1e-9 && r.sizing.qty > 0 && r.sizing.riskAmountUsd <= ds.equity * 0.01 + 1e-6);
         assert.equal(r.setup, QUANT_TYPE); assert.ok(r.explanation.includes('Confidence:'));
         if(!ds.positions.some(p => p.symbol === r.symbol) && ds.openPositions < 3){ openPosition(r, ds); opened++; }
       }
@@ -228,6 +241,45 @@ await test('paper engine: 2,500 cycles with Quant enabled -> no errors; closed t
   for(const t of hist){ assert.equal(t.strategy, QUANT_TYPE); assert.ok(t.quant && Number.isFinite(t.quant.realizedR) && t.quant.regime && t.quant.slippageUsd >= 0); }
   assert.equal(ds.quantTrades.length, hist.length);
   console.log(`         (${opened} opened, ${hist.length} closed on the synthetic feed — count only, not a result)`);
+});
+
+await test('REGRESSION: a valid Quant signal at the DEFAULT reward:risk (1:1.5) is APPROVED by the engine, not rejected by a stale 1:2 gate', () => {
+  // The bug: evaluateQuantRow() and the no-trade gate hard-coded a 1:2 minimum while QUANT_DEFAULTS.rewardRisk was
+  // 1.5, so every Quant signal was rejected and Backtest/Paper/Live all reported zero trades. Everything above the
+  // engine (the detector tests) passed, which is why nothing caught it. This goes through the real engine path.
+  const qcfg = sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60 });
+  assert.equal(qcfg.rewardRisk, 1.5, 'this test is about the shipped default');
+  const cfg = { exchange: 'binance', strategies: { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true }, minConfidence: 60, riskPctPerTrade: 1, leverage: 5, minNetProfitPct: 0.05, quant: qcfg };
+  let approved = 0, signals = 0, rejectedAsRR = 0;
+  for(let seed = 1; seed <= 120; seed++) for(const E of [pullback(seed), mirror(pullback(seed))]){
+    const snap = mkSnap(E); snap.symbol = 'ZECUSDT'; // a real-watchlist name that is NOT in the synthetic list — must be covered too
+    const sig = detectQuantFutures(snap, null, qcfg, { nowMs: null, costPct: 0.15 });
+    if(!sig || sig.vetoes) continue; signals++;
+    const ds = { equity: 10000, startingEquity: 10000, peakEquity: 10000, trades: 0, wins: 0, losses: 0, consecutiveLosses: 0, lastLossAt: null, dailyPnlPct: 0, maxDrawdownPct: 0, realizedGrossUsd: 0, realizedNetUsd: 0, feesUsd: 0, fundingUsd: 0, slippageUsd: 0, openPositions: 0, openRiskPct: 0, positions: [], quantTrades: [], cooldownUntilBySymbol: {} };
+    const row = evaluateSymbol('ZECUSDT', snap, classifyRegime(snap.h1, snap.m15), cfg, ds, null, E[E.length - 1].t);
+    if((row.rejectReasons || []).some(r => /below the 1:|Risk\/reward/.test(r))) rejectedAsRR++;
+    if(row.status === 'APPROVED') approved++;
+  }
+  assert.ok(signals >= 5, `only ${signals} signals to check`);
+  console.log(`         (${approved} of ${signals} constructed signals approved by the engine)`);
+  assert.equal(rejectedAsRR, 0, 'no signal may be rejected on reward:risk when it is at the configured, allowed RR');
+  assert.ok(approved >= 1, `${approved} of ${signals} signals approved`);
+});
+
+await test('Backtest funnel: counts are consistent, and the diagnostics say where evaluations stopped', async () => {
+  const r = rng(42); const mk = (start) => { const out = []; let p = start, t = 1_700_000_000_000 - (1_700_000_000_000 % 300000), dir = 1, left = 0;
+    for(let i = 0; i < 6000; i++){ if(left <= 0){ dir = r() < 0.5 ? 1 : -1; left = 200 + Math.floor(r() * 300); } left--; const o = p, c = o * (1 + dir * 0.00015 + (r() - 0.5) * 0.003); out.push({ t, o, h: Math.max(o, c) * (1 + 0.0005 * r()), l: Math.min(o, c) * (1 - 0.0005 * r()), c, v: 1000 * (0.6 + 0.8 * r()) }); p = c; t += 300000; } return out; };
+  const syms = ['ZECUSDT', 'HYPEUSDT', 'ENAUSDT'], cb = {}; syms.forEach((s, i) => cb[s] = mk(10 + i));
+  const cfg = { exchange: 'binance', strategies: { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true }, minConfidence: 60, riskPctPerTrade: 1, leverage: 5, minNetProfitPct: 0.05, quant: sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60 }) };
+  const res = await runBacktest({ candlesBySymbol: cb, symbols: syms, cfg, startingEquity: 10000, intervalMinutes: 5, maxDailyLossPct: 50, dailyProfitTargetPct: 50 });
+  const c = res.quantDiag.counts;
+  assert.ok(c.evaluated > 500, `detector barely ran (${c.evaluated}) — Quant is not being applied to these symbols`);
+  assert.equal(c.evaluated, (c.no_setup || 0) + (c.candidate || 0), 'every evaluation is either "no setup" or a candidate');
+  assert.equal(c.candidate, (c.expansion || 0) + (c.stop || 0) + (c.clearance || 0) + (c.score || 0) + (c.signal || 0), 'every candidate ends at exactly one stage');
+  assert.equal(c.signal, (c.approved || 0) + (c.engineRejected || 0), 'every signal is approved or rejected by the engine');
+  assert.equal((c.approved || 0), res.trades.length - res.trades.filter(t => t.exitReason === 'OPEN_AT_END' && false).length, 'approved == trades opened');
+  const sum = summarizeQuantDiag(res.quantDiag, res.trades.length);
+  assert.ok(sum.rows.length >= 3 && sum.rows[0].n === c.evaluated);
 });
 
 await test('backtest: Quant trades are tagged, aligned to 15m candle closes, and losses land near -1R (plus costs)', async () => {
@@ -240,7 +292,7 @@ await test('backtest: Quant trades are tagged, aligned to 15m candle closes, and
   const res = await runBacktest({ candlesBySymbol: cb, symbols: syms, cfg, startingEquity: 10000, intervalMinutes: 5, maxDailyLossPct: 5, dailyProfitTargetPct: 50 });
   for(const t of res.trades){
     assert.equal(t.setupType, QUANT_TYPE); assert.ok(((t.openedAtMs / 60000) + 5) % 15 === 0, 'entries only on a 15m candle close');
-    assert.ok(t.quant.initialRR >= 2);
+    assert.ok(t.quant.initialRR >= HARD_LIMITS.minRewardRisk);
     if(t.exitReason === 'STOP_LOSS') assert.ok(t.quant.realizedR <= -0.95 && t.quant.realizedR >= -2.0, `stop-loss R ${t.quant.realizedR}`);
   }
 });
@@ -255,7 +307,7 @@ await test('other strategies are untouched when Quant is off: majors are still e
 
 await test('EXCLUDED pairs are never traded by Quant: scan list, engine choke point, Paper', () => {
   // Even a hand-built cfg that bypasses sanitizeQuantConfig and lists every excluded pair must not get them traded.
-  const dirty = { ...sanitizeQuantConfig({}), symbols: [...EXCLUDED_FUTURES_SYMBOLS, 'XRPUSDT'], minConfidence: 60 };
+  const dirty = { ...sanitizeQuantConfig({}), symbolFilter: [...EXCLUDED_FUTURES_SYMBOLS, 'XRPUSDT'], minConfidence: 60 };
   assert.deepEqual(Array.from(quantSymbolSet(dirty)), ['XRPUSDT'], 'quantSymbolSet drops excluded pairs');
   const cfg = { exchange: 'binance', strategies: { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true }, minConfidence: 60, riskPctPerTrade: 1, leverage: 5, minNetProfitPct: 0.3, quant: dirty };
   const scan = scanSymbolsWithQuant(['ADAUSDT', ...EXCLUDED_FUTURES_SYMBOLS], cfg);
@@ -286,7 +338,7 @@ await test('EXCLUDED pairs are never traded by Quant: Backtest skips them even w
   const mk = (seed, start) => { const r = rng(seed); const out = []; let p = start, t = 1_700_000_000_000 - (1_700_000_000_000 % 300000);
     for(let i = 0; i < 6000; i++){ const o = p, c = o * (1 + (r() - 0.5) * 0.004 + Math.sin(i / 200) * 0.0004); out.push({ t, o, h: Math.max(o, c) * 1.0005, l: Math.min(o, c) * 0.9995, c, v: 1000 * (0.6 + r()) }); p = c; t += 300000; } return out; };
   const symsAll = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT'], cb = {}; symsAll.forEach((s, i) => cb[s] = mk(900 + i, [60000, 3000, 150, 590, 0.6][i]));
-  const dirty = { ...sanitizeQuantConfig({}), symbols: symsAll, minConfidence: 60, entryTimeframe: '15m' };
+  const dirty = { ...sanitizeQuantConfig({}), symbolFilter: symsAll, minConfidence: 60, entryTimeframe: '15m' };
   const cfg = { exchange: 'binance', strategies: { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true }, minConfidence: 60, riskPctPerTrade: 0.5, leverage: 5, minNetProfitPct: 0.3, quant: dirty };
   const res = await runBacktest({ candlesBySymbol: cb, symbols: symsAll, cfg, startingEquity: 10000, intervalMinutes: 5, maxDailyLossPct: 5, dailyProfitTargetPct: 50 });
   assert.ok(!res.trades.some(t => EXCLUDED_FUTURES_SYMBOLS.has(t.symbol)), 'backtest traded an excluded pair');

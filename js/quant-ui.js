@@ -26,6 +26,7 @@ import {
 } from './futures/quant/config.js';
 import { computeQuantStats, computeQuantStatsBySymbol, fromPaperLog, fromLiveLog, fromBacktest, winRateLabel } from './futures/quant/stats.js';
 import { monteCarlo, splitInOutOfSample } from './futures/quant/validation.js';
+import { summarizeQuantDiag } from './futures/quant/diagnostics.js';
 
 let qcfg = loadQuantConfig();
 let providers = { paperLog: () => [], liveLog: () => [], dayState: () => null, liveStart: () => null, liveTrades: () => [] };
@@ -61,6 +62,8 @@ export function updateQuantConfig(patch){
   onConfigChange(qcfg);
 }
 export function getQuantRewardRisk(){ return qcfg.rewardRisk; }
+// Card controls (futures-ui.js renders them from this, so the UI can never show a value that isn't what runs).
+export function getQuantCardSettings(){ return { rewardRisk: qcfg.rewardRisk, entryTimeframe: qcfg.entryTimeframe, setups: { ...qcfg.setups } }; }
 
 export function setQuantBacktestResult(trades, startingEquity){
   backtestResult = { trades: fromBacktest(trades), startingEquity, ranAt: Date.now() };
@@ -112,11 +115,27 @@ function statsTable(cols){
 }
 
 // ---- backtest validation section (rendered into the Backtest tab's results) ----
-export function renderQuantBacktestSection(container, { trades, startingEquity, onWalkForward }){
+// "Why did it (not) trade?" — the pipeline funnel collected during the run (futures/quant/diagnostics.js).
+function diagnosticsHtml(diag, tradeCount, open){
+  const sum = summarizeQuantDiag(diag, tradeCount);
+  if(!sum) return '';
+  const rows = sum.rows.map(r => `<tr style="border-top:1px solid var(--line);"><td style="padding:3px 8px;">${r.label}</td><td style="padding:3px 8px;text-align:right;">${r.n.toLocaleString()}</td><td style="padding:3px 8px;text-align:right;color:var(--dim);">${r.pct < 0.1 && r.n ? '<0.1' : r.pct.toFixed(1)}%</td></tr>`).join('');
+  const regimes = sum.regimes.map(([k, n]) => `${k} ${n.toLocaleString()}`).join(' · ');
+  const hints = sum.hints.map(h => `<li>${h}</li>`).join('');
+  const eng = sum.engineReasons.length ? `<div style="margin-top:6px;color:var(--dim);">Top gate/risk rejections: ${sum.engineReasons.map(([k, n]) => `${k} (${n})`).join('; ')}</div>` : '';
+  return `<details ${open ? 'open' : ''} style="margin-top:12px;font-size:11.5px;line-height:1.5;">
+    <summary style="cursor:pointer;font-weight:600;">Why did Quant ${tradeCount ? 'trade this often' : 'take no trades'}? — pipeline funnel for this run</summary>
+    <table style="width:100%;border-collapse:collapse;margin-top:6px;">${rows}</table>
+    <div style="margin-top:6px;color:var(--dim);">Regimes seen: ${regimes || '—'}</div>${eng}
+    ${hints ? `<ul style="margin:6px 0 0 16px;padding:0;">${hints}</ul>` : ''}
+  </details>`;
+}
+
+export function renderQuantBacktestSection(container, { trades, startingEquity, onWalkForward, diag }){
   if(!container) return;
   const qt = fromBacktest(trades);
   if(!qt.length){
-    container.innerHTML = '<div style="font-size:12px;color:var(--dim);">NxTGen Quant Futures took no trades in this backtest.</div>';
+    container.innerHTML = `<div style="font-size:12px;color:var(--dim);">NxTGen Quant Futures took no trades in this backtest.</div>${diagnosticsHtml(diag, 0, true)}`;
     return;
   }
   const all = computeQuantStats(qt, startingEquity);
@@ -139,7 +158,7 @@ export function renderQuantBacktestSection(container, { trades, startingEquity, 
     ${statsTable([{ name: 'All trades', stats: all }, { name: 'In-sample (first 70%)', stats: isS }, { name: 'Out-of-sample (last 30%)', stats: oosS }])}
     <div class="ov-block-title" style="margin-top:14px;">By symbol — which pairs this is favorable on, in THIS run</div>
     <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px;line-height:1.5;">
-      Quant Futures only ever trades its own fixed symbol list (XRP/ADA/AVAX/LINK/DOT — BTC/ETH/SOL/LTC/DOGE/BNB are permanently excluded platform-wide). A win rate below 30 trades for a single
+      Quant Futures trades every ticked symbol except the platform-wide excluded pairs (BTC/ETH/SOL/LTC/DOGE/BNB). A win rate below 30 trades for a single
       symbol is shown as observed, not certified — the same MIN_SAMPLE_TRADES rule as everywhere else, just applied per symbol instead of to the total.
     </div>
     <table style="width:100%;font-size:11.5px;border-collapse:collapse;"><tr><th style="text-align:left;padding:3px 8px;color:var(--dim);font-weight:600;">Symbol</th><th style="text-align:right;padding:3px 8px;color:var(--ink);">Trades</th><th style="text-align:right;padding:3px 8px;color:var(--ink);">Win rate</th><th style="text-align:right;padding:3px 8px;color:var(--ink);">PF</th><th style="text-align:right;padding:3px 8px;color:var(--ink);">Net</th></tr>${bySymbolRows}</table>
@@ -152,6 +171,7 @@ export function renderQuantBacktestSection(container, { trades, startingEquity, 
       <span id="qfWfStatus" style="font-size:11.5px;color:var(--dim);">4 folds × 9-cell grid (min confidence 70/75/80 × RR 1.3/1.5/1.7). Re-runs the backtest many times — can take a while.</span>
     </div>
     <div id="qfWfResult" style="margin-top:10px;"></div>
+    ${diagnosticsHtml(diag, qt.length, false)}
   `;
   const btn = container.querySelector('#qfWfBtn');
   if(btn && onWalkForward){

@@ -202,19 +202,19 @@ export function detectQuantFutures(snap, baseRegime, qcfg, ctx){
       // liquidity-sweep reversal (C), whose confirming candle is legitimately large — its stop-distance cap and
       // entry-quality score already penalize chasing.
       if(setupId !== 'C' && lastRangeAtr > 2.8){
-        failing.push({ cand, dir, reason: `${cand.name} ${dir}: excessive candle expansion (${lastRangeAtr.toFixed(2)} ATR) — not chasing`, score: 0 });
+        failing.push({ cand, dir, stage: 'expansion', reason: `${cand.name} ${dir}: excessive candle expansion (${lastRangeAtr.toFixed(2)} ATR) — not chasing`, score: 0 });
         continue;
       }
 
       const s = dir === 'LONG' ? 1 : -1;
       const { entry, slipPct } = entryFillFor(s);
       const st = buildStop(f, cand, s, entry);
-      if(!st.ok){ failing.push({ cand, dir, reason: `${cand.name} ${dir}: ${st.reason}`, score: 0 }); continue; }
+      if(!st.ok){ failing.push({ cand, dir, stage: 'stop', reason: `${cand.name} ${dir}: ${st.reason}`, score: 0 }); continue; }
       const trade = { entry, slipPct, dist: st.dist, distAtr: st.distAtr, stopPrice: st.price, stopBasis: st.basis, rr: qcfg.rewardRisk };
       trade.clearance = clearanceR(f, cand, s, entry, st.dist);
       const needClr = requiredClearanceR(cand, qcfg.rewardRisk);
       if(trade.clearance.r < needClr){
-        failing.push({ cand, dir, reason: `${cand.name} ${dir}: target blocked — opposing level at ${trade.clearance.r.toFixed(2)}R (needs ≥ ${needClr.toFixed(2)}R)`, score: 0 });
+        failing.push({ cand, dir, stage: 'clearance', reason: `${cand.name} ${dir}: target blocked — opposing level at ${trade.clearance.r.toFixed(2)}R (needs ≥ ${needClr.toFixed(2)}R)`, score: 0 });
         continue;
       }
       let sc = scoreCandidate(f, reg, cand, s, trade, qcfg, ctx);
@@ -229,7 +229,7 @@ export function detectQuantFutures(snap, baseRegime, qcfg, ctx){
       if(sc.score < minConf) why.push(`score ${sc.score} below required ${minConf}${reg.confBoost ? ` (includes +${reg.confBoost} for ${reg.label})` : ''}`);
       if(cf.categoriesPassed < tier.minCategories) why.push(`only ${cf.categoriesPassed}/6 confluence categories agree (need ${tier.minCategories})`);
       if(cf.confirmationsPassed < needConf) why.push(`only ${cf.confirmationsPassed}/${applicable} confirmations (need ${needConf})`);
-      const rec = { cand, dir, s, trade, sc, cf, reason: null };
+      const rec = { cand, dir, s, trade, sc, cf, reason: null, stage: 'score' };
       if(why.length){ rec.reason = `${cand.name} ${dir}: ${why.join('; ')}`; rec.score = sc.score; failing.push(rec); continue; }
       passing.push(rec);
     }
@@ -241,7 +241,12 @@ export function detectQuantFutures(snap, baseRegime, qcfg, ctx){
     if(bestFail) msgs.push(bestFail.reason);
     else msgs.push(...rejections.slice(0, 3));
     if(ctx.log && bestFail) qlogOnce(`${symbol}|${bestFail.cand.setup}|${bestFail.dir || ''}|${f.last.t}|rej`, `${symbol} ${bestFail.reason}`);
-    return veto(msgs.join(' — '), { regime: reg.label, rejections });
+    // `stage` lets the Backtest tab's diagnostics say WHERE the pipeline stopped (quant/diagnostics.js).
+    // When several candidates exist the evaluation is attributed to the FURTHEST stage any of them reached
+    // (pipeline order: expansion -> stop -> clearance -> score).
+    const order = ['score', 'clearance', 'stop', 'expansion'];
+    const stage = failing.length ? order.find(k => failing.some(x => x.stage === k)) || 'score' : 'no_setup';
+    return veto(msgs.join(' — '), { regime: reg.label, rejections, stage, setup: bestFail && bestFail.cand ? bestFail.cand.setup : null });
   }
 
   passing.sort((a, b) => b.sc.score - a.sc.score);

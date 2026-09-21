@@ -125,10 +125,22 @@ function computeRangeMs(){
   return { startMs, endMs: Math.min(customEndMs, endMs) };
 }
 
+// One symbol's history. A pair the exchange doesn't list comes back as err.notListed (reported calmly, not as a
+// failure); a rate-limited/transient failure is retried twice here on top of the server's own retries, so one
+// throttled request no longer drops a symbol from the run.
 async function fetchSymbolKlines(exchange, symbol, interval, startMs, endMs){
-  const data = await callProxy('/api/backtest/klines', { exchange, symbol, interval, startMs, endMs });
-  if(!data.ok) throw new Error(data.message || `Could not fetch ${symbol} history.`);
-  return data.candles || [];
+  let lastErr = null;
+  for(let attempt = 0; attempt < 3; attempt++){
+    const data = await callProxy('/api/backtest/klines', { exchange, symbol, interval, startMs, endMs });
+    if(data.ok) return data.candles || [];
+    const err = new Error(data.message || `Could not fetch ${symbol} history.`);
+    err.notListed = !!data.notListed;
+    if(err.notListed) throw err;
+    lastErr = err;
+    if(!/rate limit|too many|429|timeout|temporar/i.test(err.message)) throw err;
+    await new Promise(resolve => setTimeout(resolve, 2500 * (attempt + 1)));
+  }
+  throw lastErr;
 }
 
 // Minutes-per-bar for the backtest's base timeframe. LOCKED to 5m
@@ -178,23 +190,27 @@ async function runBacktestFlow(){
   // silently-disabled filter.
   const fetchList = Array.from(new Set([...symbols, 'BTCUSDT']));
   const candlesBySymbol = {};
-  const failed = [];
+  const failed = [];   // real fetch failures (network, rate limit that survived every retry...) — shown as an error
+  const unlisted = []; // pairs this exchange doesn't list (or has no history for) — expected with a top-by-volume list, shown as a note
   for(let i = 0; i < fetchList.length; i++){
     const sym = fetchList[i];
     els.btProgress.textContent = `Fetching history: ${i + 1}/${fetchList.length} (${sym})`;
     try{
       candlesBySymbol[sym] = await fetchSymbolKlines(exchange, sym, timeframe, range.startMs, range.endMs);
-      if(!candlesBySymbol[sym].length) failed.push(`${sym} (no data returned)`);
+      if(!candlesBySymbol[sym].length) unlisted.push(sym);
     }catch(err){
-      failed.push(`${sym} (${err.message})`);
+      if(err.notListed) unlisted.push(sym); else failed.push(`${sym} (${err.message})`);
     }
   }
+  // BTCUSDT is fetched only for the BTC-shock filter; it isn't "skipped" if the user didn't tick it.
+  const unlistedTraded = unlisted.filter(sym => symbols.includes(sym));
+  const unlistedNote = unlistedTraded.length ? `Not available on ${exchange} for this range (skipped): ${unlistedTraded.join(', ')}.` : '';
 
   const usableSymbols = symbols.filter(s => candlesBySymbol[s] && candlesBySymbol[s].length);
   if(!usableSymbols.length){
     els.btRunBtn.disabled = false;
     els.btProgress.textContent = '';
-    showBtMessage(`Couldn't fetch usable history for any selected symbol. ${failed.join('; ')}`, 'error');
+    showBtMessage(`Couldn't fetch usable history for any selected symbol. ${[...failed, unlistedNote].filter(Boolean).join(' ')}`, 'error');
     return;
   }
 
@@ -221,7 +237,7 @@ async function runBacktestFlow(){
     quant: quantCfgForRun,
   };
 
-  showBtMessage(failed.length ? `Simulating (skipped: ${failed.join('; ')})…` : 'Simulating…');
+  showBtMessage(failed.length ? `Simulating (fetch failed for: ${failed.join('; ')})…` : 'Simulating…');
   try{
     const result = await runBacktest({
       candlesBySymbol, symbols: usableSymbols, cfg, startingEquity, intervalMinutes,
@@ -291,7 +307,7 @@ async function runBacktestFlow(){
     if(strategies[QUANT_ID]){
       setQuantBacktestResult(result.trades, startingEquity);
       renderQuantBacktestSection(quantHost, {
-        trades: result.trades, startingEquity,
+        trades: result.trades, startingEquity, diag: result.quantDiag,
         onWalkForward: (onProgress) => runWalkForward({
           candlesBySymbol, startingEquity, folds: 4, onProgress,
           runFn: ({ candlesBySymbol: slice, cfgOverrides }) => runBacktest({
@@ -303,10 +319,11 @@ async function runBacktestFlow(){
       });
       if(quantHost) quantHost.style.display = '';
     } else if(quantHost){ quantHost.style.display = 'none'; }
+    const doneOk = `Done — ${result.barsEvaluated.toLocaleString()} symbol-bars evaluated across ${usableSymbols.length} symbol(s). Coverage: ${coverage}${usableSymbols.length > 4 ? ', …' : ''} (requested ~${requestedDays.toFixed(1)}d).`;
     showBtMessage(
       failed.length
-        ? `Done. Skipped: ${failed.join('; ')}.`
-        : `Done — ${result.barsEvaluated.toLocaleString()} symbol-bars evaluated across ${usableSymbols.length} symbol(s). Coverage: ${coverage}${usableSymbols.length > 4 ? ', …' : ''} (requested ~${requestedDays.toFixed(1)}d).`,
+        ? `Done. Fetch failed for: ${failed.join('; ')}.${unlistedNote ? ' ' + unlistedNote : ''} ${doneOk}`
+        : `${doneOk}${unlistedNote ? ' ' + unlistedNote : ''}`,
       failed.length ? 'error' : 'ok'
     );
   }catch(err){

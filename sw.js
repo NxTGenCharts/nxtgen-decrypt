@@ -13,10 +13,11 @@
 // on the very next load (no stale-app trap), while a slow or dead
 // connection still opens the app from cache after ~3.5s.
 // =============================================================
-const VERSION = 'nxtgen-shell-v3';
+const VERSION = 'nxtgen-shell-v4';
 const NETWORK_TIMEOUT_MS = 3500;
 const PRECACHE = [
   "/js/futures/quant/config.js",
+  "/js/futures/quant/diagnostics.js",
   "/js/futures/quant/features.js",
   "/js/futures/quant/log.js",
   "/js/futures/quant/regime.js",

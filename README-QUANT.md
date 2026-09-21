@@ -68,3 +68,12 @@ Shared helpers in `indicators.js`: `efficiencyRatio(values, period)` (takes a va
 
 ## Watchlist (Paper / Backtest / Live-Demo)
 All three modes use the same list, on all five exchanges (Binance, Bybit, MEXC, Gate.io, Bitget — Backtest history for Bitget comes from `/api/v2/mix/market/history-candles`, paged backward and rate-paced): the selected exchange's **top 25 USDT perpetuals by 24h volume**, minus the platform-wide excluded pairs (`js/futures/watchlist.js`, fed by `/api/futures/universe`). Live/Demo scans it directly. Backtest loads it into the symbol picker (all ticked; "Reload top 25" re-fetches; falls back to the built-in list if the proxy is unreachable) — note it is *today's* ranking applied to the whole date range. Paper mirrors the real pair names with synthetic candles (the pair's real last price/volume only seed the random walk); it needs a proxy running the updated `server.js` (which now returns `lastPrice`) and otherwise falls back to the built-in synthetic list. Quant's own symbols are still added on top of whichever list is in use.
+
+
+## Fix log — "Quant takes no trades" (2026-09)
+Two independent causes, both fixed:
+1. **Stale 1:2 gate.** `engine.js` `evaluateQuantRow()` and the shared no-trade gate hard-coded a 1:2 minimum after the shipped profile moved to 1:1.5 (`HARD_LIMITS.minRewardRisk` = 1.2), so every signal was rejected. Both now use `HARD_LIMITS.minRewardRisk`. The Reward:Risk dropdown previously offered only 2/2.5/3/4 and displayed "1:2" while 1.5 ran; its options are now 1.3/1.5/1.75/2/2.5/3/4 and always include the default.
+2. **Symbol coverage.** Quant only applied to the Paper synthetic list (`mockMarket.js`), so most real Binance/Bybit top-25 names (ZEC, HYPE, ENA, TAO, WLD, TRUMP, 1000PEPE...) were silently skipped. `symbolFilter` now defaults to `null` = every non-excluded pair the mode scans; the old saved `symbols` array is ignored. Set `symbolFilter: [...]` in the config only to restrict Quant by hand.
+
+Added: setup A-D checkboxes and entry-timeframe selector on the Quant card; a pipeline funnel in the Backtest tab (`quant/diagnostics.js`) showing where evaluations stopped; a Quant-only 15m backtest speed-up (identical results); server-side kline pacing, 429/Bybit-10006 retry and symbol aliases (PEPE -> 1000PEPE, SHIB -> SHIB1000 on Bybit); unlisted pairs are reported as a note, not an error.
+Thresholds were NOT retuned: no real market data was available when this was fixed. Judge the strategy with real-data Backtest runs and the funnel.

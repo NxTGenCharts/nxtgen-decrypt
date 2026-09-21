@@ -1610,6 +1610,57 @@ const BYBIT_KLINE_INTERVAL = { '3m': '3', '5m': '5', '15m': '15', '30m': '30', '
 const MEXC_KLINE_INTERVAL = { '5m': 'Min5', '15m': 'Min15', '30m': 'Min30', '1h': 'Min60' };
 const GATEIO_KLINE_INTERVAL = { '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h' };
 
+// ---- Backtest history: pacing, rate-limit retry, and symbol aliases ----
+// A 30-day 5m backtest of a top-25 list is ~150-250 paged requests from this server's (shared) IP in a few
+// seconds. Bybit answers the overflow with "Too many visits. Exceeded the API Rate Limit." (HTTP 200, retCode
+// 10006) and Binance with 429/418 — which the Backtest tab used to show as "skipped" symbols and, worse, as
+// silently missing history. Every kline request now goes through klineFetch(): it keeps a minimum gap between
+// requests per exchange and retries 429s with backoff (honouring Retry-After).
+const KLINE_MIN_GAP_MS = { binance: 50, bybit: 150, mexc: 120, gateio: 100, bitget: 0 }; // bitget paces itself below
+const klineNextSlot = {};
+async function paceKline(exchange){
+  const gap = KLINE_MIN_GAP_MS[exchange] || 0;
+  if(!gap) return;
+  const now = Date.now();
+  const slot = Math.max(now, klineNextSlot[exchange] || 0);
+  klineNextSlot[exchange] = slot + gap; // reserve the slot synchronously, so concurrent callers queue behind each other
+  if(slot > now) await new Promise(resolve => setTimeout(resolve, slot - now));
+}
+async function klineFetch(exchange, url){
+  let last = null;
+  for(let attempt = 0; attempt < 5; attempt++){
+    await paceKline(exchange);
+    last = await fetch(url);
+    if(last.status !== 429 && last.status !== 418) return last;
+    const ra = parseInt(last.headers.get('retry-after') || '', 10);
+    const waitMs = Number.isFinite(ra) ? Math.min(ra * 1000, 15_000) : Math.min(1000 * 2 ** attempt, 8000);
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+  }
+  return last; // still rate limited after 5 tries — caller turns this into a clear error
+}
+// Thrown when the exchange says the symbol doesn't exist (as opposed to a network/rate-limit failure), so the
+// route can try an alias and the UI can report "not listed" calmly instead of as an error.
+class KlineNotListed extends Error { constructor(msg){ super(msg); this.notListed = true; } }
+
+// Candidate names to try for a requested symbol on an exchange, original first. Exchanges list the same coin
+// under different perpetual names: Binance and Bybit use 1000PEPEUSDT / 1000BONKUSDT (prices are x1000, which
+// doesn't matter to a backtest — everything is relative), Binance uses 1000SHIBUSDT, Bybit uses SHIB1000USDT;
+// MEXC / Gate.io / Bitget use the plain name. So PEPEUSDT/SHIBUSDT/BONKUSDT resolve where they exist under a
+// scaled name, and 1000XUSDT resolves to XUSDT on venues that have no 1000x contract.
+function klineSymbolCandidates(exchange, symbol){
+  const base = symbol.endsWith('USDT') ? symbol.slice(0, -4) : symbol;
+  const out = [symbol];
+  const scaled = /^1000[A-Z0-9]/.test(base);
+  if(exchange === 'binance' || exchange === 'bybit'){
+    if(!scaled) out.push(`1000${base}USDT`);
+    if(exchange === 'bybit' && !scaled) out.push(`${base}1000USDT`);
+  }
+  if(scaled) out.push(`${base.slice(4)}USDT`);
+  return Array.from(new Set(out));
+}
+const klineResolvedSymbol = new Map(); // `${exchange}:${requested}` -> the candidate that worked
+const klineNotListedUntil = new Map(); // `${exchange}:${requested}` -> ms; don't re-probe a name that isn't listed for 30 min
+
 // TRADEABLE_FUTURES_SYMBOLS (engine.js) are always plain "XRPUSDT"-style
 // strings (no separator) — Binance/Bybit want it exactly that way, but
 // MEXC and Gate.io both name USDT-margined contracts with an underscore
@@ -1646,8 +1697,12 @@ async function fetchBinanceFuturesKlines(symbol, interval, startMs, endMs){
   while(cursorEnd > startMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
     guard++;
     const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${BINANCE_KLINE_INTERVAL[interval]}&startTime=${startMs}&endTime=${cursorEnd}&limit=1500`;
-    const r = await fetch(url);
-    if(!r.ok) throw new Error(`Binance klines HTTP ${r.status}`);
+    const r = await klineFetch('binance', url);
+    if(!r.ok){
+      let eb = null; try{ eb = await r.json(); }catch(e){ /* body optional */ }
+      if(r.status === 400 && eb && (eb.code === -1121 || /invalid symbol/i.test(eb.msg || ''))) throw new KlineNotListed(`Binance has no ${symbol} perpetual`);
+      throw new Error(`Binance klines HTTP ${r.status}${eb && eb.msg ? ` (${eb.msg})` : ''}`);
+    }
     const rows = await r.json();
     if(!Array.isArray(rows) || !rows.length) break;
     const chron = rows
@@ -1694,10 +1749,21 @@ async function fetchBybitLinearKlines(symbol, interval, startMs, endMs){
   while(cursorEnd > startMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
     guard++;
     const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${encodeURIComponent(symbol)}&interval=${BYBIT_KLINE_INTERVAL[interval]}&start=${startMs}&end=${cursorEnd}&limit=1000`;
-    const r = await fetch(url);
-    if(!r.ok) throw new Error(`Bybit klines HTTP ${r.status}`);
-    const data = await r.json();
-    if(data.retCode !== 0) throw new Error(`Bybit klines error: ${data.retMsg || data.retCode}`);
+    let data = null;
+    for(let attempt = 0; attempt < 6; attempt++){
+      const r = await klineFetch('bybit', url);
+      if(!r.ok) throw new Error(`Bybit klines HTTP ${r.status}${r.status === 403 ? ' (this server\'s IP is temporarily rate-limited by Bybit — retry in a few minutes)' : ''}`);
+      data = await r.json();
+      if(data.retCode === 0) break;
+      // Bybit reports rate limiting as HTTP 200 + retCode 10006/10018 — back off and retry instead of giving up.
+      if(data.retCode === 10006 || data.retCode === 10018 || /too many visits|rate limit/i.test(data.retMsg || '')){
+        await new Promise(resolve => setTimeout(resolve, 1200 * (attempt + 1)));
+        continue;
+      }
+      if(/symbol is? invalid|invalid symbol/i.test(data.retMsg || '')) throw new KlineNotListed(`Bybit has no ${symbol} perpetual`);
+      throw new Error(`Bybit klines error: ${data.retMsg || data.retCode}`);
+    }
+    if(!data || data.retCode !== 0) throw new Error(`Bybit klines error: ${(data && data.retMsg) || 'rate limited'} (still rate limited after retries)`);
     const rows = (data.result && data.result.list) || [];
     if(!rows.length) break;
     const chron = rows.slice().reverse().map(row => ({ t: +row[0], o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] })); // Bybit returns newest-first
@@ -1769,7 +1835,7 @@ async function fetchMexcFuturesKlines(symbol, interval, startMs, endMs){
   while(cursorEndSec > startSec && guard < 500){ // guard: a stuck/misbehaving page should never spin forever
     guard++;
     const url = `https://api.mexc.com/api/v1/contract/kline/${mexcSymbol}?interval=${mexcInterval}&start=${startSec}&end=${cursorEndSec}`;
-    const r = await fetch(url);
+    const r = await klineFetch('mexc', url);
     if(!r.ok) throw new Error(`MEXC klines HTTP ${r.status}`);
     const body = await r.json();
     const d = body && body.data;
@@ -1826,7 +1892,7 @@ async function fetchGateioFuturesKlines(symbol, interval, startMs, endMs){
     guard++;
     const pageToSec = Math.min(toSecFinal, cursorFromSec + (GATEIO_PAGE_LIMIT - 1) * intervalSec);
     const url = `https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=${encodeURIComponent(gateSymbol)}&from=${cursorFromSec}&to=${pageToSec}&interval=${gateInterval}`;
-    const r = await fetch(url);
+    const r = await klineFetch('gateio', url);
     if(!r.ok) throw new Error(`Gate.io klines HTTP ${r.status}`);
     const rows = await r.json();
     if(!Array.isArray(rows) || !rows.length){ cursorFromSec = pageToSec + intervalSec; continue; } // no trades in this window — skip forward rather than getting stuck
@@ -1936,14 +2002,37 @@ app.post('/api/backtest/klines', async (req, res) => {
   if(cached && Date.now() - cached.fetchedAt < KLINE_CACHE_TTL_MS){
     return res.json({ ok: true, candles: cached.candles, cached: true });
   }
+  const nlKey = `${exchange}:${symbol}`;
+  if((klineNotListedUntil.get(nlKey) || 0) > Date.now()){
+    return res.json({ ok: false, notListed: true, message: `${symbol} isn't listed as a USDT perpetual on ${exchange}` });
+  }
   try{
-    const candles = await fetcher(symbol, interval, startMs, endMs);
+    // Try the resolved alias first (if a previous request found one), then the requested name, then the aliases.
+    const known = klineResolvedSymbol.get(nlKey);
+    const candidates = Array.from(new Set([...(known ? [known] : []), ...klineSymbolCandidates(exchange, symbol)]));
+    let candles = null, used = symbol, lastErr = null, sawRealError = false;
+    for(const cand of candidates){
+      try{
+        const got = await fetcher(cand, interval, startMs, endMs);
+        if(got.length){ candles = got; used = cand; break; }
+      }catch(err){
+        lastErr = err;
+        if(!err.notListed) sawRealError = true; // rate limit / network / etc — not a "this symbol doesn't exist" answer
+      }
+    }
+    if(!candles){
+      if(lastErr && sawRealError) throw lastErr;
+      // Every candidate was either "no such symbol" or came back empty: the pair simply isn't available there.
+      klineNotListedUntil.set(nlKey, Date.now() + 30 * 60_000);
+      return res.json({ ok: false, notListed: true, message: `${symbol} isn't available as a USDT perpetual on ${exchange} (tried ${candidates.join(', ')})` });
+    }
+    if(used !== symbol) klineResolvedSymbol.set(nlKey, used);
     if(klineCache.size >= KLINE_CACHE_MAX_ENTRIES){
       const oldestKey = klineCache.keys().next().value;
       klineCache.delete(oldestKey);
     }
     klineCache.set(cacheKey, { fetchedAt: Date.now(), candles });
-    res.json({ ok: true, candles, cached: false });
+    res.json({ ok: true, candles, cached: false, resolvedSymbol: used });
   }catch(err){
     res.json({ ok: false, message: `Could not fetch ${exchange} history for ${symbol}: ${err.message}` });
   }

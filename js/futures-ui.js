@@ -24,7 +24,7 @@ import { icon } from './icons.js';
 import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS, scanSymbolsWithQuant } from './futures/engine.js';
 import { QUANT_ID, QUANT_TYPE } from './futures/quant/config.js';
 import { qlog } from './futures/quant/log.js';
-import { getQuantCfg, setQuantProviders, setQuantConfigListener, quantCardStatsLine, getQuantRewardRisk, updateQuantConfig } from './quant-ui.js';
+import { getQuantCfg, setQuantProviders, setQuantConfigListener, quantCardStatsLine, getQuantRewardRisk, getQuantCardSettings, updateQuantConfig } from './quant-ui.js';
 import { mockMarket } from './futures/mockMarket.js';
 import { WATCHLIST_TOP_N, rankTopByVolume } from './futures/watchlist.js';
 import { RISK_DEFAULTS, estimateLiquidationPrice } from './futures/risk.js';
@@ -1525,7 +1525,7 @@ function renderStrategyRows(){
     const enabled = f.strategies[s.id] ?? s.defaultEnabled;
     if(enabled) enabledCount++;
     const isQuant = s.id === QUANT_ID;
-    // Quant Futures owns its RR (1:2 minimum) and its stats wording (INSUFFICIENT SAMPLE) — see quant-ui.js.
+    // Quant Futures owns its RR (1:1.2 floor, quant/config.js HARD_LIMITS) and its stats wording (INSUFFICIENT SAMPLE) — see quant-ui.js.
     const rr = isQuant ? getQuantRewardRisk() : (f.strategyRR[s.id] ?? s.defaultRR);
     const rrOptions = s.rrOptions || [1, 1.5, 2, 2.5, 3];
     if(isQuant) statsLine = quantCardStatsLine();
@@ -1546,9 +1546,27 @@ function renderStrategyRows(){
             </select>
           </div>
         </div>
+        ${isQuant ? quantControlsHtml() : ''}
         <div style="font-size:11px;margin-top:8px;">${statsLine}</div>
       </div>
     `;
+  };
+  // Quant-only controls: which setups may fire, and the entry timeframe. These are the two levers for trade
+  // frequency (Trend Pullback alone is deliberately selective; the Backtest tab's Quant diagnostics say which
+  // one to pull). Rendered from getQuantCardSettings() so what is shown is exactly what runs.
+  const quantControlsHtml = () => {
+    const q = getQuantCardSettings();
+    const setupDefs = [['A', 'Trend Pullback'], ['B', 'Breakout + Retest'], ['C', 'Liquidity Sweep'], ['D', 'Range Extremes']];
+    return `
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:12px;">
+        <span style="color:var(--dim);">Setups:</span>
+        ${setupDefs.map(([k, n]) => `<label style="display:flex;align-items:center;gap:5px;"><input type="checkbox" class="fu-quant-setup" data-setup="${k}" ${q.setups[k] ? 'checked' : ''}>${k} · ${n}</label>`).join('')}
+        <span style="color:var(--dim);margin-left:6px;">Entry timeframe</span>
+        <select class="fu-quant-tf">
+          <option value="15m" ${q.entryTimeframe === '15m' ? 'selected' : ''}>15m (selective)</option>
+          <option value="5m" ${q.entryTimeframe === '5m' ? 'selected' : ''}>5m (more signals)</option>
+        </select>
+      </div>`;
   };
   // Original six first, then NxTGen Grid, then NxTGen Quant Futures — so Quant is the 8th strategy in the list.
   const strategyRowsHtml = STRATEGY_REGISTRY.filter(s => s.id !== QUANT_ID).map(renderStratRow).join('');
@@ -1633,6 +1651,15 @@ function initStrategySelector(){
           f.strategies[id] = e.target.checked;
           persistStrategyConfig();
         }
+        renderStrategyRows();
+      } else if(e.target.classList.contains('fu-quant-setup')){
+        const cur = getQuantCardSettings().setups;
+        const next = { ...cur, [e.target.dataset.setup]: e.target.checked };
+        // At least one setup must stay on, otherwise Quant could never trade and the UI would look "on" while idle.
+        if(Object.values(next).some(Boolean)) updateQuantConfig({ setups: next });
+        renderStrategyRows();
+      } else if(e.target.classList.contains('fu-quant-tf')){
+        updateQuantConfig({ entryTimeframe: e.target.value });
         renderStrategyRows();
       } else if(e.target.classList.contains('fu-strategy-rr')){
         if(e.target.dataset.id === QUANT_ID){ updateQuantConfig({ rewardRisk: parseFloat(e.target.value) }); }

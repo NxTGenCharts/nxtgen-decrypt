@@ -33,7 +33,9 @@
 // =============================================================
 import { classifyRegime } from './regime.js';
 import { evaluateSymbol, netPnlForFraction, EXCLUDED_FUTURES_SYMBOLS, isQuantEnabled } from './engine.js';
-import { quantSymbolSet } from './quant/config.js';
+import { quantSymbolSet, QUANT_ID } from './quant/config.js';
+import { createQuantDiag } from './quant/diagnostics.js';
+import { STRATEGY_REGISTRY } from './setups.js';
 import { quantExitPrice, quantTradeFields } from './quant/risk.js';
 import { RISK_DEFAULTS } from './risk.js';
 import { computeBtcShock } from './indicators.js';
@@ -364,6 +366,14 @@ export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquit
   const quantOn = isQuantEnabled(cfg);
   if(quantOn) cfg.quant.log = false; // thousands of bars would drown the [QUANT] log
   const quantSyms = quantOn ? quantSymbolSet(cfg.quant) : new Set();
+  // Where did the pipeline stop? Counters only (quant/diagnostics.js) — shown in the Backtest tab, never used in a decision.
+  const quantDiag = quantOn ? createQuantDiag() : null;
+  if(quantOn) cfg.quant.diag = quantDiag;
+  // Speed: when Quant is the ONLY entry strategy and it trades 15m candles, a 5m base bar that is not a 15m close
+  // can never produce an entry (buildFeatures returns "waiting for the next 15m candle close"). Skip building the
+  // snapshot for those bars — 2 of every 3 — which was the bulk of the run time. Positions are still managed every bar.
+  const otherStrategyOn = STRATEGY_REGISTRY.some(st => st.id !== QUANT_ID && (cfg.strategies && st.id in cfg.strategies ? !!cfg.strategies[st.id] : st.defaultEnabled));
+  const quantSkipOffClose = quantOn && !otherStrategyOn && cfg.quant.entryTimeframe === '15m' && barIntervalMinutes < 15;
   const dayState = newDayState(startingEquity, maxDailyLossPct, dailyProfitTargetPct);
   const closedTrades = [];
   const equityCurve = [];
@@ -397,6 +407,7 @@ export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquit
       const idx = idxBySymbol[symbol].get(nowMs);
       if(idx == null || idx < warmupBarsFor(barIntervalMinutes, quantOn && quantSyms.has(symbol))){ if(idx != null) skippedWarmup++; continue; }
 
+      if(quantSkipOffClose && ((Math.floor(nowMs / 60_000) + barIntervalMinutes) % 15) !== 0) continue;
       barsEvaluated++;
       const snap = buildSnapshotAt(symbol, candlesBySymbol[symbol], idx, metaOverrides, barIntervalMinutes);
       const regime = classifyRegime(snap.h1, snap.m15);
@@ -434,7 +445,7 @@ export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquit
   }
   dayState.positions = [];
 
-  return { trades: closedTrades, equityCurve, dayState, barsEvaluated, skippedWarmup, symbols: testSymbols };
+  return { trades: closedTrades, equityCurve, dayState, barsEvaluated, skippedWarmup, symbols: testSymbols, quantDiag };
 }
 
 // Summary stats block for the results header — kept separate from
