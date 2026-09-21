@@ -27,6 +27,7 @@ const ICONS = {
   diamond:  '<path d="M12 3 21 12 12 21 3 12z"/>',
   refresh:  '<path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>',
   download: '<path d="M12 3v12m0 0-4-4m4 4 4-4M5 21h14"/>',
+  wrench:   '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
   more:     '<circle cx="12" cy="5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="19" r="1.4"/>',
 };
 const icon = (name) => `<svg class="m-ic" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
@@ -138,6 +139,7 @@ function buildAppBar() {
     '<div class="m-sheet-actions">' +
       `<button type="button" class="primary" id="mInstallBtn" data-m-install hidden>${icon('download').replace('class="m-ic"', 'class="m-ic" style="width:18px;height:18px"')}Install app</button>` +
       '<p class="m-sheet-note" id="mInstallHint" hidden></p>' +
+      `<button type="button" class="primary ghost" id="mToolsBtn">${icon('wrench').replace('class="m-ic"', 'class="m-ic" style="width:18px;height:18px"')}Utilities &amp; Tools</button>` +
       '<button type="button" class="primary ghost" id="mReloadBtn">Reload app</button>' +
       '<button type="button" class="primary ghost" id="mCloseBtn">Close</button>' +
     '</div>';
@@ -160,6 +162,7 @@ function buildAppBar() {
   overlay.addEventListener('click', close);
   $('#mCloseBtn').addEventListener('click', close);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+  $('#mToolsBtn').addEventListener('click', () => { if (confirmLeave()) location.href = '/utilities-tools/'; });
   $('#mReloadBtn').addEventListener('click', () => { if (confirmLeave()) location.reload(); });
   window.__mCloseSheet = close;
 }
@@ -203,17 +206,14 @@ document.addEventListener('click', (e) => {
   if (real) real.click();
 });
 
-// ---------- Trade page deep links: #auto  #futures  #bots ----------
+// ---------- Trade page deep links: #auto  #futures ----------
+// (Utilities & Tools sub-tabs — #paper-trading, #backtesting, #trading-bots — are routed by ui.js.)
 function routeHash() {
   const h = location.hash.replace('#', '');
   if (!h) return;
   const click = (id) => { const b = document.getElementById(id); if (b) b.click(); };
   if (h === 'auto') click('tabAutoBtn');
-  if (h === 'futures' || h === 'bots') click('tabFuturesBtn');
-  if (h === 'bots') {
-    const d = document.getElementById('fuTradingBotsDetails');
-    if (d) { d.open = true; setTimeout(() => d.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60); }
-  }
+  if (h === 'futures') click('tabFuturesBtn');
 }
 window.addEventListener('hashchange', routeHash);
 // app.js wires the sub-tab buttons in its own module; wait a tick so its listeners exist.

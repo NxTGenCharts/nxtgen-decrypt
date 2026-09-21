@@ -4,8 +4,8 @@
    here so this stays in sync with the rest of the terminal's theme.
    ============================================================= */
 
-#panelFutures .fu-row,
-#panelFutures .fu-hrow {
+:is(#panelFutures, #panelUtilities) .fu-row,
+:is(#panelFutures, #panelUtilities) .fu-hrow {
   display: grid;
   align-items: center;
   gap: 6px;
@@ -14,16 +14,16 @@
   border-bottom: 1px solid var(--line);
 }
 
-#panelFutures .fu-row {
+:is(#panelFutures, #panelUtilities) .fu-row {
   grid-template-columns: 1fr 0.7fr 0.6fr 1.3fr 0.6fr 0.9fr 0.9fr 0.9fr 0.9fr 0.9fr 0.6fr 0.6fr 1fr 1fr;
 }
 
-#panelFutures .fu-hrow {
+:is(#panelFutures, #panelUtilities) .fu-hrow {
   grid-template-columns: 0.9fr 0.7fr 0.9fr 0.6fr 0.9fr 0.9fr 0.5fr 0.9fr 0.8fr 0.9fr 0.6fr 1.2fr 1fr 0.7fr;
 }
 
-#panelFutures .fu-row.fu-head,
-#panelFutures .fu-hrow.fu-head {
+:is(#panelFutures, #panelUtilities) .fu-row.fu-head,
+:is(#panelFutures, #panelUtilities) .fu-hrow.fu-head {
   font-weight: 600;
   color: var(--dim);
   text-transform: uppercase;
@@ -33,29 +33,29 @@
   cursor: default;
 }
 
-#panelFutures .fu-row:not(.fu-head) {
+:is(#panelFutures, #panelUtilities) .fu-row:not(.fu-head) {
   cursor: pointer;
   transition: background 0.12s ease;
 }
-#panelFutures .fu-row:not(.fu-head):hover {
+:is(#panelFutures, #panelUtilities) .fu-row:not(.fu-head):hover {
   background: rgba(255,255,255,0.03);
 }
 
-#panelFutures .fu-row.fu-approved .fu-status-cell { color: var(--green); font-weight: 600; }
-#panelFutures .fu-row.fu-rejected .fu-status-cell { color: var(--dim); }
-#panelFutures .fu-row.fu-rejected { opacity: 0.7; }
+:is(#panelFutures, #panelUtilities) .fu-row.fu-approved .fu-status-cell { color: var(--green); font-weight: 600; }
+:is(#panelFutures, #panelUtilities) .fu-row.fu-rejected .fu-status-cell { color: var(--dim); }
+:is(#panelFutures, #panelUtilities) .fu-row.fu-rejected { opacity: 0.7; }
 
-#panelFutures .fu-hrow.fu-win { border-left: 2px solid var(--green); }
-#panelFutures .fu-hrow.fu-loss { border-left: 2px solid var(--red); }
+:is(#panelFutures, #panelUtilities) .fu-hrow.fu-win { border-left: 2px solid var(--green); }
+:is(#panelFutures, #panelUtilities) .fu-hrow.fu-loss { border-left: 2px solid var(--red); }
 
-#panelFutures .fu-empty {
+:is(#panelFutures, #panelUtilities) .fu-empty {
   padding: 18px 10px;
   color: var(--dim);
   font-size: 13px;
   text-align: center;
 }
 
-#panelFutures .fu-explain {
+:is(#panelFutures, #panelUtilities) .fu-explain {
   white-space: pre-wrap;
   font-family: inherit;
   font-size: 12px;
@@ -86,12 +86,12 @@
   /* prevents the scroll container itself from ever pushing the page wider */
   max-width:100%;
 }
-#panelFutures .table-scroll .fu-row,
-#panelFutures .table-scroll .fu-hrow{
+:is(#panelFutures, #panelUtilities) .table-scroll .fu-row,
+:is(#panelFutures, #panelUtilities) .table-scroll .fu-hrow{
   min-width:760px; /* below this the fr-based columns become unreadable; scroll instead */
 }
-#panelFutures .table-scroll .fu-row.fu-head,
-#panelFutures .table-scroll .fu-hrow.fu-head{
+:is(#panelFutures, #panelUtilities) .table-scroll .fu-row.fu-head,
+:is(#panelFutures, #panelUtilities) .table-scroll .fu-hrow.fu-head{
   position:sticky; top:0; z-index:1; background:var(--bg);
 }
 
@@ -99,22 +99,22 @@
    Connect Exchanges rows: exchange label + Live/Demo toggle — but here
    the row itself is also the "which exchange is active" selector, since
    only one exchange trades Live/Demo at a time in this app). */
-#panelFutures .fu-live-exch-rows{ display:flex; flex-direction:column; gap:8px; margin:14px 0; }
-#panelFutures .fu-live-exch-row{
+:is(#panelFutures, #panelUtilities) .fu-live-exch-rows{ display:flex; flex-direction:column; gap:8px; margin:14px 0; }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-row{
   display:grid; grid-template-columns:24px 150px auto 1fr; gap:14px; align-items:center;
   padding:12px 16px; border:1px solid var(--line); border-radius:var(--r-lg);
   background:var(--panel2); cursor:pointer;
 }
-#panelFutures .fu-live-exch-row:hover{ border-color:var(--amber-dim); }
-#panelFutures .fu-live-exch-row.selected{ border-color:var(--amber); background:rgba(240,180,41,.06); }
-#panelFutures .fu-live-exch-radio{
+:is(#panelFutures, #panelUtilities) .fu-live-exch-row:hover{ border-color:var(--amber-dim); }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-row.selected{ border-color:var(--amber); background:rgba(240,180,41,.06); }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-radio{
   width:16px; height:16px; border-radius:50%; border:2px solid var(--line); flex:none;
 }
-#panelFutures .fu-live-exch-row.selected .fu-live-exch-radio{
+:is(#panelFutures, #panelUtilities) .fu-live-exch-row.selected .fu-live-exch-radio{
   border-color:var(--amber); background:radial-gradient(circle, var(--amber) 0 40%, transparent 44%);
 }
-#panelFutures .fu-live-exch-label{ font-weight:600; color:var(--ink); }
-#panelFutures .fu-live-exch-note{ font-size:11px; color:var(--dim); }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-label{ font-weight:600; color:var(--ink); }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-note{ font-size:11px; color:var(--dim); }
 
 @media (max-width:640px){
   /* Desktop markup order is: radio, label, mode-toggle (Live/Demo buttons),
@@ -122,7 +122,7 @@
      label column alone is nearly half an iPhone SE's viewport, so below
      640px collapse to: radio + label + mode-toggle on row one, the
      verified-status note wrapping full-width beneath. */
-  #panelFutures .fu-live-exch-row{
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-row{
     grid-template-columns:24px 1fr auto;
     grid-template-areas:
       "radio label mode"
@@ -130,10 +130,10 @@
     row-gap:6px;
     padding:12px 14px;
   }
-  #panelFutures .fu-live-exch-radio{ grid-area:radio; }
-  #panelFutures .fu-live-exch-label{ grid-area:label; }
-  #panelFutures .fu-live-exch-row > :nth-child(3){ grid-area:mode; }
-  #panelFutures .fu-live-exch-note{ grid-area:note; text-align:left !important; white-space:normal; }
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-radio{ grid-area:radio; }
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-label{ grid-area:label; }
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-row > :nth-child(3){ grid-area:mode; }
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-note{ grid-area:note; text-align:left !important; white-space:normal; }
 }
 
 /* -------------------- Trading Bots — cards + Details view -------------------- */
@@ -245,5 +245,5 @@
 @media (prefers-reduced-motion: reduce){ .switch-track, .switch-thumb{ transition:none; } }
 
 /* Check / cross icons in the approve-reject explanation (see explanationHtml in futures-ui.js). */
-#panelFutures .fu-explain .ex-ok{ color:var(--green); }
-#panelFutures .fu-explain .ex-no{ color:var(--red); }
+:is(#panelFutures, #panelUtilities) .fu-explain .ex-ok{ color:var(--green); }
+:is(#panelFutures, #panelUtilities) .fu-explain .ex-no{ color:var(--red); }

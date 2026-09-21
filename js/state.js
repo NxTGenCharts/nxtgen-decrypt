@@ -127,6 +127,13 @@ export const els = {
   // --- AI Futures Engine tab ---
   tabFuturesBtn: document.getElementById('tabFuturesBtn'),
   panelFutures: document.getElementById('panelFutures'),
+  // --- Utilities & Tools page sub-tabs ---
+  tabPaperBtn: document.getElementById('tabPaperBtn'),
+  tabBacktestBtn: document.getElementById('tabBacktestBtn'),
+  tabBotsBtn: document.getElementById('tabBotsBtn'),
+  panelPaper: document.getElementById('panelPaper'),
+  panelBacktest: document.getElementById('panelBacktest'),
+  panelBots: document.getElementById('panelBots'),
   fuStatus: document.getElementById('fuStatus'),
   fuModeBtn: document.getElementById('fuModeBtn'),
   fuSelectivityToggle: document.getElementById('fuSelectivityToggle'),

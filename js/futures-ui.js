@@ -182,6 +182,13 @@ function paperScanSymbols(f){
 
 function fu(){ return state.futures; }
 
+// This module runs on more than one page. Paper controls live on Utilities &
+// Tools; Live/Demo controls live on AI Futures Engine. Panels shared by both
+// pages (Strategies / NxTGen Grid) render only the half that belongs to the
+// page they're on, so no page shows controls that can't work there.
+function hasLiveControls(){ return !!els.fuLiveExchRows; }
+function hasPaperControls(){ return !!els.fuModeBtn; }
+
 function ensureDayState(){
   if(fu().dayState) return fu().dayState;
   const startingEquity = readStartingBalance();
@@ -1697,8 +1704,8 @@ function renderGridPanel(){
         <div>
           <strong>${GRID_STRATEGY.label}</strong>
           <span style="font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:6px;">Paper + Live/Demo (Bybit/Binance) supported</span>
-          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Turn it on above in the Strategies list to run it against the synthetic feed, check it as the 7th strategy in Backtest for real-historical-data testing, or arm Live/Demo below to scan the watchlist on Bybit or Binance and deploy on whichever symbol presents a valid grid. <strong>Live/Demo is untested against real exchanges — start in Demo and watch it closely before ever arming Live.</strong></div>
-          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">Deployment size per symbol uses the same <strong>Risk per trade (${f.riskPctPerTrade}%)</strong> control as the six single-entry strategies above (Paper Engine section) — e.g. ${f.riskPctPerTrade}% of a $10,000 balance commits $${(10000 * f.riskPctPerTrade / 100).toLocaleString('en-US')} to a grid deployment, not a separate Grid-only allocation setting. Leverage is capped at ${Math.min(cfg.maxLeverage, 5)}x (your Maximum Leverage setting below, hard-ceilinged at 5x) and a deployment stops opening new grids for the day once your Daily Profit Target below is hit.</div>
+          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Turn it on above in the Strategies list to run it against the synthetic feed, check it as the 7th strategy in Backtesting (Utilities &amp; Tools) for real-historical-data testing, or arm Live/Demo below to scan the watchlist on Bybit or Binance and deploy on whichever symbol presents a valid grid. <strong>Live/Demo is untested against real exchanges — start in Demo and watch it closely before ever arming Live.</strong></div>
+          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">Deployment size per symbol uses the same <strong>Risk per trade (${f.riskPctPerTrade}%)</strong> control as the six single-entry strategies (the Risk per trade field on this page) — e.g. ${f.riskPctPerTrade}% of a $10,000 balance commits $${(10000 * f.riskPctPerTrade / 100).toLocaleString('en-US')} to a grid deployment, not a separate Grid-only allocation setting. Leverage is capped at ${Math.min(cfg.maxLeverage, 5)}x (your Maximum Leverage setting below, hard-ceilinged at 5x) and a deployment stops opening new grids for the day once your Daily Profit Target below is hit.</div>
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:12px;">
@@ -1723,6 +1730,7 @@ function renderGridPanel(){
       </div>
       <div id="fuGridDashboard" style="margin-top:14px;"></div>
 
+      ${hasLiveControls() ? `
       <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line);">
         <strong style="font-size:12.5px;">Live / Demo (Bybit or Binance)</strong>
         <div style="font-size:11.5px;color:var(--dim);margin:4px 0 8px;">
@@ -1752,6 +1760,8 @@ function renderGridPanel(){
         </div>
         <div id="fuGridLiveStatus" style="font-size:11.5px;color:var(--dim);margin-top:8px;"></div>
       </div>
+      ` : `
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim);">Grid Live/Demo is armed from <a href="/autotrade-futures/#ai-futures-engine">AI Futures Engine</a>.</div>`}
     </div>
   `;
   renderGridDashboard();
@@ -1807,6 +1817,7 @@ function renderGridDashboard(){
     `;
   }
 
+  if(!hasPaperControls()){ host.innerHTML = liveBlock; return; } // Paper dashboard belongs to the Utilities & Tools page
   if(!cfg.enabled){
     host.innerHTML = liveBlock + `<div style="font-size:12px;color:var(--dim);padding:8px 0;">Grid Paper trading is OFF. Turn on "${GRID_STRATEGY.label}" above in the Strategies list to start it — it runs alongside the six-strategy Paper engine, not instead of it.</div>`;
     return;
@@ -2595,7 +2606,13 @@ function renderTradingBotsCreate(){
             ${GRID_LIVE_EXCHANGES.map(x => `<option value="${x}" ${exchange === x ? 'selected' : ''}>${EXCHANGE_DISPLAY_NAMES[x] || x}</option>`).join('')}
           </select>
         </label>
-        <div style="font-size:11px;color:var(--dim);align-self:flex-end;padding-bottom:6px;">${mode === 'demo' ? 'Demo' : 'Live'} network (set per-exchange in the Live/Demo controls above)</div>
+        <div style="align-self:flex-end;" title="${f.tbAutoScanEnabled ? 'Stop Auto-Scan to change the network' : 'Network used for new bots on this exchange. Live places real orders.'}">
+          <div style="font-size:11px;color:var(--dim);margin-bottom:3px;">Network</div>
+          <div class="mode-toggle" role="group" aria-label="${exchange} network">
+            <button type="button" class="mode-btn tb-mode-btn ${mode === 'live' ? 'active' : ''}" data-mode="live" ${f.tbAutoScanEnabled ? 'disabled' : ''}>Live</button>
+            <button type="button" class="mode-btn tb-mode-btn ${mode === 'demo' ? 'active' : ''}" data-mode="demo" ${f.tbAutoScanEnabled ? 'disabled' : ''}>Demo</button>
+          </div>
+        </div>
         ${isAutoScan ? '' : `
         <label style="font-size:11px;color:var(--dim);">Symbol
           <input id="tbSymbol" type="text" placeholder="e.g. AVAXUSDT" value="${f.tbCreateSymbol || ''}" style="display:block;margin-top:3px;min-width:130px;text-transform:uppercase;">
@@ -2857,6 +2874,15 @@ function initTradingBots(){
       }
     });
     els.fuTradingBotsCreate.addEventListener('click', async (e) => {
+      if(e.target.classList.contains('tb-mode-btn')){
+        // Trading Bots have their own Live/Demo switch — the Live/Demo exchange rows are on a different page.
+        const f = fu();
+        if(f.tbAutoScanEnabled) return; // the running scan keeps the network it started on
+        readTradingBotFormNumbers();
+        f.liveModeByExchange[f.tbCreateExchange || 'bybit'] = e.target.dataset.mode === 'demo' ? 'demo' : 'live';
+        renderTradingBotsCreate();
+        return;
+      }
       if(e.target.classList.contains('tb-grid-mode')){
         readTradingBotFormNumbers(); fu().tbGridForm.autoScan = e.target.dataset.mode === 'auto'; renderTradingBotTypeFields(); renderTradingBotsCreate(); return;
       }

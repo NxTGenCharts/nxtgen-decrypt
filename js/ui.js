@@ -93,34 +93,62 @@ export function switchTabAll(which){
   });
 }
 
-// Sub-tab switch WITHIN the combined Autotrade & Futures panel — same
-// active-class-toggle pattern as switchTabAll above, just scoped to the
-// two sub-panels nested inside panelTrading instead of the top-level nav.
+// Sub-tab switching WITHIN a page. Two pages have sub-tabs: Autotrade &
+// Futures (auto / futures) and Utilities & Tools (paper / backtest / bots).
+// Each group is described once below; everything else is generic.
 //
 // The active sub-tab lives in the URL hash so it can be linked to, survives a
-// reload, and works with the browser's Back/Forward buttons:
+// reload, and works with the browser's Back/Forward buttons, e.g.
 //   /autotrade-futures/#autotrade-balances   (also the default with no hash)
 //   /autotrade-futures/#ai-futures-engine
-// The old short links (#auto, #futures, #bots) keep working as aliases.
-const SUBTAB_KEYS = ['auto', 'futures'];
-const SUBTAB_BTN_ELS = { auto: 'tabAutoBtn', futures: 'tabFuturesBtn' };
-const SUBTAB_PANEL_ELS = { auto: 'panelAuto', futures: 'panelFutures' };
-const SUBTAB_SLUGS = { auto: 'autotrade-balances', futures: 'ai-futures-engine' };
-const SUBTAB_ALIASES = {
-  'autotrade-balances': 'auto', 'auto': 'auto',
-  'ai-futures-engine': 'futures', 'futures': 'futures', 'bots': 'futures',
-};
+//   /utilities-tools/#paper-trading          (also the default with no hash)
+//   /utilities-tools/#backtesting
+//   /utilities-tools/#trading-bots
+// Old short links (#auto, #futures, #bots) keep working as aliases where the
+// tab still lives on that page. (#bots on the Futures page is redirected to
+// Utilities & Tools by an inline script in that page.)
+const SUBTAB_GROUPS = [
+  {
+    defaultKey: 'auto',
+    btn: { auto: 'tabAutoBtn', futures: 'tabFuturesBtn' },
+    panel: { auto: 'panelAuto', futures: 'panelFutures' },
+    slug: { auto: 'autotrade-balances', futures: 'ai-futures-engine' },
+    alias: { 'autotrade-balances': 'auto', 'auto': 'auto', 'ai-futures-engine': 'futures', 'futures': 'futures' },
+  },
+  {
+    defaultKey: 'paper',
+    btn: { paper: 'tabPaperBtn', backtest: 'tabBacktestBtn', bots: 'tabBotsBtn' },
+    panel: { paper: 'panelPaper', backtest: 'panelBacktest', bots: 'panelBots' },
+    slug: { paper: 'paper-trading', backtest: 'backtesting', bots: 'trading-bots' },
+    alias: {
+      'paper-trading': 'paper', 'paper': 'paper',
+      'backtesting': 'backtest', 'backtest': 'backtest',
+      'trading-bots': 'bots', 'bots': 'bots',
+    },
+  },
+];
 
-// Which sub-tab a URL hash points at, or null if it isn't one of ours.
+// The group whose tab buttons are on this page, or null.
+function activeSubTabGroup(){
+  return SUBTAB_GROUPS.find(g => Object.values(g.btn).every(id => els[id])) || null;
+}
+
+function hashOf(hash){
+  return String(hash === undefined ? location.hash : hash).replace(/^#/, '').toLowerCase();
+}
+
+// Which sub-tab a URL hash points at on this page, or null if it isn't one of ours.
 export function subTabFromHash(hash){
-  const h = String(hash === undefined ? location.hash : hash).replace(/^#/, '').toLowerCase();
-  return SUBTAB_ALIASES[h] || null;
+  const g = activeSubTabGroup();
+  return g ? (g.alias[hashOf(hash)] || null) : null;
 }
 
 export function switchSubTab(which, opts){
-  SUBTAB_KEYS.forEach(key => {
-    const btn = els[SUBTAB_BTN_ELS[key]];
-    const panel = els[SUBTAB_PANEL_ELS[key]];
+  const g = activeSubTabGroup();
+  if(!g) return;
+  Object.keys(g.btn).forEach(key => {
+    const btn = els[g.btn[key]];
+    const panel = els[g.panel[key]];
     if(!btn || !panel) return;
     const active = which === key;
     btn.classList.toggle('active', active);
@@ -129,16 +157,16 @@ export function switchSubTab(which, opts){
   });
   // Only write to the URL when the person actually clicked a tab, and only if
   // it doesn't already point here (an alias like #bots is left as it is).
-  if(opts && opts.updateUrl && SUBTAB_SLUGS[which] && subTabFromHash() !== which){
-    history.pushState(null, '', location.pathname + location.search + '#' + SUBTAB_SLUGS[which]);
+  if(opts && opts.updateUrl && g.slug[which] && subTabFromHash() !== which){
+    history.pushState(null, '', location.pathname + location.search + '#' + g.slug[which]);
   }
 }
 
 export function initSubTabRouting(){
-  if(!els.tabAutoBtn || !els.tabFuturesBtn) return; // other pages don't have the sub-tabs
-  const buttons = { auto: els.tabAutoBtn, futures: els.tabFuturesBtn };
-  Object.keys(buttons).forEach(which => {
-    buttons[which].addEventListener('click', (e) => {
+  const g = activeSubTabGroup();
+  if(!g) return; // other pages don't have sub-tabs
+  Object.keys(g.btn).forEach(which => {
+    els[g.btn[which]].addEventListener('click', (e) => {
       // Let ctrl/cmd/shift/middle-click do their normal "open in new tab/window" thing.
       if(e.button || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
       e.preventDefault(); // we set the hash ourselves so the page doesn't jump
@@ -148,7 +176,7 @@ export function initSubTabRouting(){
   // Back/Forward, or someone editing the hash by hand. No hash at all means the
   // default tab; a hash that isn't ours (e.g. some future in-page anchor) is ignored.
   const syncFromUrl = () => {
-    const which = subTabFromHash() || (location.hash ? null : 'auto');
+    const which = subTabFromHash() || (location.hash ? null : g.defaultKey);
     if(which) switchSubTab(which);
   };
   window.addEventListener('hashchange', syncFromUrl);
