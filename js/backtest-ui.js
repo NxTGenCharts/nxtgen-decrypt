@@ -19,6 +19,8 @@ import { GRID_STRATEGY, GRID_DEFAULTS, runGridBacktest, summarizeGridTrades } fr
 import { QUANT_ID, QUANT_TYPE, MIN_SAMPLE_TRADES } from './futures/quant/config.js';
 import { getQuantCfg, setQuantBacktestResult, renderQuantBacktestSection } from './quant-ui.js';
 import { runWalkForward } from './futures/quant/validation.js';
+import { sweepConfigs, analyzeSweep } from './futures/quant/sweep.js';
+import { runSweepInWorkers } from './futures/quant/sweep-runner.js';
 
 let lastResult = null; // kept for CSV/XLS/PDF export after a run
 
@@ -149,6 +151,15 @@ async function fetchSymbolKlines(exchange, symbol, interval, startMs, endMs){
 // server.js's resolveSnapshotTimeframe). btTimeframe used to be a real
 // dropdown (3m/5m/15m/30m/1h); it's now fixed and disabled in the markup.
 const TIMEFRAME_MINUTES = { '5m': 5 };
+
+// Every registered strategy explicitly OFF except Quant. A partial map ({ quant: true } alone) lets every OTHER
+// strategy fall back to its own defaultEnabled, which would trade alongside Quant and share its position/risk limits.
+function quantOnlyStrategies(){
+  const m = {};
+  for(const st of STRATEGY_REGISTRY) m[st.id] = false;
+  m[QUANT_ID] = true;
+  return m;
+}
 
 async function runBacktestFlow(){
   const range = computeRangeMs();
@@ -323,9 +334,21 @@ async function runBacktestFlow(){
           runFn: ({ candlesBySymbol: slice, cfgOverrides }) => runBacktest({
             candlesBySymbol: slice, symbols: usableSymbols, startingEquity, intervalMinutes, maxDailyLossPct, dailyProfitTargetPct,
             metaOverrides: { spreadPct, fundingRatePct },
-            cfg: { ...cfg, strategies: { [QUANT_ID]: true }, quant: { ...quantCfgForRun, ...cfgOverrides } },
+            cfg: { ...cfg, strategies: quantOnlyStrategies(), quant: { ...quantCfgForRun, ...cfgOverrides } },
           }),
         }),
+        onSweep: async (onProgress) => {
+          // Same candles as this run, Quant only, ~22 settings on background workers; TRAIN = first ~2/3 of the period.
+          const candles = {};
+          for(const sym of [...usableSymbols, 'BTCUSDT']) if(candlesBySymbol[sym] && candlesBySymbol[sym].length) candles[sym] = candlesBySymbol[sym];
+          const settings = { exchange, riskPct: riskPctPerTrade, leverage, makerPct, takerPct, spreadPct, fundingRatePct, startingEquity, maxDailyLossPct, dailyProfitTargetPct, minConfidence };
+          const configs = sweepConfigs('quick', false);
+          const { results, errors } = await runSweepInWorkers({ candles, symbols: usableSymbols, settings, configs, onProgress });
+          const firsts = usableSymbols.map(s => candlesBySymbol[s][0].t), lasts = usableSymbols.map(s => candlesBySymbol[s][candlesBySymbol[s].length - 1].t);
+          const t0 = Math.min(...firsts), t1 = Math.max(...lasts);
+          const cut = t0 + (t1 - t0) * 0.67;
+          return { analysis: analyzeSweep(results, cut, 15), errors, cut, days: (t1 - t0) / 86_400_000, symbols: usableSymbols.length };
+        },
       });
       if(quantHost) quantHost.style.display = '';
     } else if(quantHost){ quantHost.style.display = 'none'; }

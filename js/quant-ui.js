@@ -131,7 +131,7 @@ function diagnosticsHtml(diag, tradeCount, open){
   </details>`;
 }
 
-export function renderQuantBacktestSection(container, { trades, startingEquity, onWalkForward, diag }){
+export function renderQuantBacktestSection(container, { trades, startingEquity, onWalkForward, onSweep, diag }){
   if(!container) return;
   const qt = fromBacktest(trades);
   if(!qt.length){
@@ -171,6 +171,11 @@ export function renderQuantBacktestSection(container, { trades, startingEquity, 
       <span id="qfWfStatus" style="font-size:11.5px;color:var(--dim);">4 folds × 9-cell grid (min confidence 70/75/80 × RR 1.3/1.5/1.7). Re-runs the backtest many times — can take a while.</span>
     </div>
     <div id="qfWfResult" style="margin-top:10px;"></div>
+    <div style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+      <button type="button" id="qfSweepBtn" class="primary ghost" style="font-size:12px;padding:6px 14px;">Run settings sweep</button>
+      <span id="qfSweepStatus" style="font-size:11.5px;color:var(--dim);">Tries ~22 settings on THIS run's candles (Quant only), ranks them on the first ~2/3 of the period and checks them on the last ~1/3. Best with a 60–90 day range. Keep this tab open and in front — a few minutes.</span>
+    </div>
+    <div id="qfSweepResult" style="margin-top:10px;"></div>
     ${diagnosticsHtml(diag, qt.length, false)}
   `;
   const btn = container.querySelector('#qfWfBtn');
@@ -188,6 +193,69 @@ export function renderQuantBacktestSection(container, { trades, startingEquity, 
       btn.disabled = false;
     });
   }
+
+  const sbtn = container.querySelector('#qfSweepBtn');
+  if(sbtn && onSweep){
+    sbtn.addEventListener('click', async () => {
+      sbtn.disabled = true;
+      const status = container.querySelector('#qfSweepStatus');
+      const t0 = Date.now();
+      try{
+        const out = await onSweep((p, d, n) => {
+          const el = (Date.now() - t0) / 1000, eta = p > 0.02 ? el / p - el : null;
+          if(status) status.textContent = `Sweep… ${d}/${n} settings tested${eta != null ? ` · about ${Math.max(1, Math.round(eta / 60))} min left` : ''}`;
+        });
+        if(status) status.textContent = `Done in ${Math.round((Date.now() - t0) / 1000)}s.`;
+        renderSweep(container.querySelector('#qfSweepResult'), out);
+      }catch(err){
+        if(status) status.textContent = `Sweep failed: ${err.message}`;
+      }
+      sbtn.disabled = false;
+    });
+  }
+}
+
+const sPct = x => (x == null || !Number.isFinite(x)) ? '—' : (x * 100).toFixed(0) + '%';
+const sR = x => (x == null || !Number.isFinite(x)) ? '—' : (x >= 0 ? '+' : '') + x.toFixed(2) + 'R';
+const sUsd = x => (x == null || !Number.isFinite(x)) ? '—' : (x >= 0 ? '+$' : '-$') + Math.abs(x).toFixed(0);
+function sweepCellText(c){ return c.n ? `${c.n} trades, win ${sPct(c.wr)}±${(c.ci * 100).toFixed(0)}, ${sR(c.avgR)}, ${sUsd(c.net)}` : '0 trades'; }
+
+// out: { analysis: { ranked, robust, baseline }, errors, days, cut, workers, symbols }
+function renderSweep(el, out){
+  if(!el) return;
+  const { ranked, robust, baseline } = out.analysis;
+  const cutDay = new Date(out.cut).toISOString().slice(0, 10);
+  const cell = (c, bold) => c.n
+    ? `<td style="padding:3px 8px;text-align:right;">${c.n}</td><td style="padding:3px 8px;text-align:right;">${sPct(c.wr)}<span style="color:var(--dim);">±${(c.ci * 100).toFixed(0)}</span></td><td style="padding:3px 8px;text-align:right;${bold && c.avgR != null ? `color:var(--${c.avgR > 0 ? 'green' : 'red'});` : ''}">${sR(c.avgR)}</td><td style="padding:3px 8px;text-align:right;">${sUsd(c.net)}</td>`
+    : `<td colspan="4" style="padding:3px 8px;text-align:right;color:var(--dim);">0 trades</td>`;
+  const robustNames = new Set(robust.map(r => r.name));
+  const rows = ranked.map(r => `<tr style="border-top:1px solid var(--line);${robustNames.has(r.name) ? 'background:rgba(0,200,120,.07);' : ''}">
+      <td style="padding:3px 8px;">${r.name}</td>${cell(r.train, false)}<td style="border-left:1px solid var(--line);"></td>${cell(r.test, true)}</tr>`).join('');
+  const short = out.days < 45 ? `<div style="color:var(--amber);margin-bottom:6px;">${icon('triangle-alert')} This run only covers ~${out.days.toFixed(0)} days — too little for a sweep to mean much. Re-run the backtest with Last 90 days first.</div>` : '';
+  const verdict = robust.length
+    ? `<b>${robust.length}</b> setting-set${robust.length > 1 ? 's were' : ' was'} profitable on BOTH the ranking period and the untouched test period (≥ 10 test trades) — highlighted. That is a shortlist, not proof: re-run on a later period before changing anything live.`
+    : `<b>No setting-set was profitable on both the ranking period and the untouched test period</b> (with enough trades). On this data no tested variant showed a reliable edge — that is a real result, not a failure of the tool.`;
+  const lines = [
+    `NxTGen Quant settings sweep — ${out.days.toFixed(0)} days, ${out.symbols} symbols, TRAIN before ${cutDay} / TEST from ${cutDay}`,
+    ...ranked.map(r => `${r.name} | TRAIN ${sweepCellText(r.train)} | TEST ${sweepCellText(r.test)} | ${JSON.stringify(r.over)}`),
+    baseline ? `Baseline overall: ${sweepCellText(baseline.all)}, break-even win rate ~${sPct(baseline.all.beWr)}` : '',
+    robust.length ? `Robust: ${robust.map(r => r.name).join('; ')}` : 'Robust: none',
+  ].filter(Boolean).join('\n');
+  el.innerHTML = `
+    ${short}
+    <div style="font-size:12px;line-height:1.6;margin-bottom:6px;">${verdict}</div>
+    <div style="overflow-x:auto;"><table style="width:100%;font-size:11.5px;border-collapse:collapse;">
+      <tr><th style="text-align:left;padding:3px 8px;color:var(--dim);">Settings</th><th colspan="4" style="padding:3px 8px;">TRAIN (before ${cutDay})</th><th></th><th colspan="4" style="padding:3px 8px;">TEST (from ${cutDay}, never used to rank)</th></tr>
+      <tr style="color:var(--dim);"><th></th><th style="text-align:right;padding:3px 8px;">Trades</th><th style="text-align:right;padding:3px 8px;">Win ±95%</th><th style="text-align:right;padding:3px 8px;">Avg R</th><th style="text-align:right;padding:3px 8px;">Net</th><th></th><th style="text-align:right;padding:3px 8px;">Trades</th><th style="text-align:right;padding:3px 8px;">Win ±95%</th><th style="text-align:right;padding:3px 8px;">Avg R</th><th style="text-align:right;padding:3px 8px;">Net</th></tr>
+      ${rows}</table></div>
+    <div style="margin-top:8px;font-size:11px;color:var(--dim);line-height:1.5;">Avg R = average result per trade in units of risk, after fees/slippage — that (not win rate) is what has to be positive. ±95% is the uncertainty on the win rate from the trade count. With ~22 settings tried on the same data the top row is partly luck; fewer than ~30 trades in a column is anecdote. Sorted by TRAIN Avg R (min 15 trades).${out.errors && out.errors.length ? `<br><span style="color:var(--amber);">${out.errors.length} setting-set(s) failed and were skipped.</span>` : ''}</div>
+    <div style="margin-top:8px;"><button type="button" id="qfSweepCopy" class="primary ghost" style="font-size:12px;padding:5px 12px;">Copy results as text</button> <span id="qfSweepCopyMsg" style="font-size:11.5px;color:var(--dim);"></span></div>`;
+  const cb = el.querySelector('#qfSweepCopy');
+  if(cb) cb.addEventListener('click', async () => {
+    const msg = el.querySelector('#qfSweepCopyMsg');
+    try{ await navigator.clipboard.writeText(lines); if(msg) msg.textContent = 'Copied — paste it into the chat.'; }
+    catch(e){ if(msg) msg.textContent = 'Could not copy automatically.'; window.prompt('Copy the results:', lines); }
+  });
 }
 
 function renderWalkForward(el, wf, startingEquity){

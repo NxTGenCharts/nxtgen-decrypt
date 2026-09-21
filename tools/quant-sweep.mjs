@@ -25,6 +25,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { rankTopByVolume } from '../js/futures/watchlist.js';
+import { sweepConfigs, sweepStats, analyzeSweep } from '../js/futures/quant/sweep.js';
 
 const __dir = path.dirname(fileURLToPath(import.meta.url));
 const CACHE = path.join(__dir, '.cache');
@@ -37,7 +38,7 @@ const A = {
   days: +flag('days', 90), exchange: String(flag('exchange', 'binance')), top: +flag('top', 25),
   proxy: String(flag('proxy', 'https://nxtgen-decrypt-2.onrender.com')).replace(/\/$/, ''),
   symbols: flag('symbols', null), split: +flag('split', 0.67), jobs: +flag('jobs', Math.max(1, Math.min(8, os.cpus().length - 1))),
-  grid: String(flag('grid', 'quick')), synthetic: !!flag('synthetic', false), refresh: !!flag('refresh', false),
+  grid: String(flag('grid', 'quick')), slow: !!flag('slow', false), synthetic: !!flag('synthetic', false), refresh: !!flag('refresh', false),
   risk: +flag('risk', 1), lev: +flag('lev', 5), maker: +flag('maker', 0.02), taker: +flag('taker', 0.05), spread: +flag('spread', 0.04),
   minTrain: +flag('min-train', 15),
 };
@@ -117,53 +118,7 @@ async function buildDataset(){
   return { dsPath, symbols, t0: Math.min(...allT), t1: Math.max(...allT), settings };
 }
 
-// ---------------- configs ----------------
-const BASE_OLD = { entryTimeframe: '15m', selectivity: 'off', minConfidence: 70, rewardRisk: 1.5, maxCostR: 1, minStopAtr: 1.2, trendFilter: 'any', setups: { A: true, B: false, C: false, D: false } };
-function configs(){
-  const B = (over) => ({ ...BASE_OLD, maxCostR: 0.18, ...over });   // "B" = new shipped default + overrides
-  const list = [
-    ['BASELINE (before the fix: no cost filter)', { ...BASE_OLD }],
-    ['new default (cost filter 0.18R)', B({})],
-  ];
-  if(A.grid === 'full'){
-    for(const selectivity of ['off', 'high']) for(const trendFilter of ['any', 'strong']) for(const maxCostR of [0.12, 0.18, 0.25, 1])
-      for(const rewardRisk of [1.3, 1.5, 2]) for(const minStopAtr of [1.2, 1.6])
-        list.push([`sel=${selectivity} trend=${trendFilter} cost<=${maxCostR} RR=${rewardRisk} stop>=${minStopAtr}ATR`, { ...BASE_OLD, selectivity, trendFilter, maxCostR, rewardRisk, minStopAtr }]);
-    return list;
-  }
-  list.push(
-    ['cost<=0.12R', B({ maxCostR: 0.12 })], ['cost<=0.25R', B({ maxCostR: 0.25 })],
-    ['strong trend only', B({ trendFilter: 'strong' })], ['High selectivity', B({ selectivity: 'high' })],
-    ['minConf 75', B({ minConfidence: 75 })], ['minConf 80', B({ minConfidence: 80 })],
-    ['RR 1.3', B({ rewardRisk: 1.3 })], ['RR 1.75', B({ rewardRisk: 1.75 })], ['RR 2.0', B({ rewardRisk: 2 })],
-    ['stop floor 1.5 ATR', B({ minStopAtr: 1.5 })], ['stop floor 1.8 ATR', B({ minStopAtr: 1.8 })],
-    ['setups A+B', B({ setups: { A: true, B: true, C: false, D: false } })], ['setups A+C', B({ setups: { A: true, B: false, C: true, D: false } })],
-    ['setups A+B+C', B({ setups: { A: true, B: true, C: true, D: false } })], ['setups A+B+C+D', B({ setups: { A: true, B: true, C: true, D: true } })],
-    ['strong + High selectivity', B({ trendFilter: 'strong', selectivity: 'high' })],
-    ['strong + stop 1.5', B({ trendFilter: 'strong', minStopAtr: 1.5 })],
-    ['strong + cost<=0.12', B({ trendFilter: 'strong', maxCostR: 0.12 })],
-    ['strong + stop 1.5 + RR 1.3', B({ trendFilter: 'strong', minStopAtr: 1.5, rewardRisk: 1.3 })],
-    ['High + stop 1.5 + cost<=0.12', B({ selectivity: 'high', minStopAtr: 1.5, maxCostR: 0.12 })],
-    ['5m entries (3x slower)', B({ entryTimeframe: '5m' })],
-  );
-  return list;
-}
-
-// ---------------- stats ----------------
-function stats(trades){
-  const n = trades.length;
-  if(!n) return { n: 0 };
-  const wins = trades.filter(t => t.netUsd > 0), losses = trades.filter(t => t.netUsd <= 0);
-  const gw = wins.reduce((a, t) => a + t.netUsd, 0), gl = -losses.reduce((a, t) => a + t.netUsd, 0);
-  const Rs = trades.map(t => t.R).filter(x => Number.isFinite(x));
-  const avgR = Rs.length ? Rs.reduce((a, b) => a + b, 0) / Rs.length : null;
-  const wr = wins.length / n;
-  const aw = wins.length ? wins.reduce((a, t) => a + t.R, 0) / wins.length : 0, al = losses.length ? -losses.reduce((a, t) => a + t.R, 0) / losses.length : 0;
-  return {
-    n, wr, ci: 1.96 * Math.sqrt(wr * (1 - wr) / n), pf: gl > 0 ? gw / gl : (gw > 0 ? Infinity : 0), net: gw - gl, avgR,
-    beWr: aw + al > 0 ? al / (aw + al) : null, longs: trades.filter(t => t.dir === 'LONG').length,
-  };
-}
+// ---------------- stats formatting (the maths lives in js/futures/quant/sweep.js) ----------------
 const f1 = x => x == null ? '  -  ' : (x * 100).toFixed(1) + '%';
 const f2 = x => x == null ? ' - ' : (Number.isFinite(x) ? x.toFixed(2) : '∞');
 const usd = x => x == null ? '-' : (x >= 0 ? '+' : '-') + '$' + Math.abs(x).toFixed(0);
@@ -171,7 +126,7 @@ const usd = x => x == null ? '-' : (x >= 0 ? '+' : '-') + '$' + Math.abs(x).toFi
 // ---------------- run ----------------
 const ds = await buildDataset();
 const cut = ds.t0 + (ds.t1 - ds.t0) * A.split;
-const cfgs = configs();
+const cfgs = sweepConfigs(A.grid, A.slow);
 console.log(`\n${ds.symbols.length} symbols · ${((ds.t1 - ds.t0) / DAY).toFixed(0)} days · ${cfgs.length} configs · ${A.jobs} workers`);
 console.log(`TRAIN = before ${new Date(cut).toISOString().slice(0, 10)}   TEST = from ${new Date(cut).toISOString().slice(0, 10)} on (never used to rank)\n`);
 
@@ -185,8 +140,7 @@ await new Promise((resolve) => {
       done++;
       if(!m.ok){ console.log(`  ! ${m.name}: ${m.error.split('\n')[0]}`); }
       else{
-        const tr = m.trades.filter(t => t.openedAtMs < cut), te = m.trades.filter(t => t.openedAtMs >= cut);
-        results.push({ name: m.name, over: cfgs[m.id][1], all: stats(m.trades), train: stats(tr), test: stats(te), trades: m.trades.length });
+        results.push({ name: m.name, over: cfgs[m.id][1], trades: m.trades });
         process.stdout.write(`\r  ${done}/${cfgs.length} done`);
       }
       if(done === cfgs.length) resolve(); else feed();
@@ -199,13 +153,11 @@ await new Promise((resolve) => {
 console.log('\n');
 
 // ---------------- report ----------------
-const rank = results.slice().sort((a, b) => (b.train.n >= A.minTrain ? b.train.avgR : -9) - (a.train.n >= A.minTrain ? a.train.avgR : -9));
+const { ranked: rank, robust, baseline: base } = analyzeSweep(results, cut, A.minTrain);
 const cell = (s) => s.n ? `${String(s.n).padStart(3)}  ${f1(s.wr).padStart(6)}±${(s.ci * 100).toFixed(0).padStart(2)}  ${f2(s.avgR).padStart(5)}R  PF ${f2(s.pf).padStart(4)}  ${usd(s.net).padStart(7)}` : '  0';
 console.log('config'.padEnd(46) + ' | ' + 'TRAIN  n   win%±ci  expect   PF       net'.padEnd(46) + ' | ' + 'TEST   n   win%±ci  expect   PF       net');
 console.log('-'.repeat(146));
 for(const r of rank) console.log(r.name.slice(0, 45).padEnd(46) + ' | ' + cell(r.train).padEnd(46) + ' | ' + cell(r.test));
-const base = results.find(r => r.name.startsWith('BASELINE'));
-const robust = rank.filter(r => r.train.n >= A.minTrain && r.test.n >= 10 && r.train.avgR > 0 && r.test.avgR > 0 && !r.name.startsWith('BASELINE'));
 console.log('\n' + '='.repeat(60));
 if(base) console.log(`Baseline (old behaviour): ${base.all.n} trades, win ${f1(base.all.wr)}, expectancy ${f2(base.all.avgR)}R, break-even win rate ~${f1(base.all.beWr)}`);
 if(robust.length){

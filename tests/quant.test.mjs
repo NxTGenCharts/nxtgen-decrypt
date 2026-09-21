@@ -28,6 +28,7 @@ import { getQuantCfg } from '../js/quant-ui.js';
 import { WATCHLIST_TOP_N, rankTopByVolume } from '../js/futures/watchlist.js';
 import { classifyRegime } from '../js/futures/regime.js';
 import { summarizeQuantDiag } from '../js/futures/quant/diagnostics.js';
+import { sweepConfigs, sweepStats, analyzeSweep } from '../js/futures/quant/sweep.js';
 setQuantConsole(false);
 
 let passed = 0;
@@ -263,6 +264,27 @@ await test('cost / stop / trend knobs: defaults, clamping, and each one only eve
   assert.ok(cnt({ maxCostR: 0.18 }) <= base, 'cost filter can only remove signals');
   assert.ok(cnt({ trendFilter: 'strong' }) <= base, 'strong-trend filter can only remove signals');
   cnt({ minStopAtr: 1.6 }); // asserts the floor on every signal it lets through
+});
+
+await test('settings sweep: config list is valid, stats are right, and only rows profitable on BOTH train and test are called robust', () => {
+  const cfgs = sweepConfigs('quick', false);
+  assert.ok(cfgs.length >= 20 && cfgs[0][0].startsWith('BASELINE') && cfgs[0][1].maxCostR === 1);
+  assert.equal(new Set(cfgs.map(c => c[0])).size, cfgs.length, 'config names are unique');
+  for(const [, over] of cfgs){ const q = sanitizeQuantConfig(over); assert.equal(q.rewardRisk, over.rewardRisk); assert.equal(q.maxCostR, over.maxCostR); }
+  assert.equal(sweepConfigs('full').length, 2 + 96); assert.equal(sweepConfigs('quick', true).length, cfgs.length + 1);
+  const T = (open, R, net = R * 100) => ({ openedAtMs: open, closedAtMs: open + 1, netUsd: net, R, dir: 'LONG' });
+  const st = sweepStats([T(1, 1.4), T(2, 1.4), T(3, -1.1), T(4, -1.1), T(5, -1.1)]);
+  assert.equal(st.n, 5); assert.ok(Math.abs(st.wr - 0.4) < 1e-9); assert.ok(Math.abs(st.beWr - 1.1 / 2.5) < 1e-9); assert.ok(Math.abs(st.avgR - (2.8 - 3.3) / 5) < 1e-9);
+  const many = (open0, n, winEvery) => Array.from({ length: n }, (_, k) => T(open0 + k, k % winEvery === 0 ? 1.4 : -1.0));
+  const res = [
+    { name: 'BASELINE x', over: {}, trades: [...many(0, 20, 2), ...many(1000, 12, 2)] },
+    { name: 'good both', over: {}, trades: [...many(0, 20, 2), ...many(1000, 12, 2)] },       // wins half: +0.2R both sides
+    { name: 'train-only', over: {}, trades: [...many(0, 20, 2), ...many(1000, 12, 1000)] },   // test is nearly all losses
+    { name: 'thin test', over: {}, trades: [...many(0, 20, 2), ...many(1000, 5, 2)] },        // < 10 test trades
+  ];
+  const a = analyzeSweep(res, 500, 15);
+  assert.deepEqual(a.robust.map(r => r.name), ['good both']);
+  assert.ok(a.baseline && a.baseline.name.startsWith('BASELINE'));
 });
 
 await test('REGRESSION: a valid Quant signal at the DEFAULT reward:risk (1:1.5) is APPROVED by the engine, not rejected by a stale 1:2 gate', () => {
