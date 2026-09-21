@@ -34,7 +34,11 @@
   --r-pill:20px;
 
   /* layout tokens (new — used by header/nav/controls redesign) */
-  --content-max:1600px;
+  /* Fluid dashboard width: intentionally generous so real desktop monitors
+     (1280–2560px) get a full-bleed trading terminal instead of a narrow
+     centered column. Only kicks in as an actual cap on genuinely ultra-wide
+     displays (>2500px) so the layout never stretches without bound. */
+  --content-max:2400px;
   --edge-pad:clamp(16px, 4vw, 32px);
   --header-h-desktop:auto;
   --touch-target:44px;

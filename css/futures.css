@@ -8,9 +8,9 @@
 :is(#panelFutures, #panelUtilities) .fu-hrow {
   display: grid;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
-  font-size: 12px;
+  gap: 10px;
+  padding: 11px 14px;
+  font-size: 12.5px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -69,6 +69,109 @@
 }
 
 /* -------------------------------------------------------------
+   Futures Engine settings row (Min Confidence / Min Net Profit /
+   Risk / Leverage / High Selectivity). Reuses .controls chrome but
+   keeps each field a sane, readable width instead of stretching
+   five short number inputs across a full-width desktop monitor.
+   ---------------------------------------------------------- */
+.controls.controls--compact{
+  grid-template-columns:repeat(auto-fit, minmax(170px, 230px));
+}
+
+/* -------------------------------------------------------------
+   Account / Trading Summary — Real Balance, Starting Balance,
+   Open Position, Trades, Win Rate, Gross/Fees/Net P&L.
+
+   Desktop (4 columns): row 1 is the four session-stat cards, row 2
+   is Open Position (double-width, so it has real room for symbol /
+   direction / qty / entry / mark / uPnL / SL / TP1-3 / Close) plus
+   Gross P&L and Fees, and Net P&L gets its own full-width highlight
+   bar as the headline number — this also happens to be the exact
+   DOM order already in the HTML, so no reordering is needed here.
+
+   Mobile (2 columns, <=768px further below): Open Position and Net
+   P&L each take the full row; order: is used there (not here) to
+   move Open Position up next to the balance cards without touching
+   desktop, since it sits later in the DOM (after Trades/Win Rate).
+   ---------------------------------------------------------- */
+.fu-summary-grid{
+  display:grid;
+  grid-template-columns:repeat(4, minmax(0, 1fr));
+  gap:12px;
+  margin-top:16px;
+}
+.fu-summary-grid > .ov-card{ min-width:0; }
+.fu-card-pos{ grid-column:span 2; }
+.fu-card-net{ grid-column:1 / -1; }
+
+/* Open Position card: content-driven height (no fixed/huge min-height),
+   generous wrap room for the position line and SL/TP/Close detail. */
+.fu-card-pos{
+  justify-content:flex-start;
+}
+.fu-pos-value{
+  font-size:13.5px !important; /* the shared .ov-value clamp() is sized for short numbers, not this line */
+  font-weight:600;
+  line-height:1.55;
+  font-family:var(--mono);
+  overflow-wrap:break-word;
+  word-break:break-word; /* keeps long symbols like HYPEUSDT from overflowing the card */
+}
+.fu-pos-close-row{
+  display:none; /* toggled to flex by js/futures-ui.js (renderLiveCloseButtons) */
+  flex-direction:column;
+  gap:8px;
+  margin-top:2px;
+}
+.fu-pos-detail{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px;
+  width:100%;
+}
+.fu-pos-detail-text{
+  font-size:11.5px;
+  color:var(--dim);
+  flex:1 1 220px;
+  min-width:0;
+  line-height:1.6;
+  overflow-wrap:break-word;
+  word-break:break-word; /* SL/TP figures wrap cleanly instead of overflowing */
+}
+.fu-pos-detail .fu-close-pos-btn{
+  font-size:11.5px;
+  padding:7px 16px;
+  white-space:nowrap;
+}
+
+@media (max-width:900px){
+  .fu-summary-grid{ grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  .fu-card-pos{ grid-column:1 / -1; }
+}
+
+@media (max-width:768px){
+  .fu-summary-grid{ gap:10px; }
+  /* Reorder without touching the DOM: Open Position moves up next to the
+     balance cards, matching the requested mobile stack (Real/Start, then
+     Open Position full-width, then Trades/Win Rate, then Gross/Fees, then
+     Net P&L full-width). */
+  .fu-card-balance{ order:1; }
+  .fu-card-start{ order:2; }
+  .fu-card-pos{ order:3; }
+  .fu-card-trades{ order:4; }
+  .fu-card-winrate{ order:5; }
+  .fu-card-gross{ order:6; }
+  .fu-card-fees{ order:7; }
+  .fu-card-net{ order:8; }
+}
+
+@media (max-width:600px){
+  /* Close button gets a full-width, easy-to-tap target on phones. */
+  .fu-pos-detail .fu-close-pos-btn{ width:100%; }
+}
+
+/* -------------------------------------------------------------
    Mobile: dense trade tables (Live Opportunity Scanner, Trade
    History, Trade Log, Backtest Trades — 12-14 columns each)
    scroll horizontally instead of squeezing every column unreadably
@@ -88,7 +191,7 @@
 }
 :is(#panelFutures, #panelUtilities) .table-scroll .fu-row,
 :is(#panelFutures, #panelUtilities) .table-scroll .fu-hrow{
-  min-width:760px; /* below this the fr-based columns become unreadable; scroll instead */
+  min-width:860px; /* below this the fr-based columns become unreadable; scroll instead */
 }
 :is(#panelFutures, #panelUtilities) .table-scroll .fu-row.fu-head,
 :is(#panelFutures, #panelUtilities) .table-scroll .fu-hrow.fu-head{

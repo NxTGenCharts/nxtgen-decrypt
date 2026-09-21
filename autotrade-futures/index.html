@@ -67,7 +67,7 @@
 <div class="panel active" id="panelTrading">
     <nav class="term-subnav" role="tablist" aria-label="Autotrade and Futures sub-tabs">
       <a class="navtab subnavtab active" id="tabAutoBtn" href="#autotrade-balances" role="tab" aria-selected="true"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-zap"/></svg></span>Autotrade &amp; Balances</a>
-      <a class="navtab subnavtab" id="tabFuturesBtn" href="#ai-futures-engine" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-cpu"/></svg></span>AI Futures Engine</a>
+      <a class="navtab subnavtab" id="tabFuturesBtn" href="#ai-futures-engine" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-cpu"/></svg></span>Futures Engine</a>
     </nav>
 
   <!-- ============ AUTOTRADE & BALANCES ============ -->
@@ -200,15 +200,15 @@
 
   </div>
 
-  <!-- ============ AI FUTURES ENGINE ============ -->
+  <!-- ============ FUTURES ENGINE (formerly "AI Futures Engine") ============ -->
   <div class="panel" id="panelFutures">
 
     <div class="ov-head">
-      <h2>AI Futures Engine</h2>
+      <h2>Futures Engine</h2>
     </div>
     <div class="ov-block-body" style="font-size:12px;color:var(--dim);margin:0 0 14px;">Paper trading, backtesting and Trading Bots are on the <a href="/utilities-tools/">Utilities &amp; Tools</a> page. The settings below drive Live/Demo trading.</div>
 
-    <div class="controls">
+    <div class="controls controls--compact">
       <div class="field">
         <label for="fuMinConfidence" title="Also the minimum score for NxTGen Quant Futures. AI Scalp's confidence score ranges 60 (bare momentum, zero RSI/volume confirmation) to 87 (fully confirmed) — 60 was the floor of that range, so it filtered nothing. 70 requires at least one real confirmation (RSI alignment, or strong momentum + volume together).">Min confidence</label>
         <input id="fuMinConfidence" type="number" min="0" max="100" step="1" value="70">
@@ -321,19 +321,21 @@
         </label>
       </div>
 
-      <div class="ov-grid" style="grid-template-columns:repeat(5, 1fr);margin-top:16px;">
-        <div class="ov-card ov-highlight"><span class="ov-label">Real Balance — Futures (USDT)</span><span class="ov-value" id="fuLiveBalance">—</span></div>
-        <div class="ov-card"><span class="ov-label">Starting Balance (Session)</span><span class="ov-value" id="fuLiveStartingBalance" style="font-size:18px;">—</span></div>
-        <div class="ov-card"><span class="ov-label">Open Position</span><span class="ov-value" id="fuLiveOpenPosition" style="font-size:14px;">None</span>
-          <div id="fuLiveCloseRow" style="display:none;flex-direction:column;gap:8px;margin-top:8px;"></div>
+      <div class="fu-summary-grid">
+        <div class="ov-card ov-highlight fu-card-balance"><span class="ov-label">Real Balance — Futures (USDT)</span><span class="ov-value" id="fuLiveBalance">—</span></div>
+        <div class="ov-card fu-card-start"><span class="ov-label">Starting Balance (Session)</span><span class="ov-value" id="fuLiveStartingBalance" style="font-size:18px;">—</span></div>
+        <div class="ov-card fu-card-trades"><span class="ov-label">Trades (session)</span><span class="ov-value" id="fuLiveTrades">0</span></div>
+        <div class="ov-card ov-highlight fu-card-winrate"><span class="ov-label">Win Rate</span><span class="ov-value" id="fuLiveWinRate">—</span></div>
+
+        <div class="ov-card fu-card-pos">
+          <span class="ov-label">Open Position</span>
+          <span class="ov-value fu-pos-value" id="fuLiveOpenPosition">None</span>
+          <div id="fuLiveCloseRow" class="fu-pos-close-row"></div>
         </div>
-        <div class="ov-card"><span class="ov-label">Trades (session)</span><span class="ov-value" id="fuLiveTrades">0</span></div>
-        <div class="ov-card ov-highlight"><span class="ov-label">Win Rate</span><span class="ov-value" id="fuLiveWinRate">—</span></div>
-      </div>
-      <div class="ov-grid" style="grid-template-columns:repeat(3, 1fr);margin-top:10px;">
-        <div class="ov-card"><span class="ov-label">Gross P&amp;L</span><span class="ov-value" id="fuLiveGrossPnl">$0.00</span></div>
-        <div class="ov-card"><span class="ov-label">Fees</span><span class="ov-value" id="fuLiveFees">-$0.00</span></div>
-        <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value" id="fuLiveNetPnl">$0.00</span></div>
+        <div class="ov-card fu-card-gross"><span class="ov-label">Gross P&amp;L</span><span class="ov-value" id="fuLiveGrossPnl">$0.00</span></div>
+        <div class="ov-card fu-card-fees"><span class="ov-label">Fees</span><span class="ov-value" id="fuLiveFees">-$0.00</span></div>
+
+        <div class="ov-card ov-highlight fu-card-net"><span class="ov-label">Net P&amp;L</span><span class="ov-value" id="fuLiveNetPnl">$0.00</span></div>
       </div>
 
       <div class="ov-block" style="margin-top:14px;">

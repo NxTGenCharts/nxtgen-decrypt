@@ -918,11 +918,11 @@ function renderLiveCloseButtons(){
   row.innerHTML = symbols.map(s => {
     const p = positions[s];
     const ex = p.exchange || '';
-    return `<div class="fu-pos-detail" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;width:100%;">
-      <span style="font-size:11px;color:var(--dim);">
+    return `<div class="fu-pos-detail">
+      <span class="fu-pos-detail-text">
         Entry ${dash(p.entry)} &middot; SL ${dash(p.stopLossPrice)} &middot; TP1 ${dash(p.tp1Price)} &middot; TP2 ${dash(p.tp2Price)} &middot; TP3 ${dash(p.tp3Price)}
       </span>
-      <button type="button" class="primary ghost fu-close-pos-btn" data-symbol="${s}" style="font-size:11px;padding:4px 10px;" title="Close the open ${s} ${p.side || ''} position on ${ex}">Close ${s}</button>
+      <button type="button" class="primary ghost fu-close-pos-btn" data-symbol="${s}" title="Close the open ${s} ${p.side || ''} position on ${ex}">Close ${s}</button>
     </div>`;
   }).join('');
 }
@@ -1761,7 +1761,7 @@ function renderGridPanel(){
         <div id="fuGridLiveStatus" style="font-size:11.5px;color:var(--dim);margin-top:8px;"></div>
       </div>
       ` : `
-      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim);">Grid Live/Demo is armed from <a href="/autotrade-futures/#ai-futures-engine">AI Futures Engine</a>.</div>`}
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim);">Grid Live/Demo is armed from <a href="/autotrade-futures/#ai-futures-engine">Futures Engine</a>.</div>`}
     </div>
   `;
   renderGridDashboard();
