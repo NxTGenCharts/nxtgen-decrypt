@@ -11,7 +11,7 @@
 //   regime:<label> evaluations by Quant market regime (info)
 //   no_setup       no enabled setup detector produced a candidate
 //   candidate      a setup detector produced a candidate (everything below is a subset of these)
-//     expansion / stop / clearance / score   candidate died in signal.js gates
+//     expansion / stop / cost / clearance / score   candidate died in signal.js gates
 //   signal         candidate passed every signal gate
 //   engine:<why>   signal rejected by the shared no-trade gate or Quant's own risk gate
 //   approved       became a position
@@ -51,6 +51,7 @@ const STAGE_TEXT = {
   expansion: 'Setup found, but the signal candle was too large (already moved — not chasing)',
   stop: 'Setup found, but the structural stop was too far away (poor entry)',
   clearance: 'Setup found, but a 1H/4H swing level sat too close in front of the target',
+  cost: 'Setup found, but the stop was too tight for the fees/spread (costs above the max share of 1R)',
   score: 'Setup found, but its score / confluence / confirmations were below the required level',
   engineRejected: 'Passed every strategy gate, then rejected by the shared no-trade gate or Quant risk limits',
 };
@@ -62,7 +63,7 @@ export function summarizeQuantDiag(diag, tradeCount){
   const pct = (n) => (ev ? (100 * n / ev) : 0);
   const rows = [];
   rows.push({ label: 'Evaluations (one per closed entry candle per symbol)', n: ev, pct: 100 });
-  for(const k of ['no_setup', 'expansion', 'stop', 'clearance', 'score']) if(c[k]) rows.push({ label: STAGE_TEXT[k], n: c[k], pct: pct(c[k]) });
+  for(const k of ['no_setup', 'expansion', 'stop', 'cost', 'clearance', 'score']) if(c[k]) rows.push({ label: STAGE_TEXT[k], n: c[k], pct: pct(c[k]) });
   rows.push({ label: 'Signals passing every strategy gate', n: c.signal || 0, pct: pct(c.signal || 0) });
   if(c.engineRejected) rows.push({ label: STAGE_TEXT.engineRejected, n: c.engineRejected, pct: pct(c.engineRejected) });
   rows.push({ label: 'Trades opened', n: c.approved || 0, pct: pct(c.approved || 0) });

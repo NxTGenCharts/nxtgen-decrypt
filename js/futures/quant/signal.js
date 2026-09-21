@@ -15,14 +15,14 @@
 // =============================================================
 import { QUANT_TYPE, SELECTIVITY, HARD_LIMITS, effectiveMinConfidence } from './config.js';
 import { buildFeatures, clamp, mean } from './features.js';
-import { classifyQuantRegime } from './regime.js';
+import { classifyQuantRegime, QREGIMES } from './regime.js';
 import { SETUP_DETECTORS } from './setups.js';
 import { swingHighPoints, swingLowPoints } from '../indicators.js';
 import { qlog, qlogOnce } from './log.js';
 
 const RR_TIERS = [2, 2.5, 3, 4];
 const STOP_BUFFER_ATR = { A: 0.2, B: 0.0, C: 0.15, D: 0.25 }; // B's anchor already carries its own buffer
-const MIN_STOP_ATR = 1.2;   // never tighter than 1.2 ATR — inside normal noise
+const MIN_STOP_ATR = 1.2;   // default; the live value is qcfg.minStopAtr (config.js) — never tighter than this many ATR (inside normal noise)
 const MAX_STOP_ATR = 3.0;   // wider than this = the structure is too far away = poor entry
 const MAX_STOP_ATR_REVERSAL = 3.5; // a sweep reversal is entered AFTER its confirming candle, so the sweep extreme is inherently farther
 const lastRegimeBySymbol = new Map();
@@ -51,18 +51,19 @@ function clearanceR(f, cand, s, entry, dist){
 
 // Stop = max(structural invalidation, ATR floor, recent swing), capped so a
 // far-away structure rejects the trade instead of producing a bloated stop.
-function buildStop(f, cand, s, entry){
+function buildStop(f, cand, s, entry, qcfg){
   const buffer = (STOP_BUFFER_ATR[cand.setup] || 0.2) * f.atr;
   const structStop = s === 1 ? cand.anchor - buffer : cand.anchor + buffer;
   const structDist = s * (entry - structStop);
-  const atrDist = MIN_STOP_ATR * f.atr;
+  const minStopAtr = (qcfg && qcfg.minStopAtr) || MIN_STOP_ATR;
+  const atrDist = minStopAtr * f.atr;
   // Most recent confirmed swing beyond price within ~20 bars (the "recent swing high/low" input).
   const sw = (s === 1 ? f.swingLows : f.swingHighs).filter(p => p.index >= f.i - 20 && (s === 1 ? p.price < entry : p.price > entry)).slice(-1)[0];
   const swingDist = sw ? s * (entry - (s === 1 ? sw.price - 0.1 * f.atr : sw.price + 0.1 * f.atr)) : 0;
   const cap = (cand.setup === 'C' ? MAX_STOP_ATR_REVERSAL : MAX_STOP_ATR) * f.atr;
   const swingUsable = sw && swingDist <= cap ? swingDist : 0;
   const dist = Math.max(structDist, atrDist, swingUsable);
-  const basis = dist === structDist ? cand.anchorBasis : (dist === swingUsable && swingUsable > 0) ? 'recent swing' : `${MIN_STOP_ATR} ATR floor`;
+  const basis = dist === structDist ? cand.anchorBasis : (dist === swingUsable && swingUsable > 0) ? 'recent swing' : `${minStopAtr} ATR floor`;
   if(!(dist > 0)) return { ok: false, reason: 'stop distance could not be computed' };
   if(dist > cap) return { ok: false, reason: `stop would be ${(dist / f.atr).toFixed(2)} ATR away (cap ${cap / f.atr}) — structure too far, poor entry` };
   return { ok: true, dist, distAtr: dist / f.atr, price: entry - s * dist, basis };
@@ -194,6 +195,10 @@ export function detectQuantFutures(snap, baseRegime, qcfg, ctx){
   for(const setupId of ['A', 'B', 'C', 'D']){
     if(!qcfg.setups[setupId]) continue;
     if(!reg.allowed[setupId]){ rejections.push(`${setupId}: not permitted in the ${reg.label} regime`); continue; }
+    // Optional: trend-following setups (A/B/C) only in a STRONG trend. Weak-trend pullbacks are mostly chop.
+    if(qcfg.trendFilter === 'strong' && setupId !== 'D' && reg.bias !== 0 && reg.trendLabel !== QREGIMES.STRONG_BULL && reg.trendLabel !== QREGIMES.STRONG_BEAR){
+      rejections.push(`${setupId}: trend is only ${reg.trendLabel} — trend filter requires a strong trend`); continue;
+    }
     for(const dir of dirs){
       const cand = SETUP_DETECTORS[setupId](f, reg, dir);
       if(!cand.ok){ rejections.push(cand.reason); continue; }
@@ -210,6 +215,14 @@ export function detectQuantFutures(snap, baseRegime, qcfg, ctx){
       const { entry, slipPct } = entryFillFor(s);
       const st = buildStop(f, cand, s, entry);
       if(!st.ok){ failing.push({ cand, dir, stage: 'stop', reason: `${cand.name} ${dir}: ${st.reason}`, score: 0 }); continue; }
+      // Cost filter: all-in round-trip cost (ctx.costPct = taker in + out + spread + slippage estimate) measured in R.
+      // A tight stop makes fixed costs a big slice of 1R and lifts the win rate needed to break even — see config.js.
+      const distPct = (st.dist / entry) * 100;
+      const costR = (ctx.costPct != null ? ctx.costPct : 0.15) / distPct;
+      if(costR > qcfg.maxCostR){
+        failing.push({ cand, dir, stage: 'cost', reason: `${cand.name} ${dir}: costs are ${costR.toFixed(2)}R (stop only ${distPct.toFixed(2)}% away; max ${qcfg.maxCostR}R) — the stop is too tight for the fees/spread`, score: 0 });
+        continue;
+      }
       const trade = { entry, slipPct, dist: st.dist, distAtr: st.distAtr, stopPrice: st.price, stopBasis: st.basis, rr: qcfg.rewardRisk };
       trade.clearance = clearanceR(f, cand, s, entry, st.dist);
       const needClr = requiredClearanceR(cand, qcfg.rewardRisk);
@@ -244,7 +257,7 @@ export function detectQuantFutures(snap, baseRegime, qcfg, ctx){
     // `stage` lets the Backtest tab's diagnostics say WHERE the pipeline stopped (quant/diagnostics.js).
     // When several candidates exist the evaluation is attributed to the FURTHEST stage any of them reached
     // (pipeline order: expansion -> stop -> clearance -> score).
-    const order = ['score', 'clearance', 'stop', 'expansion'];
+    const order = ['score', 'clearance', 'cost', 'stop', 'expansion'];
     const stage = failing.length ? order.find(k => failing.some(x => x.stage === k)) || 'score' : 'no_setup';
     return veto(msgs.join(' — '), { regime: reg.label, rejections, stage, setup: bestFail && bestFail.cand ? bestFail.cand.setup : null });
   }

@@ -77,3 +77,21 @@ Two independent causes, both fixed:
 
 Added: setup A-D checkboxes and entry-timeframe selector on the Quant card; a pipeline funnel in the Backtest tab (`quant/diagnostics.js`) showing where evaluations stopped; a Quant-only 15m backtest speed-up (identical results); server-side kline pacing, 429/Bybit-10006 retry and symbol aliases (PEPE -> 1000PEPE, SHIB -> SHIB1000 on Bybit); unlisted pairs are reported as a note, not an error.
 Thresholds were NOT retuned: no real market data was available when this was fixed. Judge the strategy with real-data Backtest runs and the funnel.
+
+
+## Fix log — "win rate is very poor" (2026-09, first real 30-day backtest)
+**What the first real run showed** (Binance top-25, 5m data, 30 days — the earlier "5 days only" fetch bug was fixed first): 53 trades, 37.7% win rate, profit factor 0.77, expectancy −0.14R, avg win +1.43R / avg loss −1.10R, fees $251.
+* The nominal reward:risk is 1:1.5 but the **realized** payoff was 1:1.31 (fees + spread + slippage make wins smaller and losses bigger than 1R). Real break-even win rate ≈ 1.10 / (1.10 + 1.43) ≈ **43.5%**, not 40%. Every +0.1R of cost adds ~4 points to the win rate needed.
+* Costs are fixed in price terms, so they hit tight stops hardest: at ~0.16% all-in cost, a 0.5% stop pays 0.32R before the market moves. The shared no-trade gate only limits *fees* to 25% of the stop (spread/slippage not counted), so trades with very tight stops were passing.
+* 53 trades is a small sample: the 95% interval on a 37.7% win rate is roughly ±13 points. It cannot tell "no edge" from "a modest edge plus bad luck", and neither can any tweak judged on it.
+
+**Changes (all in `quant/config.js` + `quant/signal.js`; every one can only REMOVE signals, never add them):**
+| Knob | Default | Meaning |
+|---|---|---|
+| `maxCostR` | **0.18** (was: no such filter; 1 = off) | Skip a signal when its estimated round-trip cost (taker in + out + spread + slippage) is more than this fraction of the stop distance. At default fees/spread that means stops of roughly ≥ 0.9%. Shown in the Backtest funnel as the "stop too tight for the fees/spread" stage. |
+| `minStopAtr` | 1.2 (unchanged) | ATR floor for the stop; wider = fewer noise stop-outs and a smaller cost/R, but a farther target. |
+| `trendFilter` | `'any'` (unchanged) | `'strong'` = trend setups only fire in a STRONG bull/bear regime. |
+
+Thresholds still were NOT tuned on data: no exchange data is reachable from the environment these changes were made in. `maxCostR` is a cost-arithmetic argument, not a fitted number.
+
+**`tools/quant-sweep.mjs`** — runs the app's real backtest engine (same code as the Backtest tab) over ~23 configs (or `--grid full` = 96) on 90 days of real candles, downloaded through the Render proxy and cached, in parallel worker threads. It splits each config's trades chronologically into TRAIN (first ~2/3) and TEST (last ~1/3), ranks on TRAIN, and reports TEST beside it so overfit configs are visible. Needs Node 22+, the fixed `server.js` deployed, and no npm install. `node tools/quant-sweep.mjs --synthetic` is a self-test on fake candles (results meaningless). Run it, then apply the winning settings as defaults only if they hold on TEST and on a later re-run.

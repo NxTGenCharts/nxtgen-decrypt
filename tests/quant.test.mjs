@@ -49,7 +49,9 @@ const aggH1 = (m) => { const o = []; for(let i = 0; i + 4 <= m.length; i += 4){ 
 const mkSnap = (E) => ({ symbol: 'BTCUSDT', price: E[E.length - 1].c, m5: E, m15: E, h1: aggH1(E).slice(-60), meta: { spreadPct: 0.01, liquidityScore: 90, fundingRatePct: 0.005, candlesClosed: true } });
 const mirror = (E) => { const K = E[0].o * E[E.length - 1].c; return E.map(x => ({ t: x.t, o: K / x.o, h: K / x.l, l: K / x.h, c: K / x.c, v: x.v })); };
 function inspect(E, over = {}){
-  const q = sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60, ...over });
+  // maxCostR: 1 (= cost filter off) — these helpers exercise the signal machinery on constructed patterns whose stops are
+  // tight by construction; the cost filter has its own tests below.
+  const q = sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60, maxCostR: 1, ...over });
   const f = buildFeatures(mkSnap(E), q, { nowMs: null });
   if(!f.ok) return { fail: f.reason };
   const reg = classifyQuantRegime(f);
@@ -243,11 +245,31 @@ await test('paper engine: 2,500 cycles with Quant enabled -> no errors; closed t
   console.log(`         (${opened} opened, ${hist.length} closed on the synthetic feed — count only, not a result)`);
 });
 
+await test('cost / stop / trend knobs: defaults, clamping, and each one only ever REMOVES signals (never invents them)', () => {
+  const d = sanitizeQuantConfig({});
+  assert.equal(d.maxCostR, QUANT_DEFAULTS.maxCostR); assert.equal(d.minStopAtr, 1.2); assert.equal(d.trendFilter, 'any');
+  const bad = sanitizeQuantConfig({ maxCostR: 'x', minStopAtr: 99, trendFilter: 'weird' });
+  assert.equal(bad.maxCostR, QUANT_DEFAULTS.maxCostR); assert.equal(bad.minStopAtr, 2.5); assert.equal(bad.trendFilter, 'any');
+  assert.equal(sanitizeQuantConfig({ maxCostR: 0 }).maxCostR, 0.05); assert.equal(sanitizeQuantConfig({ maxCostR: 5 }).maxCostR, 1);
+  const cnt = (over, ctxCost = 0.15) => { let n = 0; for(let seed = 1; seed <= 60; seed++) for(const E of [pullback(seed), mirror(pullback(seed))]){
+    const q = sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60, maxCostR: 1, ...over });
+    const sg = detectQuantFutures(mkSnap(E), null, q, { nowMs: null, costPct: ctxCost });
+    if(sg && !sg.vetoes){ n++; if(over.minStopAtr) assert.ok(sg.meta.stopDistAtr >= over.minStopAtr - 1e-9, 'stop floor honoured'); }
+  } return n; };
+  const base = cnt({});
+  assert.ok(base >= 5, `only ${base} baseline signals`);
+  assert.equal(cnt({ maxCostR: 0.18 }, 50), 0, 'a 50% round-trip cost can never pass a 0.18R cost cap');
+  assert.ok(cnt({ maxCostR: 0.18 }, 0.0001) === base, 'negligible costs never trigger the cost filter');
+  assert.ok(cnt({ maxCostR: 0.18 }) <= base, 'cost filter can only remove signals');
+  assert.ok(cnt({ trendFilter: 'strong' }) <= base, 'strong-trend filter can only remove signals');
+  cnt({ minStopAtr: 1.6 }); // asserts the floor on every signal it lets through
+});
+
 await test('REGRESSION: a valid Quant signal at the DEFAULT reward:risk (1:1.5) is APPROVED by the engine, not rejected by a stale 1:2 gate', () => {
   // The bug: evaluateQuantRow() and the no-trade gate hard-coded a 1:2 minimum while QUANT_DEFAULTS.rewardRisk was
   // 1.5, so every Quant signal was rejected and Backtest/Paper/Live all reported zero trades. Everything above the
   // engine (the detector tests) passed, which is why nothing caught it. This goes through the real engine path.
-  const qcfg = sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60 });
+  const qcfg = sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60, maxCostR: 1 });
   assert.equal(qcfg.rewardRisk, 1.5, 'this test is about the shipped default');
   const cfg = { exchange: 'binance', strategies: { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true }, minConfidence: 60, riskPctPerTrade: 1, leverage: 5, minNetProfitPct: 0.05, quant: qcfg };
   let approved = 0, signals = 0, rejectedAsRR = 0;
@@ -270,12 +292,12 @@ await test('Backtest funnel: counts are consistent, and the diagnostics say wher
   const r = rng(42); const mk = (start) => { const out = []; let p = start, t = 1_700_000_000_000 - (1_700_000_000_000 % 300000), dir = 1, left = 0;
     for(let i = 0; i < 6000; i++){ if(left <= 0){ dir = r() < 0.5 ? 1 : -1; left = 200 + Math.floor(r() * 300); } left--; const o = p, c = o * (1 + dir * 0.00015 + (r() - 0.5) * 0.003); out.push({ t, o, h: Math.max(o, c) * (1 + 0.0005 * r()), l: Math.min(o, c) * (1 - 0.0005 * r()), c, v: 1000 * (0.6 + 0.8 * r()) }); p = c; t += 300000; } return out; };
   const syms = ['ZECUSDT', 'HYPEUSDT', 'ENAUSDT'], cb = {}; syms.forEach((s, i) => cb[s] = mk(10 + i));
-  const cfg = { exchange: 'binance', strategies: { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true }, minConfidence: 60, riskPctPerTrade: 1, leverage: 5, minNetProfitPct: 0.05, quant: sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60 }) };
+  const cfg = { exchange: 'binance', strategies: { aiScalp: false, novaScalp: false, trendContinuation: false, liquiditySweep: false, rangeReversal: false, breakoutRetest: false, [QUANT_ID]: true }, minConfidence: 60, riskPctPerTrade: 1, leverage: 5, minNetProfitPct: 0.05, quant: sanitizeQuantConfig({ entryTimeframe: '15m', minConfidence: 60, maxCostR: 1 }) };
   const res = await runBacktest({ candlesBySymbol: cb, symbols: syms, cfg, startingEquity: 10000, intervalMinutes: 5, maxDailyLossPct: 50, dailyProfitTargetPct: 50 });
   const c = res.quantDiag.counts;
   assert.ok(c.evaluated > 500, `detector barely ran (${c.evaluated}) — Quant is not being applied to these symbols`);
   assert.equal(c.evaluated, (c.no_setup || 0) + (c.candidate || 0), 'every evaluation is either "no setup" or a candidate');
-  assert.equal(c.candidate, (c.expansion || 0) + (c.stop || 0) + (c.clearance || 0) + (c.score || 0) + (c.signal || 0), 'every candidate ends at exactly one stage');
+  assert.equal(c.candidate, (c.expansion || 0) + (c.stop || 0) + (c.cost || 0) + (c.clearance || 0) + (c.score || 0) + (c.signal || 0), 'every candidate ends at exactly one stage');
   assert.equal(c.signal, (c.approved || 0) + (c.engineRejected || 0), 'every signal is approved or rejected by the engine');
   assert.equal((c.approved || 0), res.trades.length - res.trades.filter(t => t.exitReason === 'OPEN_AT_END' && false).length, 'approved == trades opened');
   const sum = summarizeQuantDiag(res.quantDiag, res.trades.length);

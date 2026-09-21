@@ -106,6 +106,20 @@ export const QUANT_DEFAULTS = {
   maxCorrelatedRiskMultiple: 2, // total same-direction open risk <= this x per-trade risk
   maxSymbolNotionalPct: 300,    // notional per symbol <= this % of equity
   maxHoldMinutes: { '5m': 360, '15m': 720 },
+  // ---- cost / trend quality knobs (added after the first 30-day real-data backtest: 53 trades, 37.7% win rate,
+  // realized payoff 1:1.31 instead of the nominal 1:1.5, so the real break-even win rate was ~43.5%) ----
+  // Max estimated ROUND-TRIP COST as a fraction of the stop distance (i.e. cost measured in R). Costs (taker fee in
+  // + out, spread, slippage) are fixed in price terms, so a tight stop makes them a big slice of every 1R: at a
+  // 0.16% all-in cost a 0.5% stop pays 0.32R per trade before the market does anything, and every +0.1R of cost
+  // raises the win rate needed to break even by ~4 points at 1:1.5. Trades whose cost/R is above this are skipped.
+  // 0.18 = "the stop must be at least ~5.5x the all-in cost". 1 = filter off.
+  maxCostR: 0.18,
+  // Stop-distance floor in ATR (structure/swing stops can only be WIDER than this). Wider floor = less noise-outs and
+  // a smaller cost/R, but a farther target (RR x stop) that has to fit before the next 1H/4H level.
+  minStopAtr: 1.2,
+  // 'any' = a with-trend read of the 1H/4H (weak or strong) is enough for setup A/B/C.
+  // 'strong' = trend setups only fire in a STRONG bull/bear regime (4H agrees, 1H strength >= 0.55, 4H >= 0.35).
+  trendFilter: 'any',
   weights: { ...QUANT_WEIGHTS_DEFAULT },
 };
 
@@ -147,6 +161,9 @@ export function sanitizeQuantConfig(raw){
   // call with no `setups` in raw — i.e. always, since nothing in the UI ever
   // sets this key. Falls back to the real per-strategy default now.
   out.setups = { A: bool(su.A, D.setups.A), B: bool(su.B, D.setups.B), C: bool(su.C, D.setups.C), D: bool(su.D, D.setups.D) };
+  out.maxCostR = clamp(num(r.maxCostR, D.maxCostR), 0.05, 1);
+  out.minStopAtr = clamp(num(r.minStopAtr, D.minStopAtr), 0.8, 2.5);
+  out.trendFilter = r.trendFilter === 'strong' ? 'strong' : (r.trendFilter === 'any' ? 'any' : D.trendFilter);
   out.useFunding = bool(r.useFunding, D.useFunding);
   out.maxSpreadPct = clamp(num(r.maxSpreadPct, D.maxSpreadPct), 0.005, 0.08);
   out.maxCorrelatedRiskMultiple = clamp(num(r.maxCorrelatedRiskMultiple, D.maxCorrelatedRiskMultiple), 1, 3);
