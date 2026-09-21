@@ -1599,6 +1599,7 @@ const KLINE_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — candles this far in the
 const KLINE_CACHE_MAX_ENTRIES = 500; // simple unbounded-growth guard — oldest entries evicted past this
 
 const BINANCE_KLINE_INTERVAL = { '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h' };
+const BACKTEST_INTERVAL_MS = { '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000, '1h': 3_600_000 };
 const BYBIT_KLINE_INTERVAL = { '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60' };
 // MEXC contract kline has no 3-minute granularity at all (Min1/Min5/
 // Min15/Min30/Min60/Hour4/Hour8/Day1/Week1/Month1 — see
@@ -1616,7 +1617,7 @@ const GATEIO_KLINE_INTERVAL = { '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1
 // 10006) and Binance with 429/418 — which the Backtest tab used to show as "skipped" symbols and, worse, as
 // silently missing history. Every kline request now goes through klineFetch(): it keeps a minimum gap between
 // requests per exchange and retries 429s with backoff (honouring Retry-After).
-const KLINE_MIN_GAP_MS = { binance: 50, bybit: 150, mexc: 120, gateio: 100, bitget: 0 }; // bitget paces itself below
+const KLINE_MIN_GAP_MS = { binance: 260, bybit: 150, mexc: 120, gateio: 100, bitget: 0 }; // bitget paces itself below
 const klineNextSlot = {};
 async function paceKline(exchange){
   const gap = KLINE_MIN_GAP_MS[exchange] || 0;
@@ -1670,33 +1671,27 @@ function toUnderscoreSymbol(symbol){
   return symbol.endsWith('USDT') ? `${symbol.slice(0, -4)}_USDT` : symbol;
 }
 
-// Binance's own current docs state: "Between startTime and endTime, the
-// most recent limit data from endTime will be returned" whenever the
-// requested window spans more bars than `limit` — i.e. this endpoint
-// anchors to the END of the window, the same as Bybit's kline endpoint
-// (see fetchBybitLinearKlines's comment below for the full explanation).
-// That's a real behavior to design around, not the older "ascending from
-// startTime" assumption this fetcher used to rely on. The previous
-// forward-cursor version here (cursor = startMs, moving forward each
-// page while endTime stayed fixed at the final requested end) hit
-// exactly the same failure mode already documented for Bybit and MEXC
-// below: the first page would return the ~1500 bars closest to endMs
-// regardless of startMs, the loop's cursor would then jump forward
-// almost to endMs, and the loop would exit after essentially one page —
-// silently capping every fetch at ~1500 bars (~5.2 days at 5m) of the
-// MOST RECENT history no matter how far back startMs actually asked
-// for. This is what made a 14-day Backtest run return the same trades
-// as a 7-day one for Binance specifically (Bybit and MEXC had the same
-// bug, fixed elsewhere in this file). Paging BACKWARD from endMs instead
-// — same approach used for Bybit/MEXC — matches how Binance is
-// documented to anchor and reliably walks the full requested range.
+// Binance USDT-M klines: with BOTH startTime and endTime set and a window wider than `limit` bars, the
+// endpoint hands back the FIRST `limit` bars from startTime (ascending) — it does NOT anchor to endTime.
+// (Proof from real runs: a "Last 30 days" backtest returned trades dated ~27 days ago, i.e. the oldest
+// ~5.2 days of the window, and every range showed "1500 bars (~5.2d)".) An earlier version of this fetcher
+// assumed the opposite (end-anchored), paged backward from endMs, saw the first page's oldest bar sit at
+// startMs, and stopped after ONE page — so every range longer than ~5.2 days silently got only 1500 bars.
+//
+// This version doesn't depend on which way the exchange anchors: each request asks for a window of at most
+// `limit` bars (startTime..startTime + limit*interval - 1), so start-anchored and end-anchored behaviour are
+// identical, then the cursor walks FORWARD one window at a time until endMs.
 async function fetchBinanceFuturesKlines(symbol, interval, startMs, endMs){
-  const pages = []; // oldest page unshifted to the front, so pages[0] is the oldest chunk once the loop ends
-  let cursorEnd = endMs;
+  const LIMIT = 1500;
+  const stepMs = (BACKTEST_INTERVAL_MS[interval] || 300_000);
+  const seenT = new Set();
+  const out = [];
+  let cursor = startMs;
   let guard = 0;
-  while(cursorEnd > startMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
+  while(cursor < endMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
     guard++;
-    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${BINANCE_KLINE_INTERVAL[interval]}&startTime=${startMs}&endTime=${cursorEnd}&limit=1500`;
+    const windowEnd = Math.min(endMs, cursor + LIMIT * stepMs - 1);
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${BINANCE_KLINE_INTERVAL[interval]}&startTime=${cursor}&endTime=${windowEnd}&limit=${LIMIT}`;
     const r = await klineFetch('binance', url);
     if(!r.ok){
       let eb = null; try{ eb = await r.json(); }catch(e){ /* body optional */ }
@@ -1704,24 +1699,17 @@ async function fetchBinanceFuturesKlines(symbol, interval, startMs, endMs){
       throw new Error(`Binance klines HTTP ${r.status}${eb && eb.msg ? ` (${eb.msg})` : ''}`);
     }
     const rows = await r.json();
-    if(!Array.isArray(rows) || !rows.length) break;
-    const chron = rows
-      .map(row => ({ t: row[0], o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] }))
-      .sort((a, b) => a.t - b.t); // Binance's docs say ascending already — sorted defensively, same as the other fetchers below
-    pages.unshift(chron);
-    const oldestT = chron[0].t;
-    if(oldestT <= startMs) break; // this page already reached back to (or past) the requested start — done
-    if(oldestT >= cursorEnd) break; // stuck page (didn't move backward at all) — stop rather than loop forever
-    cursorEnd = oldestT - 1; // next page: everything up to just before this page's oldest bar
-  }
-  const seenT = new Set();
-  const out = [];
-  for(const page of pages){
-    for(const c of page){
-      if(c.t < startMs || c.t > endMs || seenT.has(c.t)) continue;
-      seenT.add(c.t);
-      out.push(c);
+    if(Array.isArray(rows)){
+      for(const row of rows){
+        const t = row[0];
+        if(t < startMs || t > endMs || seenT.has(t)) continue;
+        seenT.add(t);
+        out.push({ t, o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] });
+      }
     }
+    // A symbol listed part-way through the range legitimately returns empty windows before its listing date,
+    // so an empty window just advances the cursor instead of ending the fetch.
+    cursor = windowEnd + 1;
   }
   out.sort((a, b) => a.t - b.t);
   return out;
@@ -1743,12 +1731,19 @@ async function fetchBinanceFuturesKlines(symbol, interval, startMs, endMs){
 // cursor to just before the oldest bar that page returned — matches how
 // Bybit actually anchors the window and reliably walks the full range.
 async function fetchBybitLinearKlines(symbol, interval, startMs, endMs){
-  const pages = []; // oldest page unshifted to the front, so pages[0] is the oldest chunk once the loop ends
-  let cursorEnd = endMs;
+  // Anchor-agnostic paging (same approach as the Binance fetcher): every request covers a window of at most
+  // `limit` bars, so it makes no difference whether the endpoint returns the oldest or the newest bars of an
+  // over-wide window. The cursor walks FORWARD one window at a time until endMs.
+  const LIMIT = 1000;
+  const stepMs = BACKTEST_INTERVAL_MS[interval] || 300_000;
+  const seenT = new Set();
+  const out = [];
+  let cursor = startMs;
   let guard = 0;
-  while(cursorEnd > startMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
+  while(cursor < endMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
     guard++;
-    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${encodeURIComponent(symbol)}&interval=${BYBIT_KLINE_INTERVAL[interval]}&start=${startMs}&end=${cursorEnd}&limit=1000`;
+    const windowEnd = Math.min(endMs, cursor + LIMIT * stepMs - 1);
+    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${encodeURIComponent(symbol)}&interval=${BYBIT_KLINE_INTERVAL[interval]}&start=${cursor}&end=${windowEnd}&limit=${LIMIT}`;
     let data = null;
     for(let attempt = 0; attempt < 6; attempt++){
       const r = await klineFetch('bybit', url);
@@ -1765,22 +1760,13 @@ async function fetchBybitLinearKlines(symbol, interval, startMs, endMs){
     }
     if(!data || data.retCode !== 0) throw new Error(`Bybit klines error: ${(data && data.retMsg) || 'rate limited'} (still rate limited after retries)`);
     const rows = (data.result && data.result.list) || [];
-    if(!rows.length) break;
-    const chron = rows.slice().reverse().map(row => ({ t: +row[0], o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] })); // Bybit returns newest-first
-    pages.unshift(chron);
-    const oldestT = chron[0].t;
-    if(oldestT <= startMs) break; // this page already reached back to (or past) the requested start — done
-    if(oldestT >= cursorEnd) break; // stuck page (didn't move backward at all) — stop rather than loop forever
-    cursorEnd = oldestT - 1; // next page: everything up to just before this page's oldest bar
-  }
-  const seenT = new Set();
-  const out = [];
-  for(const page of pages){
-    for(const c of page){
-      if(c.t < startMs || c.t > endMs || seenT.has(c.t)) continue;
-      seenT.add(c.t);
-      out.push(c);
+    for(const row of rows){ // Bybit returns newest-first; order doesn't matter here, everything is sorted at the end
+      const t = +row[0];
+      if(t < startMs || t > endMs || seenT.has(t)) continue;
+      seenT.add(t);
+      out.push({ t, o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] });
     }
+    cursor = windowEnd + 1; // an empty window (pair not listed yet that far back) just moves on
   }
   out.sort((a, b) => a.t - b.t);
   return out;
@@ -1828,35 +1814,34 @@ async function fetchMexcFuturesKlines(symbol, interval, startMs, endMs){
   const mexcInterval = MEXC_KLINE_INTERVAL[interval];
   if(!mexcInterval) throw new Error(`MEXC's contract kline API has no ${interval} granularity — try 5m, 15m, 30m, or 1h.`);
   const mexcSymbol = toUnderscoreSymbol(symbol);
-  const startSec = Math.floor(startMs / 1000);
-  const pages = []; // oldest page unshifted to the front, so pages[0] is the oldest chunk once the loop ends
-  let cursorEndSec = Math.floor(endMs / 1000);
+  // Anchor-agnostic paging (same approach as the Binance fetcher): each request covers a window of at most 2000
+  // bars, so it doesn't matter whether MEXC returns the oldest or newest bars of an over-wide window. The cursor
+  // walks FORWARD one window at a time (seconds, as MEXC expects) until endMs.
+  const LIMIT = 2000;
+  const stepSec = Math.round((BACKTEST_INTERVAL_MS[interval] || 300_000) / 1000);
+  const endSec = Math.floor(endMs / 1000);
+  const seenT = new Set();
+  const out = [];
+  let cursorSec = Math.floor(startMs / 1000);
   let guard = 0;
-  while(cursorEndSec > startSec && guard < 500){ // guard: a stuck/misbehaving page should never spin forever
+  while(cursorSec < endSec && guard < 500){ // guard: a stuck/misbehaving page should never spin forever
     guard++;
-    const url = `https://api.mexc.com/api/v1/contract/kline/${mexcSymbol}?interval=${mexcInterval}&start=${startSec}&end=${cursorEndSec}`;
+    const windowEndSec = Math.min(endSec, cursorSec + (LIMIT - 1) * stepSec);
+    const url = `https://api.mexc.com/api/v1/contract/kline/${mexcSymbol}?interval=${mexcInterval}&start=${cursorSec}&end=${windowEndSec}`;
     const r = await klineFetch('mexc', url);
     if(!r.ok) throw new Error(`MEXC klines HTTP ${r.status}`);
     const body = await r.json();
-    const d = body && body.data;
-    if(!body || body.success !== true || !d || !Array.isArray(d.time) || !d.time.length) break;
-    const chron = d.time.map((tSec, i) => ({
-      t: tSec * 1000, o: +d.open[i], h: +d.high[i], l: +d.low[i], c: +d.close[i], v: +(d.vol ? d.vol[i] : 0),
-    })).sort((a, b) => a.t - b.t); // defensive — MEXC's docs don't state an order guarantee the way Bybit's (newest-first) do
-    pages.unshift(chron);
-    const oldestSec = Math.floor(chron[0].t / 1000);
-    if(oldestSec <= startSec) break; // this page already reached back to (or past) the requested start — done
-    if(oldestSec >= cursorEndSec) break; // stuck page (didn't move backward at all) — stop rather than loop forever
-    cursorEndSec = oldestSec - 1; // next page: everything up to just before this page's oldest bar
-  }
-  const seenT = new Set();
-  const out = [];
-  for(const page of pages){
-    for(const c of page){
-      if(c.t < startMs || c.t > endMs || seenT.has(c.t)) continue;
-      seenT.add(c.t);
-      out.push(c);
+    if(!body || body.success !== true) break; // an error reply (e.g. unknown contract) — stop; the route reports "not available"
+    const d = body.data;
+    if(d && Array.isArray(d.time)){
+      d.time.forEach((tSec, i) => {
+        const t = tSec * 1000;
+        if(t < startMs || t > endMs || seenT.has(t)) return;
+        seenT.add(t);
+        out.push({ t, o: +d.open[i], h: +d.high[i], l: +d.low[i], c: +d.close[i], v: +(d.vol ? d.vol[i] : 0) });
+      });
     }
+    cursorSec = windowEndSec + 1; // an empty window (pair not listed yet that far back) just moves on
   }
   out.sort((a, b) => a.t - b.t);
   return out;

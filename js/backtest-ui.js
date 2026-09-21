@@ -226,6 +226,16 @@ async function runBacktestFlow(){
     return `${s}: ${arr.length} bars (~${gotDays.toFixed(1)}d)`;
   }).join(', ');
   console.log(`[Backtest] Requested ~${requestedDays.toFixed(1)}d — got: ${coverage}${usableSymbols.length > 4 ? ', …' : ''}`);
+  // The longest history any selected symbol returned. If even that is well short of the requested range the fetch
+  // itself under-delivered (a paging problem), and the trade count would then say nothing about the range asked
+  // for — so it's flagged in the result line instead of being left to look like a normal result.
+  const bestGotDays = Math.max(0, ...usableSymbols.map(s => {
+    const arr = candlesBySymbol[s];
+    return arr.length ? (arr[arr.length - 1].t - arr[0].t) / 86_400_000 : 0;
+  }));
+  const shortCoverageWarning = bestGotDays < requestedDays * 0.85
+    ? ` ⚠ Only ${bestGotDays.toFixed(1)}d of the ${requestedDays.toFixed(1)}d requested was returned — these results do NOT cover the full range.`
+    : '';
 
   const quantCfgForRun = getQuantCfg({ log: false, minConfidence, riskPct: riskPctPerTrade, highSelectivity: false });
   const cfg = {
@@ -319,12 +329,12 @@ async function runBacktestFlow(){
       });
       if(quantHost) quantHost.style.display = '';
     } else if(quantHost){ quantHost.style.display = 'none'; }
-    const doneOk = `Done — ${result.barsEvaluated.toLocaleString()} symbol-bars evaluated across ${usableSymbols.length} symbol(s). Coverage: ${coverage}${usableSymbols.length > 4 ? ', …' : ''} (requested ~${requestedDays.toFixed(1)}d).`;
+    const doneOk = `Done — ${result.barsEvaluated.toLocaleString()} symbol-bars evaluated across ${usableSymbols.length} symbol(s). Coverage: ${coverage}${usableSymbols.length > 4 ? ', …' : ''} (requested ~${requestedDays.toFixed(1)}d).${shortCoverageWarning}`;
     showBtMessage(
       failed.length
         ? `Done. Fetch failed for: ${failed.join('; ')}.${unlistedNote ? ' ' + unlistedNote : ''} ${doneOk}`
         : `${doneOk}${unlistedNote ? ' ' + unlistedNote : ''}`,
-      failed.length ? 'error' : 'ok'
+      (failed.length || shortCoverageWarning) ? 'error' : 'ok'
     );
   }catch(err){
     showBtMessage(`Backtest failed: ${err.message}`, 'error');
