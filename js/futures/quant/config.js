@@ -27,7 +27,10 @@ export const HARD_LIMITS = {
   maxPositions: 3,         // also the platform-wide RISK_DEFAULTS.maxSimultaneousPositions
   minConfidence: 60,
   maxConfidence: 95,
-  maxLeverage: 10,
+  maxLeverage: 50,          // an outer safety ceiling only — engine.js already clamps the leverage it
+                             // passes in per-mode (10 for Paper, up to 50 for Live/Demo) before quantSize()
+                             // ever sees it, so this rarely binds; it exists so quantSize() is never handed
+                             // an unbounded number if called from anywhere that skips that outer clamp.
 };
 
 // Default score weights (sum to 100). Configurable; sanitize re-normalizes.

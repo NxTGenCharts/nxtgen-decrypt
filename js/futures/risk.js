@@ -15,11 +15,26 @@ export const RISK_DEFAULTS = {
                                 // is unchanged either way: size is always derived from equity x riskPct and
                                 // the stop distance, never a fixed dollar amount, and is still capped by real
                                 // available margin (see maxNotionalByMargin).
+  // Shipped default for the "Min expected net profit (%)" filter — a signal
+  // whose expected net (after fees/slippage) is below this is never taken.
+  // Still fully editable from that field.
+  minNetProfitPct: 0.50,
   maxSimultaneousPositions: 3,
-  defaultLeverage: 5,
-  maxLeverage: 10,
+  defaultLeverage: 10,          // fallback only, used if a leverage field's value somehow fails to parse —
+                                 // real defaults live on each field itself (10x on Live/Demo, 5x on Paper/Backtest).
+  maxLeverage: 15,               // Paper/Backtest's real ceiling. It's also the fallback the shared scanning
+                                 // engine uses for the Quant strategy's own leverage clamp when a caller doesn't
+                                 // say otherwise — true for both Paper's and Backtest's cfg, neither of which
+                                 // sets cfg.maxLeverage, so this one constant covers both. Live/Demo trading
+                                 // uses a separate, higher ceiling defined next to its own leverage handling in
+                                 // futures-ui.js and liveEngine.js (LIVE_LEVERAGE_MAX_LEVERAGE, 50) — precisely
+                                 // so changing either ceiling never moves the other.
   maintenanceMarginRate: 0.5,  // % — rough cross-margin estimate for liquidation distance
-  maxDailyLossPct: 2.0,
+  maxDailyLossPct: 15.0,      // Paper's own real default — it has no "Max Daily Loss" field of its own (only
+                                // Backtest and Live/Demo do), so this constant IS what stops a Paper day, via
+                                // noTradeEngine.js's fallback. Backtest has its own field (own default, 15%,
+                                // set directly on btMaxDailyLossPct) and Live/Demo sets its default independently
+                                // too (LIVE_MAX_DAILY_LOSS_DEFAULT_PCT in futures-ui.js) — neither reads this.
   // Symmetric stop-for-the-day on the upside, per an explicit request —
   // previously there was no such thing: a losing day had a hard floor,
   // a winning day had no ceiling at all. This isn't a "cool off and

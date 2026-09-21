@@ -21,7 +21,13 @@ export const DEFAULT_FEE_CONFIG = {
   bitget:  { makerPct: 0.02, takerPct: 0.06 },
 };
 
-export const DEFAULT_MIN_NET_PROFIT_PCT = 0.30;
+export const DEFAULT_MIN_NET_PROFIT_PCT = 0.50;   // Backtest's real default — it has no "Min expected net
+                                                    // profit" field of its own (only Paper and Live/Demo do,
+                                                    // each with its own field), so this constant IS what
+                                                    // Backtest uses, via engine.js's `cfg.minNetProfitPct ??
+                                                    // DEFAULT_MIN_NET_PROFIT_PCT` fallback — Paper and Live/Demo
+                                                    // always set cfg.minNetProfitPct explicitly from their own
+                                                    // field, so this fallback never actually fires for them.
 export const PREFERRED_MIN_NET_PROFIT_PCT = 0.50;
 export const FUNDING_INTERVAL_HOURS = 8;
 

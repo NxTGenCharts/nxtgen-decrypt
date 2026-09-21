@@ -464,7 +464,12 @@ function evaluateQuantRow(symbol, snap, regime, cfg, dayState, btcShock, nowMs, 
   const startEq = dayState.startingEquity || equity;
   const riskState = computeQuantRiskState(dayState.quantTrades || [], startEq, nowMs, qcfg);
   const riskPct = effectiveRiskPct(qcfg, riskState, m.regime.riskMult);
-  const leverage = clamp(cfg.leverage || RISK_DEFAULTS.defaultLeverage, 1, 10);
+  // Ceiling comes from whichever cfg built this (Paper leaves it unset and
+  // gets RISK_DEFAULTS.maxLeverage=10; Live/Demo passes its own higher
+  // maxLeverage — see LIVE_LEVERAGE_MAX_LEVERAGE in futures-ui.js/liveEngine.js)
+  // rather than a number fixed here, so raising Live's cap can never also
+  // raise what Paper allows.
+  const leverage = clamp(cfg.leverage || RISK_DEFAULTS.defaultLeverage, 1, cfg.maxLeverage || RISK_DEFAULTS.maxLeverage);
 
   const feeLookup = (cfg.feeConfig || DEFAULT_FEE_CONFIG)[cfg.exchange || 'binance'] || DEFAULT_FEE_CONFIG.binance;
   const entryFeePct = feeLookup.takerPct, exitFeePct = feeLookup.takerPct;

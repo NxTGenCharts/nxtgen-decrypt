@@ -198,6 +198,30 @@
   position:sticky; top:0; z-index:1; background:var(--bg);
 }
 
+/* The Live/Demo Trading section is a grouping heading, not a card: the panel
+   border it used to carry drew a second box around content that is already
+   made of bordered cards (exchange picker, summary grid, trade history, trade
+   log), so the whole section read as one giant outlined slab. The heading
+   stays, the chrome goes; the nested .ov-blocks inside keep their own. */
+:is(#panelFutures, #panelUtilities) .fu-live-section{
+  background:none; border:0; border-radius:0; padding:0;
+}
+
+/* Session trade history. Declared once here rather than inline on both the
+   header row (page markup) and the data rows (renderLiveHistory) — those two
+   were duplicate copies of the same 13-column string, which is exactly how a
+   header drifts out of alignment with its own body when a column is added.
+   Columns: Time · Exch · Symbol · Strategy · Dir · Entry · Exit · Lev · Qty ·
+   Gross · Fees · Net · Duration · Order ID. */
+:is(#panelFutures, #panelUtilities) .fu-hrow--live{
+  grid-template-columns:.7fr 1fr 1fr 1.7fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr 1.4fr;
+}
+:is(#panelFutures, #panelUtilities) .table-scroll .fu-hrow--live{ min-width:1000px; }
+:is(#panelFutures, #panelUtilities) .fu-strategy-cell{
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  color:var(--ink-dim); font-size:11.5px;
+}
+
 /* Live/Demo Trading — per-exchange selection rows (mirrors Autotrade's
    Connect Exchanges rows: exchange label + Live/Demo toggle — but here
    the row itself is also the "which exchange is active" selector, since

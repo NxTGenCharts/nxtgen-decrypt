@@ -380,9 +380,12 @@ export const state = {
     // there. Empty objects here just mean "use each strategy's own
     // registry default" until that init runs.
     strategies: {}, strategyRR: {},
-    minNetProfitPct: 0.30,
+    // Shipped defaults for the Futures Engine settings block. All three stay
+    // fully editable from their fields (and from the matching value="" in the
+    // page markup, which must be kept in step with these).
+    minNetProfitPct: 0.50,
     riskPctPerTrade: 1.0,
-    leverage: 5,
+    leverage: 10,
     dayState: null,           // built lazily by futures-ui.js: { equity, startingEquity, trades, wins, losses, ... , positions:[] }
     tradeHistory: [],
     // NxTGen Grid — Paper mode only (see js/futures/grid.js and the

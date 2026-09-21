@@ -258,7 +258,7 @@ export async function placeLiveEntryOrder(session, adapter, approved, side, exch
         };
         adapter.onPositionsChanged && adapter.onPositionsChanged(session);
         adapter.notify && adapter.notify(`Order rejected: ${result.message} — adopted the existing ${ep.side} ${approved.symbol} position (size ${ep.size} @ ${ep.avgPrice}) into tracking so it stops showing as "None"; its own TP/SL (if any) weren't set by this app and aren't managed here.`, 'error');
-        adapter.updateOpenPositionLabel && adapter.updateOpenPositionLabel(`[${exchange}] ${approved.symbol} ${ep.side} ${ep.size} @ ${ep.avgPrice}`);
+        adapter.updateOpenPositionLabel && adapter.updateOpenPositionLabel(`[${exchange}] ${approved.symbol} ${ep.side} ${ep.size} @ ${ep.avgPrice} · adopted-existing`);
       } else {
         const skipMin = noteLiveOrderFailure(session, approved.symbol, result.message, 'rejected');
         adapter.notify && adapter.notify(`Order rejected on ${approved.symbol}: ${result.message} — skipping ${approved.symbol} for ${skipMin} min and moving on to the next pair.`, 'error');
@@ -326,7 +326,7 @@ export async function runLiveCycleInner(session, adapter){
       if(!data.open){
         recordLiveClosure(session, adapter, symbol, tracked, data.closed);
       } else {
-        adapter.updateOpenPositionLabel && adapter.updateOpenPositionLabel(`[${tracked.exchange}] ${symbol} ${data.position.side} ${data.position.size} @ ${data.position.avgPrice} (uPnL ${fmtUsd(data.position.unrealisedPnl)})`);
+        adapter.updateOpenPositionLabel && adapter.updateOpenPositionLabel(`[${tracked.exchange}] ${symbol} ${data.position.side} ${data.position.size} @ ${data.position.avgPrice} (uPnL ${fmtUsd(data.position.unrealisedPnl)})${tracked.setupType ? ` · ${tracked.setupType}` : ''}`);
         if(tracked.lastSize != null && data.position.size < tracked.lastSize - 1e-9){
           const filledQty = tracked.lastSize - data.position.size;
           const realizedDelta = (data.position.curRealisedPnl != null && tracked.lastRealizedPnl != null)
@@ -413,7 +413,7 @@ export async function runLiveCycleInner(session, adapter){
               source: 'unknown', lastSize: ep.size, lastRealizedPnl: ep.curRealisedPnl || 0,
             };
             adapter.notify && adapter.notify(`Found an untracked open ${exchange} position — ${ep.symbol} ${ep.side} ${ep.size} @ ${ep.avgPrice} — not placed or previously tracked by this app; adopted into monitoring so it's no longer only visible on ${exchange} itself.`, 'error');
-            adapter.updateOpenPositionLabel && adapter.updateOpenPositionLabel(`[${exchange}] ${ep.symbol} ${ep.side} ${ep.size} @ ${ep.avgPrice} (uPnL ${fmtUsd(ep.unrealisedPnl || 0)})`);
+            adapter.updateOpenPositionLabel && adapter.updateOpenPositionLabel(`[${exchange}] ${ep.symbol} ${ep.side} ${ep.size} @ ${ep.avgPrice} (uPnL ${fmtUsd(ep.unrealisedPnl || 0)}) · adopted-existing`);
           }
           adapter.onPositionsChanged && adapter.onPositionsChanged(session);
         }
@@ -455,7 +455,11 @@ export async function runLiveCycleInner(session, adapter){
     exchange, weights: DEFAULT_WEIGHTS, highSelectivity: session.highSelectivity,
     minConfidence: Math.min(95, session.minConfidence + session.liveAdaptiveConfidenceBoost),
     minRiskReward: session.minRiskReward, minNetProfitPct: session.minNetProfitPct,
-    riskPctPerTrade: session.riskPctPerTrade, leverage: session.leverage,
+    // maxLeverage here must stay in sync with LIVE_LEVERAGE_MAX_LEVERAGE (futures-ui.js) — the other place
+    // Live/Demo builds this same cfg shape (the manual-mode re-check). Kept as a literal rather than a shared
+    // import so this module doesn't need to import from futures-ui.js just for one constant; Paper never sets
+    // this key at all, so its own ceiling (RISK_DEFAULTS.maxLeverage, 10) is untouched by raising this one.
+    riskPctPerTrade: session.riskPctPerTrade, leverage: session.leverage, maxLeverage: 50,
     strategies: session.strategies, strategyRR: session.strategyRR,
     quant: adapter.getQuantCfg({ log: true, minConfidence: Math.min(95, session.minConfidence + session.liveAdaptiveConfidenceBoost), riskPct: session.riskPctPerTrade, highSelectivity: session.highSelectivity }),
   };

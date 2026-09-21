@@ -247,7 +247,7 @@ function readSettingsFromInputs(){
   // this still guards against a stale localStorage value from before the
   // ratio became non-configurable.
   if(els.fuMinRR) f.minRiskReward = 2.0;
-  if(els.fuMinNetProfit) f.minNetProfitPct = Number(els.fuMinNetProfit.value) || 0.30;
+  if(els.fuMinNetProfit) f.minNetProfitPct = Number(els.fuMinNetProfit.value) || RISK_DEFAULTS.minNetProfitPct;
   // Clamped server-side-of-the-UI (not just via the input's min/max
   // attributes) so a 0/negative/absurd value typed directly, or the
   // attributes being bypassed, can never size a trade — the user can
@@ -764,6 +764,14 @@ function renderHistory(history){
 // =============================================================
 
 const LIVE_TRADEABLE_EXCHANGES = ['bybit', 'binance', 'gateio', 'mexc', 'bitget'];
+// Live/Demo's own leverage ceiling — deliberately separate from
+// RISK_DEFAULTS.maxLeverage (10, Paper/Backtest's own ceiling, unaffected by
+// this). Most exchanges' own futures leverage tops out well past this (50x,
+// 75x, even 100x on some pairs); 50x is the cap this app enforces regardless
+// of what an exchange itself would allow. Passed as cfg.maxLeverage into
+// runScanCycle from both places Live/Demo actually builds that cfg — the
+// manual-mode re-check below, and the Auto-mode scan in liveEngine.js.
+const LIVE_LEVERAGE_MAX_LEVERAGE = 50;
 // MEXC's Futures Demo Trading is a website/app-only feature — nothing in
 // its API exposes a demo/testnet base URL (same situation MEXC spot has
 // always had in this app). Live is still available; Demo just isn't.
@@ -1016,7 +1024,7 @@ async function executeLivePendingSignal(){
     exchange: p.exchange, weights: DEFAULT_WEIGHTS, highSelectivity: f2.highSelectivity,
     minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost),
     minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
-    riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage,
+    riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage, maxLeverage: LIVE_LEVERAGE_MAX_LEVERAGE,
     strategies: f2.strategies, strategyRR: f2.strategyRR,
     // Quant follows the same shared top controls — including the live adaptive confidence boost above.
     quant: getQuantCfg({ log: true, minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost), riskPct: f2.riskPctPerTrade, highSelectivity: f2.highSelectivity }),
@@ -2022,15 +2030,25 @@ function initTradeLog(){
   renderTradeLog();
 }
 
+// Which strategy produced a trade is already carried on every record (and on
+// every tracked open position) as `setupType` — it was only ever surfaced in
+// the cross-session Trade Log and its exports, so the session table and the
+// Open Position card both showed a trade with no way to tell what opened it.
+// Both now name it.
+function strategyLabel(setupType){
+  return setupType ? String(setupType) : '—';
+}
+
 function renderLiveHistory(){
   if(!els.fuLiveHistoryRows) return;
   const history = fu().liveTradeHistory;
   if(!history.length){ els.fuLiveHistoryRows.innerHTML = '<div class="fu-empty">No live/demo trades yet this session.</div>'; return; }
   els.fuLiveHistoryRows.innerHTML = history.slice(0, 50).map(t => `
-    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr 1.4fr;">
+    <div class="fu-hrow fu-hrow--live ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}">
       <div>${t.time}</div>
       <div>${t.exchange || '—'}</div>
       <div>${t.symbol}${tradeSourceBadge(t)}</div>
+      <div class="fu-strategy-cell" title="${strategyLabel(t.setupType)}">${strategyLabel(t.setupType)}</div>
       <div>${t.side}${t.partial ? ` (${t.tag})` : ''}</div>
       <div>${t.entry != null ? Number(t.entry).toFixed(4) : '—'}</div>
       <div>${t.exit != null ? Number(t.exit).toFixed(4) : '—'}</div>
@@ -2384,7 +2402,9 @@ function positionsForTick(){
 
 function openPositionText(exchange, symbol, p){
   const m = liveMarks[symbol];
-  return `[${exchange}] ${symbol} ${p.side} ${p.qty || 0} @ ${p.entry}` + (m ? ` — mark ${m.price} (uPnL ${fmtUsd(m.uPnl)})` : '');
+  return `[${exchange}] ${symbol} ${p.side} ${p.qty || 0} @ ${p.entry}` +
+         (m ? ` — mark ${m.price} (uPnL ${fmtUsd(m.uPnl)})` : '') +
+         (p.setupType ? ` · ${p.setupType}` : '');
 }
 
 async function runFastTick(){
@@ -2598,13 +2618,18 @@ function initLiveDailyProfitTargetInput(){
 // liquidation-safety check, max simultaneous positions) still in place
 // elsewhere in this pipeline.
 const LIVE_MAX_DAILY_LOSS_MAX_PCT = 50;
+// Live/Demo's own default (10%) — deliberately its own constant rather than
+// RISK_DEFAULTS.maxDailyLossPct (2%): Paper has no field of its own for this
+// and falls back straight to that constant (see noTradeEngine.js), so
+// changing Live/Demo's default here can never move Paper's.
+const LIVE_MAX_DAILY_LOSS_DEFAULT_PCT = 10;
 function initLiveMaxDailyLossInput(){
   const f = fu();
-  if(f.liveMaxDailyLossPct == null) f.liveMaxDailyLossPct = RISK_DEFAULTS.maxDailyLossPct;
+  if(f.liveMaxDailyLossPct == null) f.liveMaxDailyLossPct = LIVE_MAX_DAILY_LOSS_DEFAULT_PCT;
   if(els.fuLiveMaxDailyLossPct){
     els.fuLiveMaxDailyLossPct.value = f.liveMaxDailyLossPct;
     els.fuLiveMaxDailyLossPct.addEventListener('input', () => {
-      const clamped = Math.min(LIVE_MAX_DAILY_LOSS_MAX_PCT, Math.max(0.5, Number(els.fuLiveMaxDailyLossPct.value) || RISK_DEFAULTS.maxDailyLossPct));
+      const clamped = Math.min(LIVE_MAX_DAILY_LOSS_MAX_PCT, Math.max(0.5, Number(els.fuLiveMaxDailyLossPct.value) || LIVE_MAX_DAILY_LOSS_DEFAULT_PCT));
       f.liveMaxDailyLossPct = clamped;
       els.fuLiveMaxDailyLossPct.value = clamped;
     });

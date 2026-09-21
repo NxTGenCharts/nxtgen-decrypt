@@ -215,7 +215,7 @@
       </div>
       <div class="field">
         <label for="fuMinNetProfit">Min expected net profit (%)</label>
-        <input id="fuMinNetProfit" type="number" min="0" max="3" step="0.05" value="0.30">
+        <input id="fuMinNetProfit" type="number" min="0" max="3" step="0.05" value="0.50">
       </div>
       <div class="field">
         <label for="fuRiskPct" title="Max % of the selected exchange's futures-account equity lost on a single losing trade — position size is derived backwards from this, never a fixed dollar amount. Adjustable 0.25-80%. NxTGen Quant Futures follows this value but never risks more than 1% per trade.">Risk per trade (%)</label>
@@ -223,7 +223,7 @@
       </div>
       <div class="field">
         <label for="fuLeverage">Leverage</label>
-        <input id="fuLeverage" type="number" min="1" max="10" step="1" value="5">
+        <input id="fuLeverage" type="number" min="1" max="50" step="1" value="10">
       </div>
       <div class="field">
         <label for="fuSelectivityToggle" title="Also switches NxTGen Quant Futures to its High Selectivity tier (score >= 80, 5 of 6 confluence categories, 5 confirmations). Minimum confidence 82 and every other filter tightened (reward:risk is already fixed at 1:2 for everyone — this toggle no longer changes it). May take zero trades for long stretches — that's by design.">High Selectivity Mode</label>
@@ -259,7 +259,7 @@
       <pre id="fuExplain" class="fu-explain">Click a row above to see why it was approved or rejected.</pre>
     </div>
 
-    <div class="ov-block" style="margin-top:18px;border-color:var(--amber-dim);">
+    <div class="ov-block fu-live-section" style="margin-top:18px;">
       <div class="ov-block-title">Live / Demo Trading <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">ALL FIVE EXCHANGES</span></div>
 
       <div class="fu-live-exch-rows" id="fuLiveExchRows"><!-- rendered by js/futures-ui.js — one row per exchange, click to select, click Live/Demo to set that exchange's network --></div>
@@ -282,7 +282,7 @@
         </div>
         <div class="field">
           <label for="fuLiveMaxDailyLossPct" title="Once real loss for the session reaches this % of the starting balance, no new entries are placed for the rest of the session (open positions still run their own TP/SL as normal, and the bot keeps scanning — it just won't act on anything until Reset Session or the next day). Adjustable 0.5-50%.">Max Daily Loss (%)</label>
-          <input id="fuLiveMaxDailyLossPct" type="number" min="0.5" max="50" step="0.5" value="2">
+          <input id="fuLiveMaxDailyLossPct" type="number" min="0.5" max="50" step="0.5" value="10">
         </div>
         <div class="field">
           <label title="Auto: the moment a signal clears every check, it's placed automatically — no click needed. Manual: the same scan and checks run every cycle, but a qualifying signal is shown here and waits for you to click Execute — nothing is placed on its own. Applies to real Live/Demo trading only, not Paper.">Trade Mode</label>
@@ -341,8 +341,8 @@
       <div class="ov-block" style="margin-top:14px;">
         <div class="ov-block-title" style="font-size:13px;">Live/Demo Trade History <span style="font-weight:400;color:var(--dim);">(this session)</span></div>
         <div class="table-scroll">
-          <div class="fu-hrow fu-head" style="grid-template-columns:.7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr 1.4fr;">
-            <div>Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div><div>Order ID</div>
+          <div class="fu-hrow fu-hrow--live fu-head">
+            <div>Time</div><div>Exch</div><div>Symbol</div><div>Strategy</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div><div>Order ID</div>
           </div>
           <div id="fuLiveHistoryRows"><div class="fu-empty">No live/demo trades yet this session.</div></div>
         </div>
