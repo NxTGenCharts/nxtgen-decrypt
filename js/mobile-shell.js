@@ -220,7 +220,12 @@ window.addEventListener('hashchange', routeHash);
 window.addEventListener('load', () => setTimeout(routeHash, 0));
 
 // ---------- Home: ticker + movers ----------
-const SYMS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT', 'TRXUSDT'];
+// Twelve fills the desktop movers board (an auto-fitting grid) without
+// making the phone's single-column list endless — renderMarket() caps the
+// phone at the top 8. The ticker always runs the full set.
+const SYMS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT', 'TRXUSDT',
+              'LINKUSDT', 'AVAXUSDT', 'LTCUSDT', 'DOTUSDT'];
+const isPhone = () => window.matchMedia('(max-width:768px)').matches;
 const fmtPrice = (n) => {
   if (!isFinite(n)) return '—';
   const [min, max] = n >= 1000 ? [2, 2] : n >= 1 ? [2, 4] : [4, 6];
@@ -266,13 +271,14 @@ function renderMarket(rows) {
     return;
   }
   if (tick) {
-    const grp = rows.map((r) => `<span class="m-tk">${r.sym.replace('USDT', '')}<i class="${r.chg >= 0 ? 'm-up' : 'm-down'}">${fmtChg(r.chg)}</i></span>`).join('');
+    const grp = rows.map((r) => `<span class="m-tk"><b>${r.sym.replace('USDT', '')}</b>${fmtPrice(r.price)}<i class="${r.chg >= 0 ? 'm-up' : 'm-down'}">${fmtChg(r.chg)}</i></span>`).join('');
     $('#mTickerTrack').innerHTML = `<span class="m-ticker-grp">${grp}</span><span class="m-ticker-grp" aria-hidden="true">${grp}</span>`;
     tick.hidden = false; tick.dataset.loaded = '1';
   }
   if (movers) {
     const sorted = rows.slice().sort((a, b) => b.chg - a.chg);
-    $('#mMoversList').innerHTML = sorted.map((r) => {
+    const shown = isPhone() ? sorted.slice(0, 8) : sorted;
+    $('#mMoversList').innerHTML = shown.map((r) => {
       const base = r.sym.replace('USDT', '');
       return `<div class="m-mrow"><div class="m-pair">${base}/USDT<small>Vol ${fmtVol(r.vol)}</small></div>` +
              `<div class="m-price">${fmtPrice(r.price)}</div>` +
@@ -282,12 +288,24 @@ function renderMarket(rows) {
   }
 }
 
+let lastRows = null;
 function startMarket() {
   if (!$('#mTicker') && !$('#mMovers')) return; // Home page only
-  const tick = async () => { if (document.visibilityState === 'visible') renderMarket(await fetchTickers()); };
+  const tick = async () => {
+    if (document.visibilityState !== 'visible') return;
+    const rows = await fetchTickers();
+    if (rows) lastRows = rows;
+    renderMarket(rows);
+  };
   tick();
   setInterval(tick, 20000);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') tick(); });
+  // Phone shows the top 8, desktop the full board — re-render on the crossing
+  // rather than leaving a stale list until the next 20s poll.
+  const mq = window.matchMedia('(max-width:768px)');
+  const onCross = () => { if (lastRows) renderMarket(lastRows); };
+  if (mq.addEventListener) mq.addEventListener('change', onCross);
+  else if (mq.addListener) mq.addListener(onCross);
 }
 
 // ---------- service worker ----------

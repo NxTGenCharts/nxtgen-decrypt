@@ -2170,41 +2170,86 @@ function checkAdaptiveCircuitBreaker(netUsd){
 
 const EXCHANGE_DISPLAY_NAMES = { bybit: 'Bybit', binance: 'Binance', gateio: 'Gate.io', mexc: 'MEXC', bitget: 'Bitget' };
 
+// The five exchanges used to render as five always-visible rows, which on a
+// phone is most of a screen of chrome for a choice that is made once. They now
+// render as a collapsed picker: the SELECTED exchange is the visible row (with
+// its own Live/Demo toggle still on it, so switching network never costs an
+// extra tap), and the other four live behind it until the row is tapped.
+// Open/closed is UI-only state, deliberately kept out of `state` — it should
+// never persist across a reload or end up in a saved session.
+let liveExchListOpen = false;
+
+const CHEVRON_SVG = '<svg class="fu-exch-chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 9 6 6 6-6"/></svg>';
+
+function liveExchangeRowHtml(key, { selected, isCurrent }){
+  const f = fu();
+  const name = EXCHANGE_DISPLAY_NAMES[key] || key;
+  const mode = f.liveModeByExchange[key] || 'live';
+  const supportsDemo = !LIVE_ONLY_EXCHANGES.includes(key);
+  const cred = state.exchangeCreds[key] && state.exchangeCreds[key][mode];
+  const verified = !!(cred && cred.verified);
+  const statusNote = verified
+    ? `verified ${mode} key connected`
+    : `no verified ${mode} key — connect in Autotrade &amp; Balances`;
+  const modeToggle = supportsDemo ? `
+    <div class="mode-toggle" role="group" aria-label="${name} network">
+      <button type="button" class="mode-btn ${mode==='live'?'active':''}" data-mode="live">Live</button>
+      <button type="button" class="mode-btn ${mode==='demo'?'active':''}" data-mode="demo">Demo</button>
+    </div>` : `<div class="mode-toggle mode-toggle--disabled" title="${name} has no public Demo Trading environment"><span class="mode-btn active">Live only</span></div>`;
+  const cls = 'fu-live-exch-row' + (selected ? ' selected' : '') + (isCurrent ? ' fu-exch-current' : '');
+  const currentAttrs = isCurrent
+    ? ` role="button" tabindex="0" aria-expanded="${liveExchListOpen}" aria-controls="fuExchList" aria-label="Selected exchange: ${name}. Activate to choose a different exchange."`
+    : ' role="option" aria-selected="false"';
+  return `<div class="${cls}" data-exchange="${key}"${currentAttrs}>
+    <div class="fu-live-exch-radio"></div>
+    <div class="fu-live-exch-label">${name}</div>
+    ${modeToggle}
+    <div class="fu-live-exch-note" data-verified="${verified ? '1' : '0'}">${statusNote}</div>
+    ${isCurrent ? CHEVRON_SVG : ''}
+  </div>`;
+}
+
 function renderLiveExchangeRows(){
   if(!els.fuLiveExchRows) return;
   const f = fu();
-  els.fuLiveExchRows.innerHTML = LIVE_TRADEABLE_EXCHANGES.map(key => {
-    const name = EXCHANGE_DISPLAY_NAMES[key] || key;
-    const mode = f.liveModeByExchange[key] || 'live';
-    const selected = f.liveExchange === key;
-    const supportsDemo = !LIVE_ONLY_EXCHANGES.includes(key);
-    const cred = state.exchangeCreds[key] && state.exchangeCreds[key][mode];
-    const verified = !!(cred && cred.verified);
-    const statusNote = verified
-      ? `verified ${mode} key connected`
-      : `no verified ${mode} key — connect in Autotrade &amp; Balances`;
-    const modeToggle = supportsDemo ? `
-      <div class="mode-toggle" role="group" aria-label="${name} network">
-        <button type="button" class="mode-btn ${mode==='live'?'active':''}" data-mode="live">Live</button>
-        <button type="button" class="mode-btn ${mode==='demo'?'active':''}" data-mode="demo">Demo</button>
-      </div>` : `<div class="mode-toggle mode-toggle--disabled" title="${name} has no public Demo Trading environment"><span class="mode-btn active">Live only</span></div>`;
-    return `<div class="fu-live-exch-row${selected ? ' selected' : ''}" data-exchange="${key}">
-      <div class="fu-live-exch-radio"></div>
-      <div class="fu-live-exch-label">${name}</div>
-      ${modeToggle}
-      <div class="fu-live-exch-note" style="text-align:right;color:${verified ? 'var(--green)' : 'var(--dim)'};">${statusNote}</div>
+  const current = LIVE_TRADEABLE_EXCHANGES.includes(f.liveExchange)
+    ? f.liveExchange
+    : LIVE_TRADEABLE_EXCHANGES[0];
+  const rest = LIVE_TRADEABLE_EXCHANGES.filter(k => k !== current);
+  els.fuLiveExchRows.innerHTML =
+    `<div class="fu-exch-select${liveExchListOpen ? ' is-open' : ''}">
+      ${liveExchangeRowHtml(current, { selected: f.liveExchange === current, isCurrent: true })}
+      <div class="fu-exch-list" id="fuExchList" role="listbox" aria-label="Other exchanges">
+        <div class="fu-exch-list-inner">
+          ${rest.map(k => liveExchangeRowHtml(k, { selected: false, isCurrent: false })).join('')}
+        </div>
+      </div>
     </div>`;
-  }).join('');
+}
+
+function setLiveExchListOpen(open){
+  liveExchListOpen = open;
+  const wrap = els.fuLiveExchRows && els.fuLiveExchRows.querySelector('.fu-exch-select');
+  if(!wrap) return;
+  wrap.classList.toggle('is-open', open);
+  const cur = wrap.querySelector('.fu-exch-current');
+  if(cur) cur.setAttribute('aria-expanded', String(open));
 }
 
 function initLiveExchangeRows(){
   if(!els.fuLiveExchRows) return;
+
   els.fuLiveExchRows.addEventListener('click', e => {
     const row = e.target.closest('.fu-live-exch-row');
     if(!row) return;
     const exchange = row.dataset.exchange;
     const f = fu();
     const modeBtn = e.target.closest('.mode-btn[data-mode]');
+    const isCurrent = row.classList.contains('fu-exch-current');
+
+    // Tapping the visible (selected) row anywhere except its Live/Demo buttons
+    // is what opens and closes the picker.
+    if(isCurrent && !modeBtn){ setLiveExchListOpen(!liveExchListOpen); return; }
 
     const exchangeChanged = f.liveExchange !== exchange;
     const modeChanged = modeBtn && f.liveModeByExchange[exchange] !== modeBtn.dataset.mode;
@@ -2212,7 +2257,28 @@ function initLiveExchangeRows(){
 
     if(modeBtn) f.liveModeByExchange[exchange] = modeBtn.dataset.mode;
     f.liveExchange = exchange;
+    liveExchListOpen = false; // a choice was made — collapse back down to the one row
     resetLiveSession(); // re-arming for a different exchange/network is a decision made again, deliberately, every time — see its own comment below
+  });
+
+  // Keyboard: the collapsed row is role="button", so Enter/Space must work on it.
+  els.fuLiveExchRows.addEventListener('keydown', e => {
+    if(e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+    const cur = e.target.closest('.fu-exch-current');
+    if(!cur || e.target.closest('.mode-btn')) return;
+    e.preventDefault();
+    setLiveExchListOpen(!liveExchListOpen);
+  });
+
+  els.fuLiveExchRows.addEventListener('keydown', e => {
+    if(e.key === 'Escape' && liveExchListOpen) setLiveExchListOpen(false);
+  });
+
+  // Tapping anywhere else on the page closes it, the way a select would.
+  document.addEventListener('click', e => {
+    if(!liveExchListOpen) return;
+    if(els.fuLiveExchRows.contains(e.target)) return;
+    setLiveExchListOpen(false);
   });
 }
 

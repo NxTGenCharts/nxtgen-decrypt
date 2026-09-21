@@ -235,6 +235,27 @@
   .controls .field:has(#cliMode){ grid-column:1 / -1; }
   .controls > .btn-row, .controls > .stats-row{ grid-column:1 / -1; }
 
+  /* Futures Engine settings block. futures.css caps each cell at 230px so five
+     short number inputs don't stretch across a monitor — on a phone that same
+     cap left one lonely 230px column floating in a 360px panel with a ragged
+     right edge. Two even columns here instead, with the checkbox field (whose
+     label is a full sentence) spanning the row so it never gets squeezed. */
+  .controls.controls--compact{ grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  .controls.controls--compact .field{ max-width:none; min-width:0; }
+  .controls.controls--compact .field:has(.toggle-check){ grid-column:1 / -1; }
+  .controls.controls--compact .toggle-check{ align-items:center; font-size:12px; min-height:var(--touch-target); }
+  /* uppercase 11.5px labels wrap to two lines at this width; keep the inputs
+     on a common baseline (components.css pushes them down with margin-top:auto) */
+  .controls.controls--compact .field > label{ line-height:1.35; }
+
+  /* Same treatment for the Live/Demo settings row: futures.css auto-fits at
+     minmax(150px,1fr), which tips to a single column on a 360px handset. Pin
+     it to two, and give the Auto/Manual toggle the full width it needs. */
+  .fu-live-settings{ grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px 10px; }
+  .fu-live-settings .field:has(.mode-toggle){ grid-column:1 / -1; }
+  .fu-live-settings .mode-toggle{ width:100%; }
+  .fu-live-settings .mode-toggle .mode-btn{ flex:1; }
+
   /* Forms: 16px stops iOS zooming into a field; 44px is a comfortable tap */
   input, select, textarea{ font-size:16px !important; }
   input:not([type="checkbox"]):not([type="radio"]), select{ min-height:44px; }
@@ -271,10 +292,14 @@
   .m-qa[hidden]{ display:none; }
 
   /* ---------- Home: ticker strip ---------- */
+  /* (the desktop presentation of these two lives in css/components.css —
+     everything here re-states what the phone needs, including resets for the
+     desktop border/radius/grid so nothing leaks down) */
   .m-ticker{
     overflow:hidden; white-space:nowrap;
     margin:0 calc(-1 * var(--edge-pad)) 14px;
-    background:var(--panel); border-block:1px solid var(--line-soft);
+    background:var(--panel);
+    border:0; border-block:1px solid var(--line-soft); border-radius:0;
   }
   .m-ticker[hidden]{ display:none; }
   .m-ticker-track{ display:inline-flex; animation:mTick 42s linear infinite; will-change:transform; }
@@ -289,18 +314,20 @@
     padding:14px 14px 4px; margin-top:14px;
   }
   .m-movers[hidden]{ display:none; }
-  .m-movers-head{ display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px; }
-  .m-movers-head h3{ font-size:13px; letter-spacing:.02em; }
+  .m-movers-head{ display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px; padding-bottom:0; border-bottom:0; }
+  .m-movers-head h3{ font-size:13px; letter-spacing:.02em; text-transform:none; }
   .m-movers-head small{ font-size:10.5px; color:var(--dim2); }
+  #mMoversList{ display:block; }
   .m-mrow{
     display:grid; grid-template-columns:1.1fr 1.2fr 76px; gap:10px; align-items:center;
-    padding:12px 0; border-top:1px solid var(--line-soft);
+    padding:12px 0; border:0; border-top:1px solid var(--line-soft); border-radius:0; background:none;
   }
   .m-mrow:first-of-type{ border-top:0; }
   .m-pair{ font-family:var(--disp); font-weight:700; font-size:13.5px; }
   .m-pair small{ display:block; margin-top:2px; font-family:var(--mono); font-weight:500; font-size:10.5px; color:var(--dim2); }
-  .m-price{ text-align:right; font-family:var(--disp); font-weight:600; font-size:13.5px; font-variant-numeric:tabular-nums; }
+  .m-price{ grid-column:2; grid-row:1; text-align:right; font-family:var(--disp); font-weight:600; font-size:13.5px; font-variant-numeric:tabular-nums; }
   .m-chg{
+    grid-column:3; grid-row:1; justify-self:stretch; min-width:0;
     text-align:center; padding:7px 4px; border-radius:7px;
     font-family:var(--disp); font-weight:700; font-size:12px; font-variant-numeric:tabular-nums;
   }
@@ -319,7 +346,8 @@
 
 /* very small phones */
 @media (max-width:340px){
-  .controls{ grid-template-columns:1fr; }
+  .controls,
+  .controls.controls--compact{ grid-template-columns:1fr; }
 }
 @media (max-width:360px){
   .m-live b{ display:none; }

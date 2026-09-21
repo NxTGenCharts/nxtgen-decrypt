@@ -201,15 +201,25 @@
 /* Live/Demo Trading — per-exchange selection rows (mirrors Autotrade's
    Connect Exchanges rows: exchange label + Live/Demo toggle — but here
    the row itself is also the "which exchange is active" selector, since
-   only one exchange trades Live/Demo at a time in this app). */
-:is(#panelFutures, #panelUtilities) .fu-live-exch-rows{ display:flex; flex-direction:column; gap:8px; margin:14px 0; }
+   only one exchange trades Live/Demo at a time in this app).
+
+   Rendered as a COLLAPSIBLE picker (see renderLiveExchangeRows in
+   js/futures-ui.js): only the currently selected exchange is visible, with its
+   own Live/Demo toggle still on the row, and the other four slide out beneath
+   it when the row is tapped. Five permanently-stacked rows was most of a phone
+   screen spent on a choice that gets made once. */
+:is(#panelFutures, #panelUtilities) .fu-live-exch-rows{ margin:14px 0; }
+:is(#panelFutures, #panelUtilities) .fu-exch-select{ position:relative; }
+
 :is(#panelFutures, #panelUtilities) .fu-live-exch-row{
-  display:grid; grid-template-columns:24px 150px auto 1fr; gap:14px; align-items:center;
+  display:grid; grid-template-columns:24px minmax(0, 150px) auto 1fr; gap:14px; align-items:center;
   padding:12px 16px; border:1px solid var(--line); border-radius:var(--r-lg);
   background:var(--panel2); cursor:pointer;
+  transition:border-color .15s ease, background .15s ease;
 }
 :is(#panelFutures, #panelUtilities) .fu-live-exch-row:hover{ border-color:var(--amber-dim); }
 :is(#panelFutures, #panelUtilities) .fu-live-exch-row.selected{ border-color:var(--amber); background:rgba(240,180,41,.06); }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-row:focus-visible{ outline:2px solid var(--amber); outline-offset:2px; }
 :is(#panelFutures, #panelUtilities) .fu-live-exch-radio{
   width:16px; height:16px; border-radius:50%; border:2px solid var(--line); flex:none;
 }
@@ -217,26 +227,66 @@
   border-color:var(--amber); background:radial-gradient(circle, var(--amber) 0 40%, transparent 44%);
 }
 :is(#panelFutures, #panelUtilities) .fu-live-exch-label{ font-weight:600; color:var(--ink); }
-:is(#panelFutures, #panelUtilities) .fu-live-exch-note{ font-size:11px; color:var(--dim); }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-note{ font-size:11px; color:var(--dim); text-align:right; min-width:0; }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-note[data-verified="1"]{ color:var(--green); }
+
+/* the collapsed row gets a fifth column for its chevron */
+:is(#panelFutures, #panelUtilities) .fu-exch-current{
+  grid-template-columns:24px minmax(0, 150px) auto 1fr 18px;
+  position:relative; z-index:2;
+}
+:is(#panelFutures, #panelUtilities) .fu-exch-chevron{
+  width:18px; height:18px; fill:none; stroke:var(--dim); stroke-width:2;
+  stroke-linecap:round; stroke-linejoin:round;
+  transition:transform .24s ease, stroke .15s ease;
+}
+:is(#panelFutures, #panelUtilities) .fu-exch-current:hover .fu-exch-chevron{ stroke:var(--amber); }
+:is(#panelFutures, #panelUtilities) .fu-exch-select.is-open .fu-exch-chevron{ transform:rotate(180deg); stroke:var(--amber); }
+
+/* grid-template-rows 0fr -> 1fr animates a list of unknown height without
+   hard-coding a max-height that clips or lags */
+:is(#panelFutures, #panelUtilities) .fu-exch-list{
+  display:grid; grid-template-rows:0fr;
+  opacity:0; visibility:hidden; margin-top:0;
+  transition:grid-template-rows .24s cubic-bezier(.2,.8,.2,1), opacity .18s ease, margin-top .24s ease, visibility 0s .24s;
+}
+:is(#panelFutures, #panelUtilities) .fu-exch-list-inner{
+  overflow:hidden; min-height:0;
+  display:flex; flex-direction:column; gap:8px;
+}
+:is(#panelFutures, #panelUtilities) .fu-exch-select.is-open .fu-exch-list{
+  grid-template-rows:1fr; opacity:1; visibility:visible; margin-top:8px;
+  transition:grid-template-rows .24s cubic-bezier(.2,.8,.2,1), opacity .18s ease, margin-top .24s ease;
+}
+@media (prefers-reduced-motion: reduce){
+  :is(#panelFutures, #panelUtilities) .fu-exch-list,
+  :is(#panelFutures, #panelUtilities) .fu-exch-chevron{ transition:none; }
+}
 
 @media (max-width:640px){
-  /* Desktop markup order is: radio, label, mode-toggle (Live/Demo buttons),
-     note — grid columns 24px / 150px(fixed) / auto / 1fr. The fixed 150px
-     label column alone is nearly half an iPhone SE's viewport, so below
-     640px collapse to: radio + label + mode-toggle on row one, the
-     verified-status note wrapping full-width beneath. */
+  /* Markup order is: radio, label, mode-toggle (Live/Demo buttons), note,
+     chevron. A fixed label column plus a right-aligned note is more than an
+     iPhone SE's width, so collapse to: radio + label + mode-toggle + chevron
+     on row one, the verified-status note wrapping full-width beneath. */
   :is(#panelFutures, #panelUtilities) .fu-live-exch-row{
-    grid-template-columns:24px 1fr auto;
+    grid-template-columns:20px 1fr auto;
     grid-template-areas:
       "radio label mode"
       "note  note  note";
-    row-gap:6px;
+    column-gap:10px; row-gap:6px;
     padding:12px 14px;
   }
+  :is(#panelFutures, #panelUtilities) .fu-exch-current{
+    grid-template-columns:20px 1fr auto 18px;
+    grid-template-areas:
+      "radio label mode chev"
+      "note  note  note note";
+  }
   :is(#panelFutures, #panelUtilities) .fu-live-exch-radio{ grid-area:radio; }
-  :is(#panelFutures, #panelUtilities) .fu-live-exch-label{ grid-area:label; }
-  :is(#panelFutures, #panelUtilities) .fu-live-exch-row > :nth-child(3){ grid-area:mode; }
-  :is(#panelFutures, #panelUtilities) .fu-live-exch-note{ grid-area:note; text-align:left !important; white-space:normal; }
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-label{ grid-area:label; font-size:14px; }
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-row .mode-toggle{ grid-area:mode; }
+  :is(#panelFutures, #panelUtilities) .fu-exch-chevron{ grid-area:chev; }
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-note{ grid-area:note; text-align:left; white-space:normal; line-height:1.45; }
 }
 
 /* -------------------- Trading Bots — cards + Details view -------------------- */

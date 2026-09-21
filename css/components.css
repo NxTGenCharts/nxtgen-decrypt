@@ -405,3 +405,80 @@ footer b{ color:#a9bfae; }
 /* ---- Advanced Filters toggle: chevron flips when the panel is open ---- */
 #xFiltersToggleBtn .btn-chev{ margin-left:4px; transition:transform .15s ease; }
 #xFiltersToggleBtn[aria-expanded="true"] .btn-chev{ transform:rotate(180deg); }
+
+/* -------------------- Live market widgets (ticker + movers) --------------------
+   These two used to be phone-only (.m-only), so a desktop browser — the
+   screen this terminal is actually used on — had no live coin prices on the
+   Overview page at all. They now render everywhere; css/mobile-app.css
+   re-styles both inside its (max-width:768px) block, so the phone layout is
+   untouched and everything below is the desktop/tablet presentation.
+   ---------------------------------------------------------------------------- */
+
+/* ---- ticker strip ---- */
+.m-ticker{
+  overflow:hidden; white-space:nowrap;
+  margin:0 0 18px;
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
+}
+.m-ticker[hidden]{ display:none; }
+.m-ticker-track{ display:inline-flex; animation:mTickDesk 60s linear infinite; will-change:transform; }
+.m-ticker:hover .m-ticker-track{ animation-play-state:paused; }   /* let a value be read without chasing it */
+.m-ticker-grp{ display:inline-flex; gap:30px; padding:11px 30px 11px 0; }
+.m-tk{
+  display:inline-flex; align-items:baseline; gap:8px;
+  font-family:var(--mono); font-size:12.5px; color:var(--ink-dim); font-variant-numeric:tabular-nums;
+}
+.m-tk b{ font-family:var(--disp); font-weight:700; color:var(--ink); letter-spacing:.02em; }
+.m-tk i{ font-style:normal; font-weight:600; }
+.m-up{ color:var(--green); }
+.m-down{ color:var(--red); }
+@keyframes mTickDesk{ to{ transform:translateX(-50%); } }
+
+/* ---- market movers board ---- */
+.m-movers{
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
+  padding:16px 18px 18px; margin-top:18px;
+}
+.m-movers[hidden]{ display:none; }
+.m-movers-head{
+  display:flex; justify-content:space-between; align-items:baseline; gap:12px;
+  margin-bottom:12px; padding-bottom:10px; border-bottom:1px solid var(--line);
+}
+.m-movers-head h3{ margin:0; font-family:var(--disp); font-size:13px; text-transform:uppercase; letter-spacing:.09em; color:var(--ink); }
+.m-movers-head small{ font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim2); }
+
+/* an auto-fitting board rather than one tall column — a 1440px monitor gets
+   four across, a laptop two, and it degrades to one without a breakpoint */
+#mMoversList{ display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:10px; }
+.m-mrow{
+  display:grid; grid-template-columns:1fr auto; gap:4px 10px; align-items:center;
+  padding:12px 14px; border:1px solid var(--line-soft); border-radius:var(--r-md);
+  background:var(--panel2);
+  transition:border-color .15s ease;
+}
+.m-mrow:hover{ border-color:var(--line); }
+.m-pair{ font-family:var(--disp); font-weight:700; font-size:13px; color:var(--ink); }
+.m-pair small{ display:block; margin-top:3px; font-family:var(--mono); font-weight:500; font-size:10.5px; color:var(--dim2); }
+.m-price{
+  grid-column:1; font-family:var(--mono); font-weight:600; font-size:15px;
+  color:var(--ink); font-variant-numeric:tabular-nums;
+}
+.m-chg{
+  grid-column:2; grid-row:1 / span 2; align-self:center; justify-self:end;
+  min-width:72px; text-align:center; padding:6px 8px; border-radius:var(--r-sm);
+  font-family:var(--disp); font-weight:700; font-size:12px; font-variant-numeric:tabular-nums;
+}
+.m-chg.up{ background:var(--green-soft); color:var(--green); }
+.m-chg.down{ background:var(--red-soft); color:var(--red); }
+.m-skel{
+  height:64px; border-radius:var(--r-md);
+  background:linear-gradient(90deg, var(--panel2), var(--panel-hi), var(--panel2));
+  background-size:200% 100%; animation:mShimmerDesk 1.4s infinite;
+}
+@keyframes mShimmerDesk{ to{ background-position:-200% 0; } }
+
+@media (prefers-reduced-motion: reduce){
+  .m-ticker{ overflow-x:auto; }
+  .m-ticker-track{ animation:none; }
+  .m-skel{ animation:none; }
+}
