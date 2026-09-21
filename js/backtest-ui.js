@@ -143,11 +143,14 @@ async function runBacktestFlow(){
   if(!range){ showBtMessage('Pick a valid custom date range (From before To).', 'error'); return; }
   let symbols = selectedSymbols();
   const strategies = selectedStrategyConfig();
-  // NxTGen Quant Futures trades its own configured symbol list (XRP/ADA/AVAX/LINK/DOT by default). Those are
-  // added to the run automatically when Quant is ticked. The platform's excluded pairs (BTC/ETH/SOL/LTC/DOGE/
-  // BNB/CL) are stripped from that list by sanitizeQuantConfig and skipped by the backtest loop regardless.
-  const quantSymbolCfg = getQuantCfg({ log: false });
-  if(strategies[QUANT_ID]) symbols = Array.from(new Set([...symbols, ...quantSymbolCfg.symbols]));
+  // NxTGen Quant Futures used to force-merge its own separately-configured symbol list into the run here,
+  // on top of whatever's ticked in "Symbols to test" above. That made sense back when Quant's default list
+  // was 5 specific coins that might not be in today's top-25-by-volume ranking. Now that Quant's default is
+  // the whole tradeable universe (see quant/config.js), that merge would silently balloon every backtest run
+  // from the displayed "Top 25" to 45+ symbols regardless of exchange, breaking the Top N label's accuracy.
+  // Quant now just scans whatever's checked in the box above, same as every other strategy — the platform's
+  // excluded pairs (BTC/ETH/SOL/LTC/DOGE/BNB/CL) are still stripped from Quant's own symbol set by
+  // sanitizeQuantConfig regardless of what's ticked here.
   if(!symbols.length){ showBtMessage('Select at least one symbol to test.', 'error'); return; }
   if(!Object.values(strategies).some(Boolean)){ showBtMessage('Enable at least one strategy to test.', 'error'); return; }
 
