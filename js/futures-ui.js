@@ -764,6 +764,10 @@ function computeProfitFactor(history){
 
 function renderScanner(rows){
   if(!els.fuScannerRows) return;
+  if(els.fuScannerBadge){
+    const approved = rows.filter(r => r.status === 'APPROVED').length;
+    els.fuScannerBadge.textContent = rows.length ? `${approved}/${rows.length} approved` : 'idle';
+  }
   if(!rows.length){ els.fuScannerRows.innerHTML = '<div class="fu-empty">No scan run yet.</div>'; return; }
   els.fuScannerRows.innerHTML = rows.map((r, i) => `
     <div class="fu-row ${r.status === 'APPROVED' ? 'fu-approved' : 'fu-rejected'}" data-idx="${i}">
@@ -1337,11 +1341,12 @@ function renderTradeLog(){
     return;
   }
   els.fuLogRows.innerHTML = rows.slice(0, 500).map(t => `
-    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:28px 1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr;">
+    <div class="fu-hrow ${t.netUsd >= 0 ? 'fu-win' : 'fu-loss'}" style="grid-template-columns:28px 1.1fr .7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr;">
       <div><input type="checkbox" class="fu-log-select" data-id="${t.id}" ${selectedTradeLogIds.has(t.id) ? 'checked' : ''}></div>
       <div>${new Date(t.closedAtMs).toLocaleString()}</div>
       <div>${t.exchange || '—'}${t.mode ? ` (${t.mode})` : ''}</div>
       <div>${t.symbol}${tradeSourceBadge(t)}</div>
+      <div>${strategyLabel(t.setupType)}</div>
       <div>${t.side}${t.partial ? ` (${t.tag})` : ''}</div>
       <div>${t.entry != null ? Number(t.entry).toFixed(4) : '—'}</div>
       <div>${t.exit != null ? Number(t.exit).toFixed(4) : '—'}</div>
@@ -1655,6 +1660,21 @@ function initStrategiesCollapse(){
   try{ details.open = localStorage.getItem(STRATEGIES_OPEN_KEY) === '1'; }catch(e){ /* ignore — stays collapsed */ }
   details.addEventListener('toggle', () => {
     try{ localStorage.setItem(STRATEGIES_OPEN_KEY, details.open ? '1' : '0'); }catch(e){ /* non-fatal */ }
+  });
+}
+
+// Live Opportunity Scanner (Autotrade & Futures page) — same collapse
+// pattern as Strategies above: a <details>/<summary> the user can hide
+// once they trust the bot, remembered per-browser so it doesn't
+// re-expand and push the Live/Demo controls down every reload.
+const SCANNER_OPEN_KEY = 'nxtgen_futures_scanner_open_v1';
+
+function initScannerCollapse(){
+  const details = els.fuScannerDetails;
+  if(!details) return;
+  try{ details.open = localStorage.getItem(SCANNER_OPEN_KEY) === '1'; }catch(e){ /* ignore — stays collapsed */ }
+  details.addEventListener('toggle', () => {
+    try{ localStorage.setItem(SCANNER_OPEN_KEY, details.open ? '1' : '0'); }catch(e){ /* non-fatal */ }
   });
 }
 
@@ -4114,6 +4134,7 @@ export function initFuturesEngine(){
   setQuantConfigListener(() => renderStrategyRows()); // keeps the strategy card's RR dropdown in sync with the saved Quant RR
   initStrategySelector();
   initGridPanel();
+  initScannerCollapse();
   initTradingBots();
   initLiveTradingControls();
   initTradeLog();

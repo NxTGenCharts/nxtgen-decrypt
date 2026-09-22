@@ -257,6 +257,8 @@ export const els = {
   fuDailyDrawdown: document.getElementById('fuDailyDrawdown'),
   fuMaxDrawdown: document.getElementById('fuMaxDrawdown'),
   fuScannerRows: document.getElementById('fuScannerRows'),
+  fuScannerDetails: document.getElementById('fuScannerDetails'),
+  fuScannerBadge: document.getElementById('fuScannerBadge'),
   fuHistoryRows: document.getElementById('fuHistoryRows'),
   fuExplain: document.getElementById('fuExplain'),
   fuMessages: document.getElementById('fuMessages'),

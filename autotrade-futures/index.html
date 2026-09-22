@@ -243,8 +243,8 @@
       <div id="fuGridPanel"></div>
     </details>
 
-    <div class="ov-block" style="margin-top:18px;">
-      <div class="ov-block-title">Live Opportunity Scanner</div>
+    <details class="ov-block" id="fuScannerDetails" style="margin-top:18px;">
+      <summary class="ov-block-title">Live Opportunity Scanner <span class="fu-strategies-badge" id="fuScannerBadge"></span></summary>
             <!-- .table-scroll: lets this 14-column row scroll horizontally on
            narrow viewports instead of squeezing unreadable or overflowing
            the page — see css/futures.css. -->
@@ -257,7 +257,7 @@
       </div>
       <div class="ov-block-body" style="margin-top:10px;font-size:12px;color:var(--dim);">Click any row to see the AI's reasoning below.</div>
       <pre id="fuExplain" class="fu-explain">Click a row above to see why it was approved or rejected.</pre>
-    </div>
+    </details>
 
     <div class="ov-block fu-live-section" style="margin-top:18px;">
       <div class="ov-block-title">Live / Demo Trading <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">ALL FIVE EXCHANGES</span></div>
@@ -376,9 +376,9 @@
           <span id="fuLogSelectedCount" style="font-size:11px;color:var(--dim);"></span>
         </div>
         <div class="table-scroll">
-          <div class="fu-hrow fu-head" style="grid-template-columns:28px 1.1fr .7fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr;">
+          <div class="fu-hrow fu-head" style="grid-template-columns:28px 1.1fr .7fr 1fr 1fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr;">
             <div><input type="checkbox" id="fuLogSelectAll" title="Select all rows in the current range"></div>
-            <div>Date/Time</div><div>Exch</div><div>Symbol</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div>
+            <div>Date/Time</div><div>Exch</div><div>Symbol</div><div>Strategy</div><div>Dir</div><div>Entry</div><div>Exit</div><div>Lev</div><div>Qty</div><div>Gross</div><div>Fees</div><div>Net</div><div>Duration</div>
           </div>
           <div id="fuLogRows"><div class="fu-empty">No trades recorded in this browser yet.</div></div>
         </div>

@@ -220,11 +220,12 @@ window.addEventListener('hashchange', routeHash);
 window.addEventListener('load', () => setTimeout(routeHash, 0));
 
 // ---------- Home: ticker + movers ----------
-// Twelve fills the desktop movers board (an auto-fitting grid) without
-// making the phone's single-column list endless — renderMarket() caps the
-// phone at the top 8. The ticker always runs the full set.
+// Fourteen fills the desktop movers board evenly (an auto-fitting grid,
+// 7 per row at typical desktop widths) without making the phone's
+// single-column list endless — renderMarket() caps the phone at the
+// top 8. The ticker always runs the full set.
 const SYMS = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT', 'TRXUSDT',
-              'LINKUSDT', 'AVAXUSDT', 'LTCUSDT', 'DOTUSDT'];
+              'LINKUSDT', 'AVAXUSDT', 'LTCUSDT', 'DOTUSDT', 'SUIUSDT', 'NEARUSDT'];
 const isPhone = () => window.matchMedia('(max-width:768px)').matches;
 const fmtPrice = (n) => {
   if (!isFinite(n)) return '—';
