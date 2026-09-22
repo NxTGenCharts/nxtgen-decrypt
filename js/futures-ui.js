@@ -1627,50 +1627,21 @@ function renderStrategyRows(){
         </select>
       </div>`;
   };
-  // Original six first, then NxTGen Grid, then NxTGen Quant Futures — so Quant is the 8th strategy in the list.
+  // Original six first, then NxTGen Quant Futures — so Quant is the 7th
+  // strategy in the list. NxTGen Grid is deliberately NOT rendered here:
+  // it runs its own independent engine (Paper AND Live/Demo both — see
+  // grid.js's header comment), so its on/off switch and stats live only
+  // in its own panel just below, not mixed into this shared list.
   const strategyRowsHtml = STRATEGY_REGISTRY.filter(s => s.id !== QUANT_ID).map(renderStratRow).join('');
   const quantRowHtml = STRATEGY_REGISTRY.filter(s => s.id === QUANT_ID).map(renderStratRow).join('');
 
-  // NxTGen Grid — a 7th strategy, structurally different enough (many
-  // simultaneous levels vs. one signal/entry) that its detailed config
-  // lives in its own panel just below (grid.js's header comment explains
-  // why), but the on/off switch itself belongs right here with the other
-  // six so it's not the one strategy the user can't select from this
-  // list. This checkbox and the panel below both read/write the same
-  // GRID_CONFIG_KEY-backed 'enabled' flag, so they can never disagree.
-  const gridCfg = loadGridConfig();
-  const gridEnabled = gridCfg.enabled;
-  if(gridEnabled) enabledCount++;
-  const gridStats = computeStrategyStats(GRID_STRATEGY.type);
-  let gridStatsLine;
-  if(gridStats.trades === 0){
-    gridStatsLine = `<span style="color:var(--dim);">No paper trades yet — enable it here to start building a sample</span>`;
-  } else if(!gridStats.isSignificant){
-    gridStatsLine = `<span style="color:var(--amber);">${icon('hourglass')} ${gridStats.trades}/${MIN_SIGNIFICANT_TRADES} paper trades — not yet enough for a reliable win rate</span> · so far: ${gridStats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(gridStats.netUsd)} net (Paper simulation)`;
-  } else {
-    gridStatsLine = `<span style="color:var(--green);">${icon('check')} ${gridStats.trades} paper trades</span> · ${gridStats.winRatePct.toFixed(0)}% win rate · ${fmtUsd(gridStats.netUsd)} net${gridStats.profitFactor != null && isFinite(gridStats.profitFactor) ? ` · ${gridStats.profitFactor.toFixed(2)} profit factor` : ''} — Paper simulation, this browser`;
-  }
-  const gridRowHtml = `
-    <div class="ov-block" style="margin-bottom:10px;padding:12px;border-color:${gridEnabled ? 'var(--line)' : 'var(--line-dim, var(--line))'};opacity:${gridEnabled ? '1' : '.6'};">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
-        <div style="flex:1;min-width:220px;">
-          <label class="toggle-check" style="font-weight:600;">
-            <input type="checkbox" class="fu-strategy-enable" data-id="${GRID_STRATEGY.id}" ${gridEnabled ? 'checked' : ''}>
-            <span>${GRID_STRATEGY.label}</span>
-          </label>
-          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;">${GRID_STRATEGY.description}</div>
-        </div>
-        <div style="min-width:150px;font-size:11px;color:var(--dim);text-align:right;">Levels, leverage, exchange, and Live/Demo controls are configured below ${icon('arrow-down')}</div>
-      </div>
-      <div style="font-size:11px;margin-top:8px;">${gridStatsLine}</div>
-    </div>
-  `;
-
-  els.fuStrategyRows.innerHTML = strategyRowsHtml + gridRowHtml + quantRowHtml;
+  els.fuStrategyRows.innerHTML = strategyRowsHtml + quantRowHtml;
   // Shown next to "Strategies" in the collapsed <summary> row (see
   // index.html/css/components.css) so collapsing the section to save
   // space doesn't hide which/how many strategies are actually live.
-  const totalStrategyCount = STRATEGY_REGISTRY.length + 1;
+  // Grid is excluded from both the count and the badge — it's tracked
+  // entirely within its own panel now.
+  const totalStrategyCount = STRATEGY_REGISTRY.length;
   if(els.fuStrategiesBadge) els.fuStrategiesBadge.textContent = `${enabledCount}/${totalStrategyCount} enabled`;
 }
 
@@ -1695,21 +1666,12 @@ function initStrategySelector(){
     els.fuStrategyRows.addEventListener('change', (e) => {
       const f = fu();
       if(e.target.classList.contains('fu-strategy-enable')){
+        // Grid no longer has a row/checkbox in this list — see
+        // renderStrategyRows()'s comment — so this only ever fires for
+        // the six single-entry strategies and Quant.
         const id = e.target.dataset.id;
-        if(id === GRID_STRATEGY.id){
-          // Grid's enable flag lives in its own GRID_CONFIG_KEY-backed
-          // config (loadGridConfig/saveGridConfig), not f.strategies —
-          // different engine, different persisted shape (see grid.js's
-          // header comment) — but this checkbox is the same on/off
-          // control as the panel's own, just surfaced here too.
-          const gridCfg = loadGridConfig();
-          gridCfg.enabled = e.target.checked;
-          saveGridConfig(gridCfg);
-          renderGridPanel();
-        } else {
-          f.strategies[id] = e.target.checked;
-          persistStrategyConfig();
-        }
+        f.strategies[id] = e.target.checked;
+        persistStrategyConfig();
         renderStrategyRows();
       } else if(e.target.classList.contains('fu-quant-setup')){
         const cur = getQuantCardSettings().setups;
@@ -1796,13 +1758,17 @@ function renderGridPanel(){
   const gridCredOk = !!(gridCred && gridCred.apiKey && gridCred.verified);
   els.fuGridPanel.innerHTML = `
     <div class="ov-block" style="margin-top:10px;padding:12px;">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
         <div>
           <strong>${GRID_STRATEGY.label}</strong>
           <span style="font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:6px;">Paper + Live/Demo (Bybit/Binance) supported</span>
-          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Turn it on above in the Strategies list to run it against the synthetic feed, check it as the 7th strategy in Backtesting (Utilities &amp; Tools) for real-historical-data testing, or arm Live/Demo below to scan the watchlist on Bybit or Binance and deploy on whichever symbol presents a valid grid. <strong>Live/Demo is untested against real exchanges — start in Demo and watch it closely before ever arming Live.</strong></div>
+          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Turn on "Enabled (Paper)" to the right to run it against the synthetic feed, check it as the 7th strategy in Backtesting (Utilities &amp; Tools) for real-historical-data testing, or arm Live/Demo below to scan the watchlist on Bybit or Binance and deploy on whichever symbol presents a valid grid. <strong>Live/Demo is untested against real exchanges — start in Demo and watch it closely before ever arming Live.</strong></div>
           <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">Deployment size per symbol uses the same <strong>Risk per trade (${f.riskPctPerTrade}%)</strong> control as the six single-entry strategies (the Risk per trade field on this page) — e.g. ${f.riskPctPerTrade}% of a $10,000 balance commits $${(10000 * f.riskPctPerTrade / 100).toLocaleString('en-US')} to a grid deployment, not a separate Grid-only allocation setting. Leverage is capped at ${Math.min(cfg.maxLeverage, 5)}x (your Maximum Leverage setting below, hard-ceilinged at 5x) and a deployment stops opening new grids for the day once your Daily Profit Target below is hit.</div>
         </div>
+        <label class="toggle-check" style="font-weight:600;font-size:12.5px;white-space:nowrap;">
+          <input type="checkbox" class="grid-cfg-toggle" data-key="enabled" ${cfg.enabled ? 'checked' : ''}>
+          <span>Enabled (Paper)</span>
+        </label>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:12px;">
         ${GRID_FIELDS.map(f => `
@@ -1915,7 +1881,7 @@ function renderGridDashboard(){
 
   if(!hasPaperControls()){ host.innerHTML = liveBlock; return; } // Paper dashboard belongs to the Utilities & Tools page
   if(!cfg.enabled){
-    host.innerHTML = liveBlock + `<div style="font-size:12px;color:var(--dim);padding:8px 0;">Grid Paper trading is OFF. Turn on "${GRID_STRATEGY.label}" above in the Strategies list to start it — it runs alongside the six-strategy Paper engine, not instead of it.</div>`;
+    host.innerHTML = liveBlock + `<div style="font-size:12px;color:var(--dim);padding:8px 0;">Grid Paper trading is OFF. Turn on "Enabled (Paper)" above to start it — it runs alongside the six-strategy Paper engine, not instead of it.</div>`;
     return;
   }
   const session = f.gridSession;

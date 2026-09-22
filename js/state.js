@@ -389,7 +389,9 @@ export const state = {
     dayState: null,           // built lazily by futures-ui.js: { equity, startingEquity, trades, wins, losses, ... , positions:[] }
     tradeHistory: [],
     // NxTGen Grid — Paper mode only (see js/futures/grid.js and the
-    // "Enabled (Paper)" toggle in the Strategies panel's Grid config).
+    // "Enabled (Paper)" toggle in Grid's own panel — Grid is deliberately
+    // NOT listed in the shared Strategies panel above, since it runs its
+    // own engine for both Paper and Live/Demo).
     // Entirely separate capital/session from dayState above, same way
     // Live/Demo below is separate — a grid deployment sizes itself as a
     // % of ITS OWN allocated equity, not a slice of whatever the
