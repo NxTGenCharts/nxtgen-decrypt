@@ -427,6 +427,10 @@ export const state = {
     gridLiveState: null,      // the single active deployment for gridLiveSymbol, or null — see runGridLiveCycle
     gridLiveTradeHistory: [],
     gridLiveDayAnchorEquity: null, gridLiveDailyHalted: false, gridLiveCurrentDayKey: null,
+    // Account-level drawdown circuit breaker (maxAccountDrawdownPct) — PERMANENT for the session, unlike the
+    // daily halt above (doesn't reset the next day; see grid.js's createGridSession accountHalted comment for
+    // why). gridLivePeakEquity tracks the highest balance seen since Grid Live was last armed.
+    gridLivePeakEquity: null, gridLiveAccountHalted: false,
     // ---- Trading Bots (Futures Grid + DCA) — user-created, multi-
     // instance, Binance/Bybit Live/Demo only. Deliberately separate from
     // gridLive* above (NxTGen Grid's own auto-scanning single deployment)

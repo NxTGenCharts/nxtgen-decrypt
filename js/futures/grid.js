@@ -37,7 +37,7 @@ export const GRID_STRATEGY = {
   type: 'NxTGen Grid',
   label: 'NxTGen Grid',
   defaultEnabled: false, // new + structurally different from the other six — opt in explicitly
-  description: 'Adaptive futures grid: trades a dynamically-sized range of limit levels only in confirmed range-bound conditions, sized and fee-gated per level, with breakout/liquidation/daily-loss protection. Not a fixed-percent grid, and not always in the market — see the Grid Score gate.',
+  description: 'Adaptive futures grid: trades a dynamically-sized range of limit levels only in confirmed range-bound conditions, sized and fee-gated per level, with breakout/liquidation/daily-loss/account-drawdown protection and an account-wide exposure cap. Not a fixed-percent grid, and not always in the market — see the Grid Score gate.',
 };
 
 // Previously a hardcoded set of liquid majors (BTC/ETH/SOL/BNB/XRP/
@@ -52,10 +52,11 @@ export const GRID_STRATEGY = {
 // excluded everywhere, not just in the other six.
 export const GRID_SYMBOLS = TRADEABLE_FUTURES_SYMBOLS;
 
+const FUNDING_MAX_ABS_PCT = 0.05; // %/8h — see the fundingFilterOn gate in scoreGridSuitability
+
 export const GRID_DEFAULTS = {
   mode: 'AUTO',              // AUTO | LONG | SHORT | NEUTRAL
   minGridScore: 75,          // 0-100, below this: do not deploy
-  minConfidence: 75,
   maxLeverage: 5,            // hard safety ceiling regardless of user input
   minGridLevels: 5,
   maxGridLevels: 50,
@@ -109,6 +110,19 @@ export function scoreGridSuitability(snap, regime, cfg){
     || regime.regime === REGIMES.WEAK_BULL || regime.regime === REGIMES.WEAK_BEAR;
   if(!eligible){
     reasons.push(`Regime "${regime.regime}" is not grid-suitable (need Range/Low-Vol, or a weak trend for directional bias)`);
+    return { score: 0, breakdown, reasons, regimeOk: false, regime, rangeWidthPct };
+  }
+
+  // Funding filter gate (previously a config boolean that was stored but never read anywhere — this is the
+  // first place it does anything). A grid holds resting positions on BOTH sides continuously, so it pays
+  // funding on whichever side is open every ~8h, unlike a single-entry strategy that's usually flat most of
+  // the time. When funding is unusually expensive, that alone can outweigh the whole per-level profit target.
+  // FUNDING_MAX_ABS_PCT (0.05%/8h ≈ 0.15%/day, well above typical funding) is a fixed sanity ceiling, not tied
+  // to minNetProfitPct — funding accrues continuously on open notional, while minNetProfitPct is a one-off
+  // per-cycle threshold, so the two aren't directly comparable.
+  const fundingPct = snap.meta && snap.meta.fundingRatePct;
+  if(c.fundingFilterOn && fundingPct != null && Math.abs(fundingPct) > FUNDING_MAX_ABS_PCT){
+    reasons.push(`Funding rate ${fundingPct.toFixed(3)}%/8h is too expensive for a grid to hold through (max ${FUNDING_MAX_ABS_PCT}%/8h) — Funding Filter is on`);
     return { score: 0, breakdown, reasons, regimeOk: false, regime, rangeWidthPct };
   }
 
@@ -358,10 +372,24 @@ export function createGridSession(startingEquity){
   return {
     equity: startingEquity, peakEquity: startingEquity, maxDrawdownPct: 0,
     dayAnchorEquity: startingEquity, currentDayKey: null, dailyHalted: false,
+    accountHalted: false, // maxAccountDrawdownPct tripped — PERMANENT for this session (doesn't reset daily, unlike dailyHalted): unlike a daily loss limit, "give back this much of the account's peak" is a stop-trading-and-reassess signal, not a wait-for-tomorrow one.
     grids: {}, // symbol -> active grid object, or absent/null
     gridSeq: {}, // symbol -> running deployment counter, for GRID IDs
-    counters: { liquidations: 0, emergencyExits: 0, breakoutExits: 0, recalculations: 0, gridCyclesOpened: 0 },
+    counters: { liquidations: 0, emergencyExits: 0, breakoutExits: 0, recalculations: 0, gridCyclesOpened: 0, accountDrawdownHalts: 0, exposureBlocked: 0 },
   };
+}
+
+// Total allocationUsd currently committed across every symbol's active grid — used by the
+// maxAccountExposurePct check before deploying a NEW one, and by nothing else (an already-open grid
+// keeps running even if a later deployment elsewhere would have pushed total exposure over the cap;
+// only the ATTEMPT to add more is blocked).
+function totalGridExposureUsd(session){
+  let total = 0;
+  for(const sym of Object.keys(session.grids)){
+    const g = session.grids[sym];
+    if(g) total += g.allocationUsd;
+  }
+  return total;
 }
 
 function rollGridDay(session, nowMs){
@@ -386,7 +414,27 @@ export function stepGridSymbol(session, { symbol, snap, regime, bar, nowMs, cfg,
   if(!session.dailyHalted && dailyPnlPct <= -c.maxDailyLossPct) session.dailyHalted = true;
   if(!session.dailyHalted && c.dailyProfitTargetPct && dailyPnlPct >= c.dailyProfitTargetPct) session.dailyHalted = true;
 
+  // Account-level drawdown circuit breaker — same shape as the daily halt but from the account's ALL-TIME
+  // peak equity rather than today's anchor, and it does not reset the next day. Previously stored in
+  // GRID_DEFAULTS (maxAccountDrawdownPct) but never read anywhere; this is the first place it does anything.
+  const accountDrawdownPct = session.peakEquity > 0 ? ((session.peakEquity - session.equity) / session.peakEquity) * 100 : 0;
+  if(!session.accountHalted && accountDrawdownPct >= c.maxAccountDrawdownPct){
+    session.accountHalted = true;
+    session.counters.accountDrawdownHalts++;
+  }
+
   let grid = session.grids[symbol] || null;
+
+  // Tripped account halt: flatten this symbol's grid too (a fresh circuit breaker should stop everything that's
+  // open, not just block new deployments) and never deploy again this session.
+  if(session.accountHalted && grid){
+    for(const leg of grid.openLegs.slice()) closeLeg(leg, bar.c, 'ACCOUNT_DRAWDOWN_HALT');
+    grid.openLegs = [];
+    grid = null;
+    session.grids[symbol] = null;
+    return stepTrades;
+  }
+  if(session.accountHalted) return stepTrades;
 
   function closeLeg(leg, exitPrice, exitReason){
     const pnl = netCycleProfit({
@@ -406,6 +454,14 @@ export function stepGridSymbol(session, { symbol, snap, regime, bar, nowMs, cfg,
       gridId: grid.id, gridLevel: leg.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
     };
     stepTrades.push(trade);
+    // Every leg close updates the GRID's own realized P&L — wins AND losses — not just take-profit fills.
+    // (Previously this only happened on the TP path below, so a losing exit — liquidation-risk, breakout,
+    // daily-loss, drift-recalc — never registered here, which meant the maxGridLossPct emergency-exit check
+    // further down compared against a number that could only go up. Since realizedUsd starts at 0 for a new
+    // deployment and TP legs are, by construction, always net-positive, that floor could never be crossed —
+    // the emergency exit had never actually fired. Moving the accumulation here means every kind of close
+    // counts, so a losing streak on this deployment is visible to that check.)
+    if(grid) grid.realizedUsd += pnl.netUsd;
     return pnl;
   }
   function closeAllLegs(exitPrice, exitReason){
@@ -441,7 +497,7 @@ export function stepGridSymbol(session, { symbol, snap, regime, bar, nowMs, cfg,
         }
       }
       const gridUnrealizedFloorUsd = -grid.allocationUsd * (c.maxGridLossPct / 100);
-      if(grid && grid.realizedUsd < gridUnrealizedFloorUsd){
+      if(c.emergencyExitOn && grid && grid.realizedUsd < gridUnrealizedFloorUsd){
         closeAllLegs(bar.c, 'EMERGENCY_EXIT');
         session.counters.emergencyExits++;
         grid = null;
@@ -467,8 +523,7 @@ export function stepGridSymbol(session, { symbol, snap, regime, bar, nowMs, cfg,
         slippagePct: (metaOverrides && metaOverrides.spreadPct) || 0.02,
       });
       if(check.netPct < grid.minNetProfitPct) continue;
-      const pnl = closeLeg(leg, targetPrice, 'GRID_CYCLE_TP');
-      grid.realizedUsd += pnl.netUsd;
+      closeLeg(leg, targetPrice, 'GRID_CYCLE_TP'); // closeLeg itself now accumulates grid.realizedUsd (see its comment)
       grid.openLegs = grid.openLegs.filter(l => l !== leg);
       grid.filledLevel[leg.levelIndex] = false;
       session.counters.gridCyclesOpened++;
@@ -504,13 +559,25 @@ export function stepGridSymbol(session, { symbol, snap, regime, bar, nowMs, cfg,
   if(!grid && !session.dailyHalted){
     const plan = buildGridPlan(symbol, snap, regime, c, session.equity);
     if(plan){
-      session.gridSeq[symbol] = (session.gridSeq[symbol] || 0) + 1;
-      const d = new Date(nowMs);
-      const dateKey = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`;
-      grid = {
-        id: `GRID-${symbol.replace('USDT', '')}-${dateKey}-${String(session.gridSeq[symbol]).padStart(3, '0')}`,
-        ...plan, openLegs: [], filledLevel: new Array(plan.levels.length).fill(false), realizedUsd: 0, openedAt: nowMs,
-      };
+      // Account-wide exposure cap — across ALL symbols' currently-open grids, not just this one. Previously
+      // stored in GRID_DEFAULTS (maxAccountExposurePct) but never read; with each symbol backtested/paper-run
+      // against its own independent pool this had no meaning anyway (see runGridBacktestMulti's header for the
+      // single-symbol backtest's separate capital-pool issue) — now that Paper/Live already share one session
+      // across symbols, and the multi-symbol backtest below does too, this is the check that actually limits
+      // how much of the account can be committed to grids at once.
+      const committedUsd = totalGridExposureUsd(session);
+      const capUsd = session.equity * (c.maxAccountExposurePct / 100);
+      if(committedUsd + plan.allocationUsd > capUsd){
+        session.counters.exposureBlocked++;
+      } else {
+        session.gridSeq[symbol] = (session.gridSeq[symbol] || 0) + 1;
+        const d = new Date(nowMs);
+        const dateKey = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`;
+        grid = {
+          id: `GRID-${symbol.replace('USDT', '')}-${dateKey}-${String(session.gridSeq[symbol]).padStart(3, '0')}`,
+          ...plan, openLegs: [], filledLevel: new Array(plan.levels.length).fill(false), realizedUsd: 0, openedAt: nowMs,
+        };
+      }
     }
   }
 
@@ -644,6 +711,85 @@ export function runGridBacktest({ symbol, candles, cfg, startingEquity, exchange
   return { trades, equityCurve, counters: session.counters, finalEquity: session.equity, maxDrawdownPct: session.maxDrawdownPct, symbol };
 }
 
+// =============================================================
+// runGridBacktestMulti — the SAME idea as runGridBacktest (below) but across several symbols sharing ONE
+// capital pool and ONE session, the way Paper/Live actually run (createGridSession + stepGridSymbol per symbol
+// per tick, all against the same session object — see runGridPaperTick in futures-ui.js). runGridBacktest gives
+// each symbol its OWN startingEquity-sized pool, so a 25-symbol backtest implicitly assumed 25x the real
+// account's capital and its combined P&L didn't reconcile against any single balance — maxAccountExposurePct
+// and maxAccountDrawdownPct are meaningless against 25 independent full-sized pools too. This is the backtest
+// path that actually matches what one real account running Grid across a watchlist would experience.
+//
+// Symbols are stepped in a stable order at each shared timestamp. Candle sets aren't required to be the same
+// length (a symbol listed partway through the range simply has fewer bars) — this walks the union of
+// timestamps and skips a symbol at any bar it has no candle for.
+// =============================================================
+export function runGridBacktestMulti({ symbols, candlesBySymbol, cfg, startingEquity, exchange, metaOverrides, intervalMinutes }){
+  const c = { ...GRID_DEFAULTS, ...cfg };
+  const barMin = intervalMinutes || 5;
+  const m15Group = Math.max(1, Math.round(15 / barMin));
+  const h1Group = Math.max(1, Math.round(60 / barMin));
+
+  const byTime = {}; // symbol -> Map(t -> index) for O(1) "does this symbol have a bar at this timestamp"
+  const allTimes = new Set();
+  for(const sym of symbols){
+    const arr = candlesBySymbol[sym] || [];
+    const m = new Map();
+    arr.forEach((bar, i) => { m.set(bar.t, i); allTimes.add(bar.t); });
+    byTime[sym] = m;
+  }
+  const timeline = Array.from(allTimes).sort((a, b) => a - b);
+
+  function aggregate(candles, uptoIndex, groupSize, count){
+    const out = [];
+    for(let end = uptoIndex + 1; end > 0 && out.length < count; end -= groupSize){
+      const start = Math.max(0, end - groupSize);
+      const slice = candles.slice(start, end);
+      if(!slice.length) continue;
+      out.unshift({ t: slice[0].t, o: slice[0].o, h: Math.max(...slice.map(x => x.h)), l: Math.min(...slice.map(x => x.l)), c: slice[slice.length - 1].c, v: slice.reduce((a, x) => a + x.v, 0) });
+    }
+    return out;
+  }
+  function snapshotAt(symbol, candles, i){
+    const barsPerDay = 1440 / barMin;
+    return {
+      symbol, price: candles[i].c,
+      m5: candles.slice(Math.max(0, i - 119), i + 1),
+      m15: aggregate(candles, i, m15Group, 120),
+      h1: aggregate(candles, i, h1Group, 60),
+      meta: { ...metaOverrides, exchange, volume24hUsd: (candles[i].v || 0) * barsPerDay * candles[i].c },
+    };
+  }
+
+  const warmupBars = Math.max(30 * m15Group, 30 * h1Group) + 20;
+  const warmupMs = warmupBars * barMin * 60_000;
+  const session = createGridSession(startingEquity);
+  const trades = [];
+  const equityCurve = [];
+  const lastPriceBySymbol = {};
+
+  for(const t of timeline){
+    for(const symbol of symbols){
+      const idx = byTime[symbol].get(t);
+      if(idx == null) continue;
+      const candles = candlesBySymbol[symbol];
+      if(t - candles[0].t < warmupMs) continue; // this symbol individually still warming up, even if the shared timeline has moved past other symbols' warmup
+      const snap = snapshotAt(symbol, candles, idx);
+      lastPriceBySymbol[symbol] = candles[idx].c;
+      const regime = classifyRegime(snap.h1, snap.m15);
+      const stepTrades = stepGridSymbol(session, { symbol, snap, regime, bar: candles[idx], nowMs: t, cfg: c, exchange, metaOverrides });
+      trades.push(...stepTrades);
+    }
+    equityCurve.push({ t, equity: session.equity });
+  }
+
+  const closing = closeAllGridSessions(session, lastPriceBySymbol, timeline.length ? timeline[timeline.length - 1] : Date.now(), exchange, metaOverrides);
+  for(const t of closing) t.exitReason = 'OPEN_AT_END';
+  trades.push(...closing);
+
+  return { trades, equityCurve, counters: session.counters, finalEquity: session.equity, maxDrawdownPct: session.maxDrawdownPct, accountHalted: session.accountHalted };
+}
+
 // Grid-specific summary, distinguishing grid-cycle stats from generic
 // trade stats (spec explicitly calls out these are not necessarily the
 // same thing — in THIS implementation every closed row IS one full
@@ -686,6 +832,7 @@ export function summarizeGridTrades(trades, startingEquity, counters){
     netReturnPct: startingEquity ? (netUsd / startingEquity) * 100 : 0,
     liquidations: counters.liquidations, emergencyExits: counters.emergencyExits,
     breakoutExits: counters.breakoutExits, recalculations: counters.recalculations,
+    exposureBlocked: counters.exposureBlocked || 0, accountDrawdownHalts: counters.accountDrawdownHalts || 0,
   };
 }
 

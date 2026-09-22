@@ -15,7 +15,7 @@ import { STRATEGY_REGISTRY } from './futures/setups.js';
 import { DEFAULT_FEE_CONFIG } from './futures/costs.js';
 import { runBacktest, summarizeTrades } from './futures/backtest.js';
 import { RISK_DEFAULTS } from './futures/risk.js';
-import { GRID_STRATEGY, GRID_DEFAULTS, runGridBacktest, summarizeGridTrades } from './futures/grid.js';
+import { GRID_STRATEGY, GRID_DEFAULTS, runGridBacktestMulti, summarizeGridTrades } from './futures/grid.js';
 import { QUANT_ID, QUANT_TYPE, MIN_SAMPLE_TRADES } from './futures/quant/config.js';
 import { getQuantCfg, setQuantBacktestResult, renderQuantBacktestSection } from './quant-ui.js';
 import { runWalkForward } from './futures/quant/validation.js';
@@ -299,25 +299,24 @@ async function runBacktestFlow(){
       // backtest run actually respects the risk% you set here.
       gridCfg.maxGridAllocationPct = riskPctPerTrade;
       const gridSymbols = usableSymbols; // whatever the user actually checked and got real data for
-      const allGridTrades = [];
-      const combinedCounters = { liquidations: 0, emergencyExits: 0, breakoutExits: 0, recalculations: 0 };
-      for(let i = 0; i < gridSymbols.length; i++){
-        const sym = gridSymbols[i];
-        els.btProgress.textContent = `Simulating NxTGen Grid… ${i + 1}/${gridSymbols.length} (${sym})`;
-        await new Promise(resolve => setTimeout(resolve, 0));
-        const gridResult = runGridBacktest({
-          symbol: sym, candles: candlesBySymbol[sym], cfg: gridCfg, startingEquity, exchange,
-          metaOverrides: { spreadPct, fundingRatePct }, intervalMinutes,
-        });
-        allGridTrades.push(...gridResult.trades);
-        combinedCounters.liquidations += gridResult.counters.liquidations;
-        combinedCounters.emergencyExits += gridResult.counters.emergencyExits;
-        combinedCounters.breakoutExits += gridResult.counters.breakoutExits;
-        combinedCounters.recalculations += gridResult.counters.recalculations;
-      }
-      allGridTrades.sort((a, b) => a.closedAtMs - b.closedAtMs);
+      els.btProgress.textContent = `Simulating NxTGen Grid across ${gridSymbols.length} symbol(s) sharing one $${startingEquity.toLocaleString('en-US')} pool…`;
+      await new Promise(resolve => setTimeout(resolve, 0));
+      // ONE shared pool across every selected symbol (runGridBacktestMulti — see its header in grid.js), the
+      // same way Paper/Live actually run Grid, instead of the old per-symbol loop that gave each coin its OWN
+      // full startingEquity: that made a multi-symbol run implicitly assume N accounts' worth of capital, and
+      // made maxAccountExposurePct/maxAccountDrawdownPct meaningless (each pool was independent). One real
+      // consequence: this run can now legitimately show FEWER grid deployments than before, if
+      // maxAccountExposurePct or maxAccountDrawdownPct starts blocking/halting once several symbols are
+      // active at once — that's the fix working, not a regression.
+      const gridResult = runGridBacktestMulti({
+        symbols: gridSymbols, candlesBySymbol, cfg: gridCfg, startingEquity, exchange,
+        metaOverrides: { spreadPct, fundingRatePct }, intervalMinutes,
+      });
+      const allGridTrades = gridResult.trades.slice().sort((a, b) => a.closedAtMs - b.closedAtMs);
+      const combinedCounters = gridResult.counters;
       result.trades = result.trades.concat(allGridTrades).sort((a, b) => a.closedAtMs - b.closedAtMs);
       gridSummary = allGridTrades.length ? summarizeGridTrades(allGridTrades, startingEquity, combinedCounters) : null;
+      if(gridSummary) gridSummary.accountHalted = gridResult.accountHalted;
     }
 
     lastResult = { ...result, startingEquity, gridSummary };
@@ -481,7 +480,9 @@ function renderBacktestResults(result){
         ${g.gridCycles} grid cycles · cycle win rate ${g.gridCycleWinRate.toFixed(1)}% · profit factor ${Number.isFinite(g.profitFactor) ? g.profitFactor.toFixed(2) : '∞'} ·
         net ${fmtUsd(g.netUsd)} · fees -$${g.feesUsd.toFixed(2)} · funding -$${g.fundingUsd.toFixed(2)} · slippage -$${g.slippageUsd.toFixed(2)} ·
         largest loss ${fmtUsd(g.largestLossUsd)} · avg cycle ${g.avgDurationMin.toFixed(0)}m ·
-        liquidation exits ${g.liquidations} · emergency exits ${g.emergencyExits} · breakout exits ${g.breakoutExits} · recalculations ${g.recalculations}
+        liquidation exits ${g.liquidations} · emergency exits ${g.emergencyExits} · breakout exits ${g.breakoutExits} · recalculations ${g.recalculations} ·
+        exposure-capped deployments skipped ${g.exposureBlocked || 0}${g.accountDrawdownHalts ? ` · account drawdown halt tripped ${g.accountDrawdownHalts}x` : ''}
+        ${g.accountHalted ? `<div style="color:var(--red);margin-top:4px;">Account drawdown halt was still active when this run ended — Max Account Drawdown (%) was reached and no further grids were opened for the rest of the run.</div>` : ''}
       </div>
     `;
   }

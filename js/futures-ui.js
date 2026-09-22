@@ -351,6 +351,42 @@ const GRID_LIVE_EXCHANGES = ['bybit', 'binance'];
 // applies while idle and scanning for the next one.
 const GRID_SCAN_BATCH_SIZE = 4;
 
+// Live's per-leg cycle-TP path already computes real netCycleProfit per close and adds it to gs.realizedUsd —
+// see manageActiveGridLiveDeployment's PENDING_CLOSE branch. A FLATTEN (breakout/emergency/daily-loss/drift),
+// though, closes every remaining open leg at once via one exchange call with no per-leg fill price returned, so
+// there was previously no way to know what those legs closed at — which meant the ones that were NOT yet a
+// completed grid cycle (still resting, no closing order out) never had their P&L counted anywhere, INCLUDING
+// gs.realizedUsd — the exact same "losses never register" gap that stepGridSymbol had in grid.js (fixed
+// there), except here it's real, not synthetic. Before flattening, mark every currently-open leg (PENDING_CLOSE
+// — i.e. filled and resting a closing order at its target) to the current snapshot price, the same
+// mark-to-market convention runGridBacktest/closeAllGridSessions in grid.js already use at a backtest's end —
+// this is an ESTIMATE (the real fill will differ by whatever slippage the market order takes), not the actual
+// realized fill, logged as such below.
+async function flattenGridLiveAndRecord(f, gs, exchange, mode, symbol, proxyArgs, snap, nowMs, exitReason){
+  const openLegs = gs.levels.filter(l => l.status === 'PENDING_CLOSE');
+  for(const level of openLegs){
+    const perLevelUsd = gs.plan.allocationUsd / gs.plan.levelCount;
+    const qty = (perLevelUsd * gs.plan.leverage) / level.entryPrice;
+    const pnl = netCycleProfit({
+      entryPrice: level.entryPrice, exitPrice: snap.price, qty, direction: level.direction, exchange,
+      holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct,
+    });
+    gs.realizedUsd += pnl.netUsd;
+    const gridTradeRecord = {
+      closedAtMs: nowMs, openedAtMs: level.openedAt, exchange, mode, symbol, side: level.direction, direction: level.direction,
+      entry: level.entryPrice, exit: snap.price, qty, leverage: gs.plan.leverage,
+      grossUsd: pnl.grossUsd, feesUsd: pnl.feesUsd, fundingUsd: pnl.fundingUsd, slippageUsd: pnl.slippageUsd, netUsd: pnl.netUsd,
+      confidence: gs.plan.gridScore, setupType: 'NxTGen Grid', exitReason: `${exitReason} (est. — market-order flatten, actual fill may differ)`,
+      durationMin: Math.round((nowMs - level.openedAt) / 60_000), gridId: gs.id, gridLevel: level.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
+    };
+    f.gridLiveTradeHistory = [gridTradeRecord, ...f.gridLiveTradeHistory].slice(0, 500);
+    appendPersistentTrade(gridTradeRecord);
+  }
+  const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  if(!flat.ok) gridLiveLog(`Flatten call failed: ${flat.message} — check ${symbol} on ${exchange} directly.`, 'error');
+  return flat;
+}
+
 function gridLiveLog(msg, kind){
   const host = els.fuGridPanel && els.fuGridPanel.querySelector('#fuGridLiveStatus');
   if(host){ host.textContent = msg; host.style.color = kind === 'error' ? 'var(--red)' : ''; }
@@ -408,6 +444,19 @@ async function runGridLiveCycleInner(){
 // profitable grid setup (long or short side, per its own AUTO direction
 // call) is the one that gets deployed. Turning "Scan watchlist" off
 // falls back to the original single pinned-symbol behavior.
+// Account-level drawdown circuit breaker for Grid Live — the live-wiring mirror of createGridSession's
+// accountHalted in grid.js (Backtest/Paper). PERMANENT for the arm/run session: once tripped it stays tripped
+// until the user re-arms Grid Live (which resets gridLivePeakEquity/gridLiveAccountHalted — see
+// startGridLive/stopGridLive... actually reset happens on arm toggle below). Returns true the FIRST cycle it
+// trips (so the caller can log/act once), false on every other cycle including ones where it's already halted.
+function updateGridLiveDrawdownHalt(f, equity, gridCfg){
+  if(f.gridLivePeakEquity == null || equity > f.gridLivePeakEquity) f.gridLivePeakEquity = equity;
+  if(f.gridLiveAccountHalted) return false; // already handled
+  const ddPct = f.gridLivePeakEquity > 0 ? ((f.gridLivePeakEquity - equity) / f.gridLivePeakEquity) * 100 : 0;
+  if(ddPct >= gridCfg.maxAccountDrawdownPct){ f.gridLiveAccountHalted = true; return true; }
+  return false;
+}
+
 async function scanForGridLiveDeployment(f, exchange, mode, cred, gridCfg, nowMs){
   if(f.gridLiveDailyHalted){ gridLiveLog(`Daily loss/profit limit reached — not opening a new grid until tomorrow.`, null); return; }
 
@@ -430,6 +479,8 @@ async function scanForGridLiveDeployment(f, exchange, mode, cred, gridCfg, nowMs
   const equityForSizing = balResp.balance;
   rollGridLiveDay(f, nowMs, equityForSizing);
   if(f.gridLiveDailyHalted){ gridLiveLog(`Daily loss/profit limit reached — not opening a new grid until tomorrow.`, null); return; }
+  if(updateGridLiveDrawdownHalt(f, equityForSizing, gridCfg)){ gridLiveLog(`Account drawdown reached ${gridCfg.maxAccountDrawdownPct}% from its peak — Grid Live halted. Re-arm to resume once you've reviewed this.`, 'error'); return; }
+  if(f.gridLiveAccountHalted) return; // already halted in an earlier cycle
 
   let bestReject = null; // { symbol, score, regime } — closest candidate this batch, just for the status message
   for(const symbol of candidates){
@@ -504,12 +555,18 @@ async function manageActiveGridLiveDeployment(f, exchange, mode, cred, gridCfg, 
   // the rest of the grid was planned against.
   const equityForSizing = gs.plan.allocationUsd / (gridCfg.maxGridAllocationPct / 100);
   rollGridLiveDay(f, nowMs, equityForSizing);
+  if(updateGridLiveDrawdownHalt(f, equityForSizing, gridCfg)){
+    gridLiveLog(`${symbol}: account drawdown reached ${gridCfg.maxAccountDrawdownPct}% from its peak — flattening and halting Grid Live.`, 'error');
+    await flattenGridLiveAndRecord(f, gs, exchange, mode, symbol, proxyArgs, snap, nowMs, 'ACCOUNT_DRAWDOWN_HALT');
+    f.gridLiveState = null;
+    renderGridDashboard();
+    return;
+  }
 
   const bo = detectGridBreakout(snap, gs.plan, gridCfg);
   if(bo.breakout){
     gridLiveLog(`${symbol}: BREAKOUT detected (${bo.reasons[0] || ''}) — flattening grid.`, 'error');
-    const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
-    if(!flat.ok) gridLiveLog(`Flatten call failed: ${flat.message} — check ${symbol} on ${exchange} directly.`, 'error');
+    await flattenGridLiveAndRecord(f, gs, exchange, mode, symbol, proxyArgs, snap, nowMs, 'BREAKOUT_EXIT');
     f.gridLiveState = null;
     renderGridDashboard();
     return;
@@ -586,12 +643,14 @@ async function manageActiveGridLiveDeployment(f, exchange, mode, cred, gridCfg, 
   const dailyPnlPct = f.gridLiveDayAnchorEquity ? ((equityForSizing + gs.realizedUsd - f.gridLiveDayAnchorEquity) / f.gridLiveDayAnchorEquity) * 100 : 0;
   const halfWidth = (gs.plan.upper - gs.plan.lower) / 2;
   const driftedOut = snap.price > gs.plan.upper + halfWidth * (gridCfg.recalcDriftPct / 100) || snap.price < gs.plan.lower - halfWidth * (gridCfg.recalcDriftPct / 100);
-  const shouldFlatten = gs.realizedUsd < gridFloorUsd || dailyPnlPct <= -gridCfg.maxDailyLossPct || driftedOut;
+  // maxGridLossPct emergency exit — gated on emergencyExitOn (was previously always active with no way to
+  // turn it off from the panel toggle, the mirror of the same bug fixed in grid.js's stepGridSymbol).
+  const emergencyTripped = gridCfg.emergencyExitOn && gs.realizedUsd < gridFloorUsd;
+  const shouldFlatten = emergencyTripped || dailyPnlPct <= -gridCfg.maxDailyLossPct || driftedOut;
   if(shouldFlatten){
-    const reason = gs.realizedUsd < gridFloorUsd ? 'grid max-loss reached' : dailyPnlPct <= -gridCfg.maxDailyLossPct ? 'daily loss limit reached' : 'price drifted out of range';
+    const reason = emergencyTripped ? 'grid max-loss reached' : dailyPnlPct <= -gridCfg.maxDailyLossPct ? 'daily loss limit reached' : 'price drifted out of range';
     gridLiveLog(`${symbol}: flattening grid (${reason}).`, 'error');
-    const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
-    if(!flat.ok) gridLiveLog(`Flatten call failed: ${flat.message} — check ${symbol} on ${exchange} directly.`, 'error');
+    await flattenGridLiveAndRecord(f, gs, exchange, mode, symbol, proxyArgs, snap, nowMs, emergencyTripped ? 'EMERGENCY_EXIT' : dailyPnlPct <= -gridCfg.maxDailyLossPct ? 'DAILY_LOSS_LIMIT' : 'GRID_RECALCULATION');
     if(dailyPnlPct <= -gridCfg.maxDailyLossPct) f.gridLiveDailyHalted = true;
     f.gridLiveState = null;
   } else if(!f.gridLiveDailyHalted && gridCfg.dailyProfitTargetPct && dailyPnlPct >= gridCfg.dailyProfitTargetPct){
@@ -1717,6 +1776,8 @@ const GRID_FIELDS = [
   { key: 'breakoutSensitivityAtr', label: 'ATR Multiplier (breakout)', type: 'number', step: 0.1, min: 0.5, max: 4 },
   { key: 'breakoutVolumeMult', label: 'Breakout Sensitivity (vol x)', type: 'number', step: 0.1, min: 1, max: 4 },
   { key: 'maxGridLevels', label: 'Max Open Grid Positions', type: 'number', min: 5, max: 50 },
+  { key: 'maxAccountExposurePct', label: 'Max Account Exposure (%)', type: 'number', min: 5, max: 100 },
+  { key: 'maxAccountDrawdownPct', label: 'Max Account Drawdown (%)', type: 'number', min: 2, max: 50 },
 ];
 const GRID_TOGGLES = [
   { key: 'emergencyExitOn', label: 'Emergency Exit' },
@@ -1956,6 +2017,7 @@ function initGridPanel(){
     const f = fu();
     if(e.target.id === 'fuGridLiveArmBtn'){
       f.gridLiveArmed = !f.gridLiveArmed;
+      if(f.gridLiveArmed){ f.gridLivePeakEquity = null; f.gridLiveAccountHalted = false; } // re-arming is the explicit "I've reviewed this" reset
       if(!f.gridLiveArmed && f.gridLiveRunning) stopGridLive();
       renderGridPanel();
     } else if(e.target.id === 'fuGridLiveStartBtn'){
@@ -2004,7 +2066,16 @@ async function flattenGridLiveNow(){
   const symbol = f.gridLiveState ? f.gridLiveState.plan.symbol : f.gridLiveSymbol;
   if(!symbol){ gridLiveLog('No symbol to flatten — nothing tracked as active.', 'error'); return; }
   gridLiveLog(`Flattening ${symbol} on ${exchange}…`, null);
-  const result = await callProxy('/api/futures/grid/flatten', { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol }).catch(err => ({ ok:false, message: err.message }));
+  const proxyArgs = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol };
+  let result;
+  if(f.gridLiveState && f.gridLiveState.plan.symbol === symbol){
+    // Record any still-open legs' estimated P&L the same way an automatic flatten does (see
+    // flattenGridLiveAndRecord's header note) — a manual flatten shouldn't be the one path whose losses/gains
+    // vanish from the Trade Log. Falls back to the plain flatten call below if a snapshot can't be fetched.
+    const snap = await fetchLiveSnapshot(exchange, symbol, '5m').catch(() => null);
+    if(snap) result = await flattenGridLiveAndRecord(f, f.gridLiveState, exchange, mode, symbol, proxyArgs, snap, Date.now(), 'MANUAL_FLATTEN');
+  }
+  if(!result) result = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
   if(result.ok){
     f.gridLiveState = null;
     gridLiveLog(`${symbol} flattened.`, null);
