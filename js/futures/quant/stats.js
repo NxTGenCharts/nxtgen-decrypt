@@ -167,6 +167,28 @@ export function computeQuantStatsBySymbol(trades, startingEquity){
     .sort((a, b) => (b.stats.observedWinRate || 0) - (a.stats.observedWinRate || 0));
 }
 
+// Same trades, split Long vs Short (spec: "Long win rate / Short win rate").
+export function computeQuantStatsByDirection(trades, startingEquity){
+  const longs = trades.filter(t => t.direction === 'LONG');
+  const shorts = trades.filter(t => t.direction === 'SHORT');
+  return { long: computeQuantStats(longs, startingEquity), short: computeQuantStats(shorts, startingEquity) };
+}
+
+// Same trades, grouped by the market regime label recorded at entry (spec: "Performance by market regime").
+// Each regime usually won't individually reach MIN_SAMPLE_TRADES within one run — reported honestly
+// (`sufficient: false`) exactly like computeQuantStatsBySymbol above.
+export function computeQuantStatsByRegime(trades, startingEquity){
+  const byRegime = new Map();
+  for(const t of trades){
+    const label = (t.quant && t.quant.regime) || 'Unknown';
+    if(!byRegime.has(label)) byRegime.set(label, []);
+    byRegime.get(label).push(t);
+  }
+  return Array.from(byRegime.entries())
+    .map(([regime, rows]) => ({ regime, stats: computeQuantStats(rows, startingEquity) }))
+    .sort((a, b) => b.stats.trades - a.stats.trades);
+}
+
 // Text for the win-rate cell — the ONE place the sample rule is applied for display.
 export function winRateLabel(stats){
   if(!stats || stats.trades === 0) return 'No trades yet';

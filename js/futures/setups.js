@@ -292,10 +292,10 @@ export const STRATEGY_REGISTRY = [
     description: 'Consolidation, then a breakout, then a retest of that level with volume confirmation. Entry trigger now runs on M5 (was M15 — see detectBreakoutRetest\'s comment). Off by default: conceptually close to NxTGen Scalp\'s own momentum-chasing character, so it adds less diversification than the two enabled by default.',
   },
   {
-    id: QUANT_ID, type: QUANT_TYPE, detector: 'detectQuantFutures', defaultRR: 1.5, defaultEnabled: false,
-    rrOptions: [1.3, 1.5, 1.75, 2, 2.5, 3, 4], // must include QUANT_DEFAULTS.rewardRisk (1.5) or the dropdown shows a value that isn't what runs; floor is HARD_LIMITS.minRewardRisk (1.2)
-    label: 'NxTGen Quant Futures',
-    description: 'Quantitative multi-factor crypto futures strategy combining market regime detection, trend, momentum, volatility, liquidity, volume and multi-timeframe structure to identify selective 5m/15m futures setups with a fixed risk/reward target (default 1:1.5, floor 1:1.2). Deterministic 0-100 confluence score, adaptive structure+ATR stops, drawdown-scaled risk. Off by default. It uses the Min confidence, Risk per trade (capped at 1%) and High Selectivity settings at the top of this tab, plus the Reward:Risk on this card; tick it to enable.',
+    id: QUANT_ID, type: QUANT_TYPE, detector: 'detectQuantFutures', defaultRR: 2, defaultEnabled: false,
+    rrOptions: [2, 2.5, 3], // floor is HARD_LIMITS.minRewardRisk (2.0) — never below 1:2
+    label: 'NxTGen HTF OrderFlow',
+    description: 'High-selectivity multi-timeframe futures strategy: 4H/1H trend alignment + validated 30M/1H/4H supply-demand and institutional order-block confluence (LOCATION), confirmed only by a mechanical 5M Parabolic SAR / EMA50-100 crossover plus Awesome Oscillator momentum threshold (CONFIRMATION) — an indicator cross with no valid HTF zone underneath it is never a signal on its own. Deterministic 0-100 confluence score (default minimum 80), structure+ATR stop, fixed 1:2+ risk/reward, ATR-based anti-chasing filter. Off by default. It uses the Min confidence, Risk per trade (capped at 1%) and High Selectivity settings at the top of this tab, plus the Reward:Risk on this card; tick it to enable.',
   },
 ];
 

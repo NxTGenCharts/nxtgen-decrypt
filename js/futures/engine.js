@@ -211,7 +211,7 @@ function attachTpLevels(levels, direction, feeInputs){
   };
 }
 
-// NxTGen Quant Futures trades its OWN configurable symbol list (default XRP/ADA/AVAX/LINK/DOT),
+// NxTGen HTF OrderFlow trades its OWN configurable symbol list (default XRP/ADA/AVAX/LINK/DOT),
 // which can include liquid pairs outside the platform's default scan universe. This adds those
 // extra symbols to a scan list when — and only when — Quant is enabled. The platform's excluded
 // pairs (excludedSymbols.js: BTC/ETH/SOL/LTC/DOGE/BNB/CL) are NEVER added and never traded by

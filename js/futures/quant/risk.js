@@ -2,7 +2,7 @@
 // quant/risk.js — the Quant Futures risk engine.
 //
 // Everything here is strategy-scoped: it only ever blocks or resizes
-// NxTGen Quant Futures entries. It does not alter the shared no-trade
+// NxTGen HTF OrderFlow entries. It does not alter the shared no-trade
 // gate, the global daily limits, or any other strategy's behaviour.
 //
 //  * Risk state is REPLAYED from the strategy's own closed-trade list

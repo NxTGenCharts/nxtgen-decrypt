@@ -166,7 +166,7 @@ async function runBacktestFlow(){
   if(!range){ showBtMessage('Pick a valid custom date range (From before To).', 'error'); return; }
   let symbols = selectedSymbols();
   const strategies = selectedStrategyConfig();
-  // NxTGen Quant Futures used to force-merge its own separately-configured symbol list into the run here,
+  // NxTGen HTF OrderFlow used to force-merge its own separately-configured symbol list into the run here,
   // on top of whatever's ticked in "Symbols to test" above. That made sense back when Quant's default list
   // was 5 specific coins that might not be in today's top-25-by-volume ranking. Now that Quant's default is
   // the whole tradeable universe (see quant/config.js), that merge would silently balloon every backtest run

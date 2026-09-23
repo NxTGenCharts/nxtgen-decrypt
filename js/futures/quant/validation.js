@@ -65,12 +65,11 @@ export function monteCarlo(trades, startingEquity, opts){
   };
 }
 
-// Small, wide-step grid — fewer knobs, less overfitting. RR band was
-// [2, 2.5, 3] when the platform's floor was 1:2; moved down to bracket the
-// shipped 1:1.5 default (QUANT_DEFAULTS.rewardRisk) now that the floor is 1.2.
+// Small, wide-step grid — fewer knobs, less overfitting. RR band matches the spec's configurable targets
+// (1:2 / 1:2.5 / 1:3); minConfidence brackets the spec's own 80 default (QUANT_DEFAULTS.minConfidence).
 export const DEFAULT_WF_GRID = (() => {
   const g = [];
-  for(const minConfidence of [70, 75, 80]) for(const rewardRisk of [1.3, 1.5, 1.7]) g.push({ minConfidence, rewardRisk });
+  for(const minConfidence of [75, 80, 85]) for(const rewardRisk of [2, 2.5, 3]) g.push({ minConfidence, rewardRisk });
   return g;
 })();
 

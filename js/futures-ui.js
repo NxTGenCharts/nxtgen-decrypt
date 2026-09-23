@@ -691,7 +691,7 @@ function runCycle(){
     minConfidence: f.minConfidence, minRiskReward: f.minRiskReward, minNetProfitPct: f.minNetProfitPct,
     riskPctPerTrade: f.riskPctPerTrade, leverage: f.leverage,
     strategies: f.strategies, strategyRR: f.strategyRR,
-    // NxTGen Quant Futures (ignored unless enabled) takes Min confidence / Risk per trade / High Selectivity
+    // NxTGen HTF OrderFlow (ignored unless enabled) takes Min confidence / Risk per trade / High Selectivity
     // from the same top controls as every other strategy — there is no separate Quant panel.
     quant: getQuantCfg({ log: true, minConfidence: f.minConfidence, riskPct: f.riskPctPerTrade, highSelectivity: f.highSelectivity }),
   };
@@ -1615,24 +1615,14 @@ function renderStrategyRows(){
       </div>
     `;
   };
-  // Quant-only controls: which setups may fire, and the entry timeframe. These are the two levers for trade
-  // frequency (Trend Pullback alone is deliberately selective; the Backtest tab's Quant diagnostics say which
-  // one to pull). Rendered from getQuantCardSettings() so what is shown is exactly what runs.
-  const quantControlsHtml = () => {
-    const q = getQuantCardSettings();
-    const setupDefs = [['A', 'Trend Pullback'], ['B', 'Breakout + Retest'], ['C', 'Liquidity Sweep'], ['D', 'Range Extremes']];
-    return `
-      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:12px;">
-        <span style="color:var(--dim);">Setups:</span>
-        ${setupDefs.map(([k, n]) => `<label style="display:flex;align-items:center;gap:5px;"><input type="checkbox" class="fu-quant-setup" data-setup="${k}" ${q.setups[k] ? 'checked' : ''}>${k} · ${n}</label>`).join('')}
-        <span style="color:var(--dim);margin-left:6px;">Entry timeframe</span>
-        <select class="fu-quant-tf">
-          <option value="15m" ${q.entryTimeframe === '15m' ? 'selected' : ''}>15m (selective)</option>
-          <option value="5m" ${q.entryTimeframe === '5m' ? 'selected' : ''}>5m (more signals)</option>
-        </select>
+  // HTF OrderFlow has a single, fixed setup and a fixed 5M entry timeframe (30M/1H/4H context is not
+  // configurable — it's the architecture, not a lever) — so unlike the old four-setup Quant Futures, there's
+  // nothing to toggle here; this is just a read-only summary of what runs.
+  const quantControlsHtml = () => `
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:12px;color:var(--dim);">
+        <span>Strategy: HTF OrderFlow · HTF 4H/1H/30M · Entry 5M · Supply/Demand + Order Flow</span>
       </div>`;
-  };
-  // Original six first, then NxTGen Quant Futures — so Quant is the 7th
+  // Original six first, then NxTGen HTF OrderFlow — so Quant is the 7th
   // strategy in the list. NxTGen Grid is deliberately NOT rendered here:
   // it runs its own independent engine (Paper AND Live/Demo both — see
   // grid.js's header comment), so its on/off switch and stats live only
@@ -1692,15 +1682,6 @@ function initStrategySelector(){
         const id = e.target.dataset.id;
         f.strategies[id] = e.target.checked;
         persistStrategyConfig();
-        renderStrategyRows();
-      } else if(e.target.classList.contains('fu-quant-setup')){
-        const cur = getQuantCardSettings().setups;
-        const next = { ...cur, [e.target.dataset.setup]: e.target.checked };
-        // At least one setup must stay on, otherwise Quant could never trade and the UI would look "on" while idle.
-        if(Object.values(next).some(Boolean)) updateQuantConfig({ setups: next });
-        renderStrategyRows();
-      } else if(e.target.classList.contains('fu-quant-tf')){
-        updateQuantConfig({ entryTimeframe: e.target.value });
         renderStrategyRows();
       } else if(e.target.classList.contains('fu-strategy-rr')){
         if(e.target.dataset.id === QUANT_ID){ updateQuantConfig({ rewardRisk: parseFloat(e.target.value) }); }

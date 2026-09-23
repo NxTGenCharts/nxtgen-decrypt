@@ -13,8 +13,10 @@ import { DEFAULT_FEE_CONFIG } from '../costs.js';
 import { STRATEGY_REGISTRY } from '../setups.js';
 import { sanitizeQuantConfig, QUANT_ID, QUANT_TYPE } from './config.js';
 
-// Behaviour BEFORE the cost filter existed (maxCostR 1 = off), as the Backtest tab ran it.
-export const BASE_OLD = { entryTimeframe: '15m', selectivity: 'off', minConfidence: 70, rewardRisk: 1.5, maxCostR: 1, minStopAtr: 1.2, trendFilter: 'any', setups: { A: true, B: false, C: false, D: false } };
+// HTF OrderFlow baseline — entry timeframe is always 5m and only setup 'A' exists (see quant/config.js);
+// kept as BASE_OLD (name unchanged so this tool's other references don't break) so 'BASELINE' rows in the
+// sweep still mean "the shipped default", just for the new strategy.
+export const BASE_OLD = { selectivity: 'off', minConfidence: 80, rewardRisk: 2, maxCostR: 1, minStopAtr: 0.8, setups: { A: true, B: false, C: false, D: false } };
 
 // grid: 'quick' (~22 configs), 'full' (96-config factorial). includeSlow adds 5m entries (~3x slower per run).
 export function sweepConfigs(grid, includeSlow){
@@ -31,19 +33,12 @@ export function sweepConfigs(grid, includeSlow){
   }
   list.push(
     ['cost<=0.12R', B({ maxCostR: 0.12 })], ['cost<=0.25R', B({ maxCostR: 0.25 })],
-    ['strong trend only', B({ trendFilter: 'strong' })], ['High selectivity', B({ selectivity: 'high' })],
-    ['minConf 75', B({ minConfidence: 75 })], ['minConf 80', B({ minConfidence: 80 })],
-    ['RR 1.3', B({ rewardRisk: 1.3 })], ['RR 1.75', B({ rewardRisk: 1.75 })], ['RR 2.0', B({ rewardRisk: 2 })],
+    ['High selectivity', B({ selectivity: 'high' })],
+    ['minConf 82', B({ minConfidence: 82 })], ['minConf 85', B({ minConfidence: 85 })],
+    ['RR 2.0', B({ rewardRisk: 2 })], ['RR 2.5', B({ rewardRisk: 2.5 })], ['RR 3.0', B({ rewardRisk: 3 })],
     ['stop floor 1.5 ATR', B({ minStopAtr: 1.5 })], ['stop floor 1.8 ATR', B({ minStopAtr: 1.8 })],
-    ['setups A+B', B({ setups: { A: true, B: true, C: false, D: false } })], ['setups A+C', B({ setups: { A: true, B: false, C: true, D: false } })],
-    ['setups A+B+C', B({ setups: { A: true, B: true, C: true, D: false } })], ['setups A+B+C+D', B({ setups: { A: true, B: true, C: true, D: true } })],
-    ['strong + High selectivity', B({ trendFilter: 'strong', selectivity: 'high' })],
-    ['strong + stop 1.5', B({ trendFilter: 'strong', minStopAtr: 1.5 })],
-    ['strong + cost<=0.12', B({ trendFilter: 'strong', maxCostR: 0.12 })],
-    ['strong + stop 1.5 + RR 1.3', B({ trendFilter: 'strong', minStopAtr: 1.5, rewardRisk: 1.3 })],
-    ['High + stop 1.5 + cost<=0.12', B({ selectivity: 'high', minStopAtr: 1.5, maxCostR: 0.12 })],
+    ['High + stop 1.2 + cost<=0.12', B({ selectivity: 'high', minStopAtr: 1.2, maxCostR: 0.12 })],
   );
-  if(includeSlow) list.push(['5m entries (3x slower)', B({ entryTimeframe: '5m' })]);
   return list;
 }
 

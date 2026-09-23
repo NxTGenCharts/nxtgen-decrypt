@@ -1,19 +1,19 @@
 // =============================================================
-// quant/regime.js — the 9-state market regime engine for NxTGen Quant
-// Futures.
+// quant/regime.js — the market-regime read for NxTGen HTF OrderFlow.
 //
 // This is deliberately separate from js/futures/regime.js (8 states, used
 // by every other strategy and by the shared no-trade gate). Nothing there
-// is changed. Higher timeframes (1H + 4H) decide the trend/range read; the
-// entry timeframe decides the volatility state. The result drives WHICH
-// setups may fire, how much extra confidence is demanded, and how much
-// risk is scaled — that is the "adapts to the regime" behaviour:
+// is changed. 1H + 4H decide the trend read; the 5M entry timeframe decides
+// the volatility state.
 //
-//   trend            -> pullbacks (A) and breakout/retest (B); with-trend sweeps (C)
-//   range            -> sweep reversals (C) and range extremes (D); B only on expansion
-//   high volatility  -> A/B/C only, +5 required confidence, risk x0.6, no mean reversion
-//   low vol / squeeze-> "no trade" unless a breakout-retest (B) is developing
-//   expansion        -> B only
+// Unlike the old Quant Futures (four setups, each allowed in different
+// regimes), HTF OrderFlow is ONE setup with its own hard trend-alignment
+// gate already built into setups.js (Step 1/Step 2 of the spec: 4H and 1H
+// must BOTH read the same direction, or it's NO TRADE regardless of regime).
+// This module's job is narrower now — implement the spec's separate
+// "MARKET REGIME FILTER": avoid low-quality conditions (extremely low
+// volatility, chaotic whipsaw/chop, squeeze) even when the trend read is
+// technically directional, and scale confidence/risk for high volatility.
 // =============================================================
 
 export const QREGIMES = {
@@ -30,9 +30,6 @@ export const QREGIMES = {
 
 function trendRead(feat){
   const h1 = feat.tfH1, h4 = feat.tfH4;
-  // Range-bound behaviour overrides the EMA read: price sitting at the LOW of a range naturally has
-  // EMA20 < EMA50 and price below both, which would look "bearish" — but low efficiency + low ADX + a
-  // flat slow EMA is what actually defines a range, and that's what range setups need to see.
   const rangeLike = h1.er <= 0.28 && (h1.adx == null || h1.adx < 22) && Math.abs(h1.slopeAtr) < 0.6 && h4.strength < 0.5;
   if(rangeLike) return { label: QREGIMES.RANGE, bias: 0, strength: Math.max(h1.strength, h4.strength) * 0.5 };
   const bull = h1.dir === 1 && h4.dir >= 0 && h1.structure !== 'bear';
@@ -50,8 +47,6 @@ function trendRead(feat){
 
 function volatilityRead(feat){
   const { atrPctile, atrRatio, atrP75, atrS, bbw, last, donHigh, donLow, vol, i } = feat;
-  // Expansion = a squeeze that resolved: ATR sat well below its normal-to-active level (p75) 6-20 bars ago,
-  // Bollinger width has widened >=25% since, and price closed outside the prior 20-bar range on above-average volume.
   let preSqueeze = false;
   for(let k = i - 20; k <= i - 6; k++){
     if(atrS[k] != null && atrS[k] <= 0.7 * atrP75){ preSqueeze = true; break; }
@@ -80,26 +75,21 @@ export function classifyQuantRegime(feat){
   else if(volState === 'low') label = QREGIMES.LOW_VOL;
   else label = t.label;
 
-  const isTrend = t.bias !== 0;
-  const allowed = { A: false, B: false, C: false, D: false };
+  // Spec: "MARKET REGIME FILTER — avoid low-quality market conditions such as extremely low volatility,
+  // chaotic whipsaw, conflicting HTF structure, excessive spread... If the market regime is unclear: NO TRADE."
+  // Low/compression volatility = dead or coiled tape, not the "reaction off an HTF zone" this strategy needs;
+  // trend must also be clear (t.bias !== 0) since a Range read already means 4H/1H don't clearly agree.
   let confBoost = 0, riskMult = 1;
-
-  if(volState === 'normal'){
-    if(isTrend){ allowed.A = true; allowed.B = true; allowed.C = true; }
-    else { allowed.C = true; allowed.D = true; }
-  } else if(volState === 'high'){
-    // Hostile to mean reversion; trade only what the trend supports, pickier and smaller.
-    // Sweeps (C) stay eligible: a stop-run is itself a volatility spike, so banning C here would ban it exactly when it happens.
-    if(isTrend){ allowed.A = true; allowed.B = true; allowed.C = true; } else { allowed.B = true; allowed.C = true; }
+  const allowed = { A: t.bias !== 0 && volState !== 'low' && volState !== 'compression' };
+  if(volState === 'high'){
     confBoost = 5; riskMult = 0.6;
-    notes.push(`Volatility high (ATR ${(feat.atrPctile * 100).toFixed(0)}th percentile) — confidence requirement +5, risk x0.6, no range fades (D)`);
+    notes.push(`Volatility high (ATR ${(feat.atrPctile * 100).toFixed(0)}th percentile) — confidence requirement +5, risk x0.6`);
   } else if(volState === 'expansion'){
-    allowed.B = true;
-    notes.push('Volatility expansion after a squeeze — only breakout+retest is eligible');
-  } else {
-    // low / compression: "no trade" unless an expansion setup is developing (B needs a real breakout)
-    allowed.B = true;
-    notes.push(`${volState === 'compression' ? 'Compression (squeeze)' : 'Low volatility'} — dead/choppy tape: only a developing breakout+retest is eligible`);
+    notes.push('Volatility expansion after a squeeze — location/order-block gate still applies in full');
+  } else if(volState === 'low' || volState === 'compression'){
+    notes.push(`${volState === 'compression' ? 'Compression (squeeze)' : 'Low volatility'} — dead/coiled tape: no trade`);
+  } else if(t.bias === 0){
+    notes.push('4H/1H structure not clearly aligned in a Range read — no trade');
   }
 
   return {

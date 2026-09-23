@@ -47,7 +47,7 @@ export function diagEngineReject(diag, reasons){
 }
 
 const STAGE_TEXT = {
-  no_setup: 'No setup pattern present (regime not allowed, trend not aligned, no pullback into value, momentum not turning...)',
+  no_setup: 'No setup pattern present (market regime not tradeable, 4H/1H not aligned, no validated HTF zone, no PSAR/EMA/AO confirmation...)',
   expansion: 'Setup found, but the signal candle was too large (already moved — not chasing)',
   stop: 'Setup found, but the structural stop was too far away (poor entry)',
   clearance: 'Setup found, but a 1H/4H swing level sat too close in front of the target',
@@ -74,7 +74,7 @@ export function summarizeQuantDiag(diag, tradeCount){
   const notAllowed = ['Range', 'Low Volatility', 'Compression', 'High Volatility'];
   const idleShare = regimes.filter(([k]) => notAllowed.includes(k)).reduce((a, [, n]) => a + n, 0) / Math.max(1, ev);
   if(ev === 0) hints.push('The detector never ran: not enough history (needs ~3 days of candles before the first evaluation) or every symbol is on the excluded list.');
-  if(ev > 0 && idleShare > 0.55) hints.push(`${Math.round(idleShare * 100)}% of evaluations were in Range / Low-vol / Compression / High-vol regimes, where Trend Pullback (A) is not allowed. Enable Range Extremes (D) and Liquidity Sweep (C) on the Quant card, or test a more trending period.`);
+  if(ev > 0 && idleShare > 0.55) hints.push(`${Math.round(idleShare * 100)}% of evaluations were in Range / Low-vol / Compression regimes, where HTF OrderFlow requires a clear 4H/1H trend and sits out. That's the strategy being selective, not a bug — test a more trending period for more signals.`);
   if(c.clearance && c.clearance > 2 * Math.max(1, c.signal || 0)) hints.push('Most candidates die on target clearance (a 1H/4H swing level is right in front of the trade). That is a quality filter, not a bug — enabling the other setups or using the 5m entry timeframe (tighter stops leave more room in R) lets more through.');
   if(c.score && c.score > Math.max(1, c.signal || 0)) hints.push('Many candidates fall just short on score/confluence. Lower Min confidence toward 65-70.');
   if(c.engineRejected && c.engineRejected >= (c.signal || 0) * 0.5) hints.push('Over half of the signals were stopped by the no-trade gate / risk limits (see the reasons list).');

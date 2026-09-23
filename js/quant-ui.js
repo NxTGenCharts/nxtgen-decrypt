@@ -1,5 +1,5 @@
 // =============================================================
-// quant-ui.js — NxTGen Quant Futures' UI-side glue.
+// quant-ui.js — NxTGen HTF OrderFlow's UI-side glue.
 //
 // There is no separate Quant configuration panel any more. The strategy is
 // switched on and given its Reward:Risk in the normal Strategies list, and it
@@ -24,7 +24,7 @@ import {
   MIN_SAMPLE_TRADES,
   loadQuantConfig, saveQuantConfig, sanitizeQuantConfig,
 } from './futures/quant/config.js';
-import { computeQuantStats, computeQuantStatsBySymbol, fromPaperLog, fromLiveLog, fromBacktest, winRateLabel } from './futures/quant/stats.js';
+import { computeQuantStats, computeQuantStatsBySymbol, computeQuantStatsByDirection, computeQuantStatsByRegime, fromPaperLog, fromLiveLog, fromBacktest, winRateLabel } from './futures/quant/stats.js';
 import { monteCarlo, splitInOutOfSample } from './futures/quant/validation.js';
 import { summarizeQuantDiag } from './futures/quant/diagnostics.js';
 
@@ -88,7 +88,7 @@ export function quantCardStatsLine(){
     : (s.sufficient
       ? `${name}: ${s.trades} trades · ${s.winRate.toFixed(1)}% win rate · PF ${pf(s.profitFactor)} · ${usd(s.netUsd)} net`
       : `${name}: <span style="color:var(--amber);">INSUFFICIENT SAMPLE (${s.trades}/${MIN_SAMPLE_TRADES})</span> · ${usd(s.netUsd)} net`);
-  return `${part('Paper', paper)} · ${part('Live/Demo', live)} · Backtest: ${backtestResult ? `${backtestResult.trades.length} trades (details in the Backtest tab)` : 'not run'} — target 58-65% win rate at 1:1.5 reward:risk (Trend Pullback only) is a design goal, not a result. Paper runs on the platform's synthetic feed; only Backtest/Live use real prices.`;
+  return `${part('Paper', paper)} · ${part('Live/Demo', live)} · Backtest: ${backtestResult ? `${backtestResult.trades.length} trades (details in the Backtest tab)` : 'not run'} — target 65%+ win rate at 1:2+ reward:risk (HTF OrderFlow only) is a design goal, not a result. Paper runs on the platform's synthetic feed; only Backtest/Live use real prices.`;
 }
 
 function statsTable(cols){
@@ -135,7 +135,7 @@ export function renderQuantBacktestSection(container, { trades, startingEquity, 
   if(!container) return;
   const qt = fromBacktest(trades);
   if(!qt.length){
-    container.innerHTML = `<div style="font-size:12px;color:var(--dim);">NxTGen Quant Futures took no trades in this backtest.</div>${diagnosticsHtml(diag, 0, true)}`;
+    container.innerHTML = `<div style="font-size:12px;color:var(--dim);">NxTGen HTF OrderFlow took no trades in this backtest.</div>${diagnosticsHtml(diag, 0, true)}`;
     return;
   }
   const all = computeQuantStats(qt, startingEquity);
@@ -143,6 +143,13 @@ export function renderQuantBacktestSection(container, { trades, startingEquity, 
   const isS = computeQuantStats(inSample, startingEquity), oosS = computeQuantStats(outOfSample, startingEquity);
   const mc = monteCarlo(qt, startingEquity, { runs: 1000 });
   const bySymbol = computeQuantStatsBySymbol(qt, startingEquity);
+  const byDir = computeQuantStatsByDirection(qt, startingEquity);
+  const byRegime = computeQuantStatsByRegime(qt, startingEquity);
+  const byRegimeRows = byRegime.map(({ regime, stats: s }) => `<tr style="border-top:1px solid var(--line);">
+      <td style="padding:3px 8px;">${regime}</td>
+      <td style="padding:3px 8px;text-align:right;">${s.trades}</td>
+      <td style="padding:3px 8px;text-align:right;">${s.trades === 0 ? '—' : (s.sufficient ? `<b>${s.winRate.toFixed(1)}%</b>` : `<span style="color:var(--amber);">${s.observedWinRate.toFixed(1)}% (n=${s.trades})</span>`)}</td>
+      <td style="padding:3px 8px;text-align:right;">${usd(s.netUsd)}</td></tr>`).join('');
   const bySymbolRows = bySymbol.map(({ symbol, stats: s }) => `<tr style="border-top:1px solid var(--line);">
       <td style="padding:3px 8px;">${symbol}</td>
       <td style="padding:3px 8px;text-align:right;">${s.trades}</td>
@@ -150,15 +157,19 @@ export function renderQuantBacktestSection(container, { trades, startingEquity, 
       <td style="padding:3px 8px;text-align:right;">${pf(s.profitFactor)}</td>
       <td style="padding:3px 8px;text-align:right;">${usd(s.netUsd)}</td></tr>`).join('');
   container.innerHTML = `
-    <div class="ov-block-title" style="margin-top:0;">NxTGen Quant Futures — validation</div>
+    <div class="ov-block-title" style="margin-top:0;">NxTGen HTF OrderFlow — validation</div>
     <div style="font-size:11.5px;color:var(--dim);margin-bottom:8px;line-height:1.5;">
       The in-sample / out-of-sample split below is a chronological 70/30 split of THIS run's trades. Because the strategy's parameters are fixed (not fitted to this data) it is a stability check;
       the walk-forward button does true parameter selection on a training window and trades only the following unseen window.
     </div>
     ${statsTable([{ name: 'All trades', stats: all }, { name: 'In-sample (first 70%)', stats: isS }, { name: 'Out-of-sample (last 30%)', stats: oosS }])}
+    <div class="ov-block-title" style="margin-top:14px;">Long vs Short</div>
+    ${statsTable([{ name: 'Long', stats: byDir.long }, { name: 'Short', stats: byDir.short }])}
+    <div class="ov-block-title" style="margin-top:14px;">By market regime</div>
+    <table style="width:100%;font-size:11.5px;border-collapse:collapse;"><tr><th style="text-align:left;padding:3px 8px;color:var(--dim);font-weight:600;">Regime</th><th style="text-align:right;padding:3px 8px;color:var(--ink);">Trades</th><th style="text-align:right;padding:3px 8px;color:var(--ink);">Win rate</th><th style="text-align:right;padding:3px 8px;color:var(--ink);">Net</th></tr>${byRegimeRows}</table>
     <div class="ov-block-title" style="margin-top:14px;">By symbol — which pairs this is favorable on, in THIS run</div>
     <div style="font-size:11.5px;color:var(--dim);margin-bottom:6px;line-height:1.5;">
-      Quant Futures trades every ticked symbol except the platform-wide excluded pairs (BTC/ETH/SOL/LTC/DOGE/BNB). A win rate below 30 trades for a single
+      HTF OrderFlow trades every ticked symbol except the platform-wide excluded pairs (BTC/ETH/SOL/LTC/DOGE/BNB). A win rate below 30 trades for a single
       symbol is shown as observed, not certified — the same MIN_SAMPLE_TRADES rule as everywhere else, just applied per symbol instead of to the total.
     </div>
     <table style="width:100%;font-size:11.5px;border-collapse:collapse;"><tr><th style="text-align:left;padding:3px 8px;color:var(--dim);font-weight:600;">Symbol</th><th style="text-align:right;padding:3px 8px;color:var(--ink);">Trades</th><th style="text-align:right;padding:3px 8px;color:var(--ink);">Win rate</th><th style="text-align:right;padding:3px 8px;color:var(--ink);">PF</th><th style="text-align:right;padding:3px 8px;color:var(--ink);">Net</th></tr>${bySymbolRows}</table>
@@ -168,7 +179,7 @@ export function renderQuantBacktestSection(container, { trades, startingEquity, 
     </div>
     <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
       <button type="button" id="qfWfBtn" class="primary ghost" style="font-size:12px;padding:6px 14px;">Run walk-forward validation</button>
-      <span id="qfWfStatus" style="font-size:11.5px;color:var(--dim);">4 folds × 9-cell grid (min confidence 70/75/80 × RR 1.3/1.5/1.7). Re-runs the backtest many times — can take a while.</span>
+      <span id="qfWfStatus" style="font-size:11.5px;color:var(--dim);">4 folds × 9-cell grid (min confidence 75/80/85 × RR 2/2.5/3). Re-runs the backtest many times — can take a while.</span>
     </div>
     <div id="qfWfResult" style="margin-top:10px;"></div>
     <div style="margin-top:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
