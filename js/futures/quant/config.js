@@ -136,9 +136,19 @@ export const QUANT_DEFAULTS = {
   psarMaxStep: 0.2,               // PSAR acceleration cap
   aoLongThreshold: 3,             // AO Long Threshold (default +3)
   aoShortThreshold: -3,           // AO Short Threshold (default -3)
-  aoNormalized: false,            // optional ATR-normalized AO mode (spec: "so the strategy can behave
-                                  // consistently across BTC, ETH and other futures contracts") — when true,
-                                  // the +3/-3 thresholds are read in normalized units instead of raw AO.
+  aoNormalized: true,             // ATR-normalized AO mode (spec: "so the strategy can behave consistently
+                                  // across BTC, ETH and other futures contracts") — ON by default.
+                                  // BUG FIX: raw AO is in price units (SMA5-SMA34 of median price), so a
+                                  // fixed +-3 threshold only ever clears on BTC-scale prices. The default
+                                  // symbol universe here is every non-excluded USDT perpetual — i.e. mostly
+                                  // sub-$50 alts, since BTC/ETH/SOL are permanently excluded
+                                  // (excludedSymbols.js) — where raw AO rarely exceeds a few hundredths.
+                                  // With aoNormalized:false this AO gate was, in practice, almost never
+                                  // passable for the strategy's own default scan list, which alone was
+                                  // enough to make Backtest/Paper/Live/Demo report zero trades regardless of
+                                  // how much real history was fed in. aoNorm = (rawAO / ATR) * 3 is
+                                  // dimensionless and scaled so a "typical" swing sits near the same +-3,
+                                  // consistently whether the symbol is a $0.50 alt or a $50 one.
   maxEntryAtr: 0.75,              // Maximum Entry Distance (spec: "0.5-1.0 x 5M ATR") — anti-chasing filter
   slBufferAtr: 0.15,              // SL buffer (spec: "0.1-0.25 x 5M ATR")
   zoneToleranceAtr: 0.75,         // ATR-based proximity tolerance used to decide whether 30M/1H/4H order
