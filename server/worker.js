@@ -26,7 +26,6 @@ import {
   runLiveCycleInner, getTradeableSymbols,
 } from '../js/futures/liveEngine.js';
 import { RISK_DEFAULTS } from '../js/futures/risk.js';
-import { sanitizeQuantConfig, QUANT_DEFAULTS } from '../js/futures/quant/config.js';
 
 export { ARM_PHRASE };
 
@@ -77,19 +76,6 @@ function buildAdapter(runner){
       return session.cred;
     },
     notify(msg, kind){ log(runner, msg, kind); },
-    // Same merge the browser's getQuantCfg (quant-ui.js) does: the Quant-only
-    // settings that were saved in the app (sent at arm time as quantCfg) form the
-    // base; the shared Min confidence / Risk % / High Selectivity are laid over them.
-    getQuantCfg(opts){
-      const o = opts || {};
-      const base = session.quantBase || QUANT_DEFAULTS;
-      return sanitizeQuantConfig({
-        ...base,
-        riskPct: o.riskPct != null ? o.riskPct : base.riskPct,
-        minConfidence: o.minConfidence != null ? o.minConfidence : base.minConfidence,
-        selectivity: o.highSelectivity != null ? (o.highSelectivity ? 'high' : 'off') : base.selectivity,
-      });
-    },
     onPositionsChanged(){ /* session.livePositions is already the live source of truth for /api/worker/status — nothing else to persist here */ },
     onRender(){ /* no UI to redraw */ },
     onPendingSignal(){ /* Manual mode isn't used here — session.liveTradeMode is always 'auto' */ },
@@ -156,7 +142,7 @@ async function runCycle(runner){
 //   WORKER_MIN_NET_PROFIT_PCT, WORKER_DAILY_PROFIT_TARGET_PCT,
 //   WORKER_MAX_DAILY_LOSS_PCT, WORKER_HIGH_SELECTIVITY, WORKER_STRATEGIES
 //                       optional settings (WORKER_STRATEGIES is JSON, e.g.
-//                       {"novaScalp":true,"quantFutures":true}).
+//                       {"novaScalp":true,"trendContinuation":true}).
 //   WORKER_AUTOARM=true arm automatically on every server start.
 // -------------------------------------------------------------
 const MIN_TOKEN_LEN = 20;
@@ -297,7 +283,7 @@ export function armSession(params){
     armPhrase, exchange, mode, apiKey, secretKey, passphrase,
     leverage, riskPctPerTrade, minConfidence, minRiskReward, minNetProfitPct,
     highSelectivity, strategies, strategyRR, dailyProfitTargetPct, maxDailyLossPct,
-    quantCfg, tzOffsetMinutes, explicitSettings, requireRiskSettings,
+    tzOffsetMinutes, explicitSettings, requireRiskSettings,
   } = params || {};
 
   if(armPhrase !== ARM_PHRASE){
@@ -346,11 +332,6 @@ export function armSession(params){
   }
   if(existing && existing.timer) clearInterval(existing.timer);
 
-  let quantBase;
-  if(quantCfg && typeof quantCfg === 'object'){
-    try{ quantBase = sanitizeQuantConfig(quantCfg); }catch(e){ quantBase = undefined; }
-  }
-
   const resolvedLeverage = clampNum(leverage, 1, RISK_DEFAULTS.maxLeverage, RISK_DEFAULTS.defaultLeverage || 5);
   const resolvedRisk = clampNum(riskPctPerTrade, 0.25, RISK_DEFAULTS.maxRiskPctPerTrade, 0.5);
   const resolvedConf = clampNum(minConfidence, 0, 100, 70);
@@ -372,7 +353,6 @@ export function armSession(params){
     highSelectivity: !!highSelectivity,
     strategies: (strategies && typeof strategies === 'object') ? strategies : undefined,
     strategyRR: (strategyRR && typeof strategyRR === 'object') ? strategyRR : undefined,
-    quantBase,
     liveDailyProfitTargetPct: resolvedProfitTarget,
     liveMaxDailyLossPct: resolvedMaxLoss,
     tzOffsetMin: clampNum(tzOffsetMinutes, -720, 840, 0), dayKey: null,

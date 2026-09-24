@@ -23,7 +23,7 @@ export const RISK_DEFAULTS = {
   defaultLeverage: 10,          // fallback only, used if a leverage field's value somehow fails to parse —
                                  // real defaults live on each field itself (10x on Live/Demo, 5x on Paper/Backtest).
   maxLeverage: 15,               // Paper/Backtest's real ceiling. It's also the fallback the shared scanning
-                                 // engine uses for the Quant strategy's own leverage clamp when a caller doesn't
+                                 // engine uses for a strategy's own leverage clamp when a caller doesn't
                                  // say otherwise — true for both Paper's and Backtest's cfg, neither of which
                                  // sets cfg.maxLeverage, so this one constant covers both. Live/Demo trading
                                  // uses a separate, higher ceiling defined next to its own leverage handling in

@@ -32,11 +32,7 @@
 // high/low — never against the whole future series at once.
 // =============================================================
 import { classifyRegime } from './regime.js';
-import { evaluateSymbol, netPnlForFraction, EXCLUDED_FUTURES_SYMBOLS, isQuantEnabled } from './engine.js';
-import { quantSymbolSet, QUANT_ID } from './quant/config.js';
-import { createQuantDiag } from './quant/diagnostics.js';
-import { STRATEGY_REGISTRY } from './setups.js';
-import { quantExitPrice, quantTradeFields } from './quant/risk.js';
+import { evaluateSymbol, netPnlForFraction, EXCLUDED_FUTURES_SYMBOLS } from './engine.js';
 import { RISK_DEFAULTS } from './risk.js';
 import { computeBtcShock } from './indicators.js';
 
@@ -59,10 +55,8 @@ export const DEFAULT_BACKTEST_META = {
 // aggregation group sizes buildSnapshotAt uses, plus a small buffer.
 function m15GroupSize(intervalMinutes){ return Math.max(1, Math.round(15 / intervalMinutes)); }
 function h1GroupSize(intervalMinutes){ return Math.max(1, Math.round(60 / intervalMinutes)); }
-function warmupBarsFor(intervalMinutes, quantOn){
-  const base = Math.max(30 * m15GroupSize(intervalMinutes), 30 * h1GroupSize(intervalMinutes)) + 20;
-  // Quant Futures derives 4H context from 56+ hourly candles — it needs a longer runway before its first evaluation.
-  return quantOn ? Math.max(base, 60 * h1GroupSize(intervalMinutes) + 20) : base;
+function warmupBarsFor(intervalMinutes){
+  return Math.max(30 * m15GroupSize(intervalMinutes), 30 * h1GroupSize(intervalMinutes)) + 20;
 }
 
 function aggregateBase(baseCandles, uptoIndex, groupSize, count){
@@ -95,8 +89,8 @@ function buildSnapshotAt(symbol, baseCandles, uptoIndex, metaOverrides, interval
     h1: aggregateBase(baseCandles, uptoIndex, h1GroupSize(intervalMinutes), 60),
     meta: {
       ...DEFAULT_BACKTEST_META, ...metaOverrides,
-      // Historical candles are complete by construction; baseIntervalMinutes lets the Quant
-      // detector evaluate a 15m entry only when a real wall-clock 15m candle has just closed.
+      // Historical candles are complete by construction; baseIntervalMinutes lets
+      // downstream indicators evaluate against a fully-closed candle.
       candlesClosed: true, baseIntervalMinutes: intervalMinutes,
       // Rough day-volume estimate from this single bar's own turnover —
       // only feeds the liquidityScore/spread gates, which are overridden
@@ -114,7 +108,7 @@ function newDayState(startingEquity, maxDailyLossPct, dailyProfitTargetPct){
     equity: startingEquity, startingEquity, peakEquity: startingEquity, maxDrawdownPct: 0,
     realizedNetUsd: 0, realizedGrossUsd: 0, feesUsd: 0, fundingUsd: 0,
     trades: 0, wins: 0, losses: 0, consecutiveLosses: 0, lastLossAt: 0,
-    dailyPnlPct: 0, openPositions: 0, openRiskPct: 0, positions: [], cooldownUntilBySymbol: {}, quantTrades: [],
+    dailyPnlPct: 0, openPositions: 0, openRiskPct: 0, positions: [], cooldownUntilBySymbol: {},
     // Anchor for the "daily" loss/profit gate (see rolloverDayIfNeeded
     // below) — starts equal to startingEquity, then gets reset to
     // whatever equity actually is at the start of each new calendar day,
@@ -171,7 +165,6 @@ function openBacktestPosition(row, dayState, nowMs){
     tp1: row.tp1, tp2: row.tp2, tp3: row.tp3,
     tpFractions: row.tpFractions || { tp1: 0.30, tp2: 0.30, tp3: 0.40 },
     breakevenStopPrice: row.breakevenStopPrice, singleTarget: !!row.singleTarget,
-    singleTp: !!row.singleTp, // Quant Futures: one fixed exit, mirrors engine.js's managePositions
     qty, notionalUsd: row.sizing ? row.sizing.notionalUsd : 0,
     leverage: row.leverage, execution: row.execution,
     entryFeePct: row.costsBreakdown.entryFeePct, exitFeePct: row.costsBreakdown.exitFeePct,
@@ -184,17 +177,6 @@ function openBacktestPosition(row, dayState, nowMs){
     openedAt: nowMs, remainingFraction: 1, partialsTaken: [], accrued: null,
   };
   position.riskAmountUsd = row.sizing ? row.sizing.riskAmountUsd : 0;
-  if(row.quantMeta){
-    const m = row.quantMeta;
-    position.quant = {
-      setup: m.setup, setupName: m.setupName, score: m.score, regime: m.regime.label, entryTf: m.entryTf,
-      rewardRisk: m.rewardRisk, riskPctUsed: row.riskPctUsed, stopDistPct: m.stopDistPct, factors: m.factors,
-      exitSlipPct: row.quantExit.exitSlipPct,
-      entrySlipUsd: position.notionalUsd * (m.slipPct + m.spreadPct / 2) / 100,
-    };
-    position.timeStopMinutes = row.quantExit.timeStopMinutes;
-    position.tpLabel = `TAKE_PROFIT_${m.rewardRisk}R`;
-  }
   dayState.positions.push(position);
   recomputeOpenRisk(dayState);
   return position;
@@ -218,17 +200,12 @@ function closeBacktestTrade(pos, exitPrice, pnl, exitReason, dayState, closedTra
   dayState.peakEquity = Math.max(dayState.peakEquity, dayState.equity);
   dayState.maxDrawdownPct = Math.max(dayState.maxDrawdownPct, ((dayState.peakEquity - dayState.equity) / dayState.peakEquity) * 100);
 
-  if(pos.quant){
-    dayState.quantTrades.push({ closedAtMs: nowMs, netUsd: finalNetUsd });
-    dayState.slippageUsd = (dayState.slippageUsd || 0) + (pos.quant.entrySlipUsd || 0) + (exitSlipUsd || 0);
-  }
   closedTrades.push({
     closedAtMs: nowMs, openedAtMs: pos.openedAt, exchange: pos.exchange, symbol: pos.symbol, direction: pos.direction,
     entry: pos.entry, exit: exitPrice, qty: pos.qty, leverage: pos.leverage,
     grossUsd: totalGrossUsd, feesUsd: totalFeesUsd, fundingUsd: accrued.fundingUsd + pnl.fundingUsd, netUsd: finalNetUsd,
     confidence: pos.confidence, setupType: pos.setup, reasonEntry: (pos.reasons || []).join('; '),
     exitReason, durationMin: Math.round((nowMs - pos.openedAt) / 60_000),
-    ...quantTradeFields(pos, finalNetUsd, exitSlipUsd),
   });
 }
 
@@ -246,39 +223,16 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
     const hitTP = (price) => dir === 1 ? candle.h >= price : candle.l <= price;
     const hitSL = dir === 1 ? candle.l <= pos.stop : candle.h >= pos.stop;
     const ageMinutes = (nowMs - pos.openedAt) / 60_000;
-    const timeStopMinutes = pos.quant ? pos.timeStopMinutes : timeStopMinutesFor(pos.setup);
+    const timeStopMinutes = timeStopMinutesFor(pos.setup);
 
     if(hitSL){
-      const slipPx = quantExitPrice(pos, pos.stop, 'STOP'); // Quant: stop-market fills slip; other strategies unchanged
-      const pnl = netPnlForFraction(pos, slipPx, pos.remainingFraction, dayState, false);
-      closeBacktestTrade(pos, slipPx, pnl, 'STOP_LOSS', dayState, closedTrades, nowMs, pos.quant ? Math.abs(slipPx - pos.stop) / pos.entry * pos.notionalUsd * pos.remainingFraction : 0);
+      const pnl = netPnlForFraction(pos, pos.stop, pos.remainingFraction, dayState, false);
+      closeBacktestTrade(pos, pos.stop, pnl, 'STOP_LOSS', dayState, closedTrades, nowMs, 0);
       dayState.cooldownUntilBySymbol[pos.symbol] = nowMs + 30 * 60_000;
       continue;
     }
 
     const tp1Fraction = pos.tpFractions.tp1, tp2Fraction = pos.tpFractions.tp2;
-
-    // Quant Futures: one fixed target, no partials/breakeven — identical to
-    // engine.js's managePositions singleTp branch (Nova Scalp's own single 2R exit is
-    // the tp3-only path below, controlled by `singleTarget`). SL is checked first above (a bar that
-    // touches both is conservatively a loss).
-    if(pos.singleTp){
-      if(hitTP(pos.tp1)){
-        const pnl = netPnlForFraction(pos, pos.tp1, pos.remainingFraction, dayState, true);
-        closeBacktestTrade(pos, pos.tp1, pnl, pos.tpLabel || 'TAKE_PROFIT_2R', dayState, closedTrades, nowMs);
-        dayState.cooldownUntilBySymbol[pos.symbol] = nowMs + 30 * 60_000;
-        continue;
-      }
-      if(ageMinutes > timeStopMinutes){
-        const slipPx = quantExitPrice(pos, candle.c, 'MARKET');
-        const pnl = netPnlForFraction(pos, slipPx, pos.remainingFraction, dayState, false);
-        closeBacktestTrade(pos, slipPx, pnl, 'TIME_STOP', dayState, closedTrades, nowMs, pos.quant ? Math.abs(slipPx - candle.c) / pos.entry * pos.notionalUsd * pos.remainingFraction : 0);
-        dayState.cooldownUntilBySymbol[pos.symbol] = nowMs + 30 * 60_000;
-        continue;
-      }
-      stillOpen.push(pos);
-      continue;
-    }
 
     if(tp1Fraction > 0 && !pos.partialsTaken.includes('tp1') && hitTP(pos.tp1)){
       const pnl = netPnlForFraction(pos, pos.tp1, tp1Fraction, dayState, true);
@@ -363,17 +317,6 @@ export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquit
   for(const sym of testSymbols) for(const c of candlesBySymbol[sym]) timelineSet.add(c.t);
   const timeline = Array.from(timelineSet).sort((a, b) => a - b);
 
-  const quantOn = isQuantEnabled(cfg);
-  if(quantOn) cfg.quant.log = false; // thousands of bars would drown the [QUANT] log
-  const quantSyms = quantOn ? quantSymbolSet(cfg.quant) : new Set();
-  // Where did the pipeline stop? Counters only (quant/diagnostics.js) — shown in the Backtest tab, never used in a decision.
-  const quantDiag = quantOn ? createQuantDiag() : null;
-  if(quantOn) cfg.quant.diag = quantDiag;
-  // Speed: when Quant is the ONLY entry strategy and it trades 15m candles, a 5m base bar that is not a 15m close
-  // can never produce an entry (buildFeatures returns "waiting for the next 15m candle close"). Skip building the
-  // snapshot for those bars — 2 of every 3 — which was the bulk of the run time. Positions are still managed every bar.
-  const otherStrategyOn = STRATEGY_REGISTRY.some(st => st.id !== QUANT_ID && (cfg.strategies && st.id in cfg.strategies ? !!cfg.strategies[st.id] : st.defaultEnabled));
-  const quantSkipOffClose = quantOn && !otherStrategyOn && cfg.quant.entryTimeframe === '15m' && barIntervalMinutes < 15;
   const dayState = newDayState(startingEquity, maxDailyLossPct, dailyProfitTargetPct);
   const closedTrades = [];
   const equityCurve = [];
@@ -401,13 +344,12 @@ export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquit
 
     for(const symbol of testSymbols){
       // Same permanently-excluded set Paper/Live use (BTC/ETH/SOL/LTC/DOGE/BNB/CL — excludedSymbols.js): skipped for
-      // EVERY strategy, Quant included.
+      // every strategy.
       if(EXCLUDED_FUTURES_SYMBOLS.has(symbol)) continue;
       if(dayState.positions.some(p => p.symbol === symbol)) continue; // already open — evaluateSymbol's own gate would reject this anyway, skip the compute
       const idx = idxBySymbol[symbol].get(nowMs);
-      if(idx == null || idx < warmupBarsFor(barIntervalMinutes, quantOn && quantSyms.has(symbol))){ if(idx != null) skippedWarmup++; continue; }
+      if(idx == null || idx < warmupBarsFor(barIntervalMinutes)){ if(idx != null) skippedWarmup++; continue; }
 
-      if(quantSkipOffClose && ((Math.floor(nowMs / 60_000) + barIntervalMinutes) % 15) !== 0) continue;
       barsEvaluated++;
       const snap = buildSnapshotAt(symbol, candlesBySymbol[symbol], idx, metaOverrides, barIntervalMinutes);
       const regime = classifyRegime(snap.h1, snap.m15);
@@ -445,7 +387,7 @@ export async function runBacktest({ candlesBySymbol, symbols, cfg, startingEquit
   }
   dayState.positions = [];
 
-  return { trades: closedTrades, equityCurve, dayState, barsEvaluated, skippedWarmup, symbols: testSymbols, quantDiag };
+  return { trades: closedTrades, equityCurve, dayState, barsEvaluated, skippedWarmup, symbols: testSymbols };
 }
 
 // Summary stats block for the results header — kept separate from

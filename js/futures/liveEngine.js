@@ -17,13 +17,12 @@
 // before. This file is only "given an approved signal / an open
 // position, what do we do about it".
 // =============================================================
-import { runScanCycle, scanSymbolsWithQuant } from './engine.js';
+import { runScanCycle } from './engine.js';
+import { EXCLUDED_FUTURES_SYMBOLS } from './excludedSymbols.js';
 import { RISK_DEFAULTS } from './risk.js';
 import { DEFAULT_WEIGHTS } from './scoring.js';
 import { computeBtcShock } from './indicators.js';
 import { rankTopByVolume, WATCHLIST_TOP_N } from './watchlist.js';
-import { QUANT_TYPE } from './quant/config.js';
-import { qlog } from './quant/log.js';
 
 export const ARM_PHRASE = 'PLACE REAL ORDERS';
 export const LIVE_CYCLE_MS = 8000;
@@ -57,7 +56,6 @@ has a DOM to update or a cross-session log to write to.
   fetchSnapshot(exchange, symbol, tf)   -> Promise<snapshot> GET .../api/futures/snapshot, throws on !ok
   getCred(exchange, mode)               -> {apiKey,secretKey,passphrase} | null
   notify(msg, kind)                     -> status message ('error' | 'success' | undefined)
-  getQuantCfg(opts)                     -> quant config object (shape sanitizeQuantConfig returns)
   onPositionsChanged(session)           -> persist open positions (optional)
   onRender(session)                     -> trigger a UI re-render (optional)
   onPendingSignal(session)              -> Manual-mode UI hook (optional; browser only)
@@ -131,7 +129,6 @@ export function buildLiveDayStateShim(session, equity){
       notionalUsd: (p.qty || 0) * (p.entry || 0), leverage: p.leverage || 1,
     };
   });
-  const quantTrades = session.liveTradeHistory.filter(t => t.setupType === QUANT_TYPE).map(t => ({ closedAtMs: t.closedAtMs, netUsd: t.netUsd || 0 })).reverse();
   let consecutiveLosses = 0, lastLossAt = null;
   for(const t of session.liveTradeHistory){
     if(t.netUsd < 0){ consecutiveLosses++; if(!lastLossAt) lastLossAt = t.closedAtMs; }
@@ -143,16 +140,11 @@ export function buildLiveDayStateShim(session, equity){
     trades: session.liveTrades, wins: 0, losses: 0, consecutiveLosses, lastLossAt,
     dailyPnlPct, maxDrawdownPct: 0,
     realizedGrossUsd: 0, realizedNetUsd: session.liveNetPnlUsd, feesUsd: 0, fundingUsd: 0, slippageUsd: 0,
-    openPositions: openSymbols.length, openRiskPct, positions, quantTrades,
+    openPositions: openSymbols.length, openRiskPct, positions,
     cooldownUntilBySymbol: session.liveCooldownUntilBySymbol || {},
     dailyProfitTargetPct: session.liveDailyProfitTargetPct != null ? session.liveDailyProfitTargetPct : RISK_DEFAULTS.dailyProfitTargetPct,
     maxDailyLossPct: session.liveMaxDailyLossPct != null ? session.liveMaxDailyLossPct : RISK_DEFAULTS.maxDailyLossPct,
   };
-}
-
-function quantClosureFields(tracked, netUsd){
-  if(!tracked.quant) return {};
-  return { quant: { ...tracked.quant, riskUsd: tracked.riskAmountUsd || 0, realizedR: tracked.riskAmountUsd > 0 ? netUsd / tracked.riskAmountUsd : null } };
 }
 
 // Mirrors recordLiveClosure (futures-ui.js). Shared by the auto-scan
@@ -171,23 +163,16 @@ export function recordLiveClosure(session, adapter, symbol, tracked, closed){
     ? Math.max(0, Math.round((closedAtMs - tracked.openedAtMs) / 60_000)) : null;
   const entry = closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry;
   const exit = closed && closed.avgExitPrice != null ? closed.avgExitPrice : null;
-  const quantFields = quantClosureFields(tracked, netUsd);
   session.liveTradeHistory.unshift({
     closedAtMs, time: new Date().toLocaleTimeString(), exchange: tracked.exchange, symbol, side: tracked.side,
     entry, exit, leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-    setupType: tracked.setupType, durationMin, ...quantFields,
+    setupType: tracked.setupType, durationMin,
   });
   adapter.appendPersistentTrade && adapter.appendPersistentTrade({
     closedAtMs, exchange: tracked.exchange, mode: tracked.mode, symbol, side: tracked.side,
     entry, exit, leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-    setupType: tracked.setupType, durationMin, ...quantFields,
+    setupType: tracked.setupType, durationMin,
   });
-  if(tracked.quant){
-    qlog(`${symbol} position closed`);
-    qlog(`${symbol} realized PnL = ${netUsd >= 0 ? '+' : ''}$${Number(netUsd).toFixed(2)}${tracked.riskAmountUsd > 0 ? ` (${(netUsd / tracked.riskAmountUsd).toFixed(2)}R)` : ''}`);
-    qlog(`${symbol} trade result: ${netUsd > 0 ? 'WIN' : 'LOSS'}`);
-    qlog('Strategy statistics updated (Live/Demo)');
-  }
   session.liveTrades = (session.liveTrades || 0) + 1;
   if(netUsd > 0) session.liveWins = (session.liveWins || 0) + 1; else session.liveLosses = (session.liveLosses || 0) + 1;
   session.liveNetPnlUsd = (session.liveNetPnlUsd || 0) + netUsd;
@@ -274,11 +259,6 @@ export async function placeLiveEntryOrder(session, adapter, approved, side, exch
       tp3Price: usePartialTp ? approved.tp3 : null,
       riskAmountUsd: approved.sizing.riskAmountUsd, openedAtMs, balanceBeforeUsd: equity,
       setupType: approved.setup,
-      ...(approved.quantMeta ? { quant: {
-        setup: approved.quantMeta.setup, setupName: approved.quantMeta.setupName, score: approved.quantMeta.score,
-        regime: approved.quantMeta.regime.label, entryTf: approved.quantMeta.entryTf, initialRR: approved.quantMeta.rewardRisk,
-        riskPctUsed: approved.riskPctUsed, stopDistPct: approved.quantMeta.stopDistPct, factors: approved.quantMeta.factors,
-      } } : {}),
       usePartialTp, tp2Fraction: approved.tpFractions ? approved.tpFractions.tp2 : null,
       tp1Fraction: approved.tpFractions ? approved.tpFractions.tp1 : null,
       breakevenStopPrice: approved.breakevenStopPrice, slAlgoId: result.slAlgoId || null,
@@ -288,12 +268,6 @@ export async function placeLiveEntryOrder(session, adapter, approved, side, exch
     const tpNote = usePartialTp
       ? `TP1 ${approved.tp1} (30%) / TP2 ${approved.tp2} (30%) / TP3 ${approved.tp3} (40%)`
       : `TP ${result.takeProfitPrice}`;
-    if(approved.quantMeta){
-      qlog(`${approved.symbol} order submitted: ${approved.direction} qty ${result.filledQty} (${mode}, ${exchange})`);
-      qlog(`${approved.symbol} position opened @ ${result.avgPrice} (${approved.quantMeta.setupName}, score ${approved.quantMeta.score}, risk ${approved.riskPctUsed.toFixed(2)}%)`);
-      qlog(`${approved.symbol} stop loss set @ ${result.stopLossPrice}`);
-      qlog(`${approved.symbol} take profit set @ ${result.takeProfitPrice} (1:${approved.quantMeta.rewardRisk})`);
-    }
     adapter.notify && adapter.notify(`Real ${mode} position opened: ${approved.symbol} ${side} ${result.filledQty} @ ${result.avgPrice}, SL ${result.stopLossPrice} / ${tpNote} (order ${result.orderId}).`);
   }catch(err){
     const skipMin = noteLiveOrderFailure(session, approved.symbol, err.message, 'error');
@@ -438,8 +412,7 @@ export async function runLiveCycleInner(session, adapter){
   const universe = await getTradeableSymbols(adapter, exchange);
   if(!universe){ adapter.notify && adapter.notify(`Could not fetch the ${exchange} futures symbol list this cycle — skipping.`, 'error'); return; }
 
-  const quantProbe = { strategies: session.strategies, quant: adapter.getQuantCfg() };
-  const scanList = scanSymbolsWithQuant(universe.top, quantProbe);
+  const scanList = universe.top.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s));
   const fetchSymbols = ['BTCUSDT', ...scanList.filter(s => s !== 'BTCUSDT')];
   const snapshots = {};
   const timeframe = '5m';
@@ -461,7 +434,6 @@ export async function runLiveCycleInner(session, adapter){
     // this key at all, so its own ceiling (RISK_DEFAULTS.maxLeverage, 10) is untouched by raising this one.
     riskPctPerTrade: session.riskPctPerTrade, leverage: session.leverage, maxLeverage: 50,
     strategies: session.strategies, strategyRR: session.strategyRR,
-    quant: adapter.getQuantCfg({ log: true, minConfidence: Math.min(95, session.minConfidence + session.liveAdaptiveConfidenceBoost), riskPct: session.riskPctPerTrade, highSelectivity: session.highSelectivity }),
   };
   const dayStateShim = buildLiveDayStateShim(session, equity);
   const { rows } = runScanCycle(cfg, dayStateShim, {

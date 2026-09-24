@@ -8,8 +8,6 @@
 import { ema, emaSeries, atr, rsi, macdHistogram, vwap, swingLevels, volumeExpansion, relativeVolumePercentile, closes, clamp, parabolicSar, awesomeOscillator, macdSeries } from './indicators.js';
 import { REGIMES } from './regime.js';
 import { smartRangeFilter } from './rangeFilter.js';
-import { QUANT_ID, QUANT_TYPE, quantSymbolSet } from './quant/config.js';
-import { detectQuantFutures } from './quant/signal.js';
 
 const TREND_REGIMES = new Set([REGIMES.STRONG_BULL, REGIMES.WEAK_BULL, REGIMES.STRONG_BEAR, REGIMES.WEAK_BEAR]);
 const BULL_REGIMES = new Set([REGIMES.STRONG_BULL, REGIMES.WEAK_BULL]);
@@ -291,21 +289,10 @@ export const STRATEGY_REGISTRY = [
     label: 'Breakout + Retest',
     description: 'Consolidation, then a breakout, then a retest of that level with volume confirmation. Entry trigger now runs on M5 (was M15 — see detectBreakoutRetest\'s comment). Off by default: conceptually close to NxTGen Scalp\'s own momentum-chasing character, so it adds less diversification than the two enabled by default.',
   },
-  {
-    id: QUANT_ID, type: QUANT_TYPE, detector: 'detectQuantFutures', defaultRR: 2, defaultEnabled: false,
-    rrOptions: [2, 2.5, 3], // floor is HARD_LIMITS.minRewardRisk (2.0) — never below 1:2
-    label: 'NxTGen HTF OrderFlow',
-    description: 'High-selectivity multi-timeframe futures strategy: 4H/1H trend alignment + validated 30M/1H/4H supply-demand and institutional order-block confluence (LOCATION), confirmed only by a mechanical 5M Parabolic SAR / EMA50-100 crossover plus Awesome Oscillator momentum threshold (CONFIRMATION) — an indicator cross with no valid HTF zone underneath it is never a signal on its own. Deterministic 0-100 confluence score (default minimum 80), structure+ATR stop, fixed 1:2+ risk/reward, ATR-based anti-chasing filter. Off by default. It uses the Min confidence, Risk per trade (capped at 1%) and High Selectivity settings at the top of this tab, plus the Reward:Risk on this card; tick it to enable.',
-  },
 ];
 
-// quantCtx (optional): { qcfg, ctx } — the sanitized Quant Futures config and
-// its per-call context ({ nowMs, log, costPct }). Without it the Quant detector
-// simply returns nothing, so every existing caller is unaffected.
-// onlyIds (optional): restrict to these strategy ids (no caller currently needs it). The platform's
-// excluded pairs (excludedSymbols.js) are never traded by Quant: quantSymbolSet() drops them, and
-// evaluateSymbol rejects them before any detector runs.
-export function detectAllSetups(snap, regime, strategyConfig, quantCtx, onlyIds){
+// onlyIds (optional): restrict to these strategy ids (no caller currently needs it).
+export function detectAllSetups(snap, regime, strategyConfig, onlyIds){
   // strategyConfig: { [id]: boolean } — which strategies from
   // STRATEGY_REGISTRY above are enabled. Defaults to each strategy's own
   // defaultEnabled when no config is passed (e.g. Paper mode calling this
@@ -323,9 +310,6 @@ export function detectAllSetups(snap, regime, strategyConfig, quantCtx, onlyIds)
     liquiditySweep: detectLiquiditySweep,
     rangeReversal: detectRangeReversal,
     breakoutRetest: detectBreakoutRetest,
-    [QUANT_ID]: (sn, rg) => (quantCtx && quantCtx.qcfg && quantSymbolSet(quantCtx.qcfg).has(sn.symbol))
-      ? detectQuantFutures(sn, rg, quantCtx.qcfg, quantCtx.ctx)
-      : null,
   };
   // combineEnsemble (engine.js) already handles multiple setups firing on
   // the same symbol/cycle — agreement blends confidence, disagreement is

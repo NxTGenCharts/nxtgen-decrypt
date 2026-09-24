@@ -21,10 +21,7 @@
 import { els, state } from './state.js';
 import { fmtPct } from './utils.js';
 import { icon } from './icons.js';
-import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS, scanSymbolsWithQuant } from './futures/engine.js';
-import { QUANT_ID, QUANT_TYPE } from './futures/quant/config.js';
-import { qlog } from './futures/quant/log.js';
-import { getQuantCfg, setQuantProviders, setQuantConfigListener, quantCardStatsLine, getQuantRewardRisk, getQuantCardSettings, updateQuantConfig } from './quant-ui.js';
+import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS } from './futures/engine.js';
 import { mockMarket } from './futures/mockMarket.js';
 import { WATCHLIST_TOP_N, rankTopByVolume } from './futures/watchlist.js';
 import { RISK_DEFAULTS, estimateLiquidationPrice } from './futures/risk.js';
@@ -79,7 +76,6 @@ function buildBrowserLiveAdapter(){
     fetchSnapshot: fetchLiveSnapshot,
     getCred: liveCred,
     notify: showLiveMessage,
-    getQuantCfg,
     onPositionsChanged: () => saveLivePositions(),
     onRender: () => renderLive(),
     onPendingSignal: () => renderLivePendingSignal(),
@@ -177,7 +173,7 @@ function refreshPaperWatchlist(){
 // The symbols the Paper cycle scans this tick, or undefined to use the engine's built-in list.
 function paperScanSymbols(f){
   if(paperWatch.exchange !== f.exchange || !paperWatch.symbols || !paperWatch.symbols.length) return undefined;
-  return scanSymbolsWithQuant(paperWatch.symbols, { strategies: f.strategies, quant: getQuantCfg() });
+  return paperWatch.symbols.filter(s => !EXCLUDED_FUTURES_SYMBOLS.has(s));
 }
 
 function fu(){ return state.futures; }
@@ -197,7 +193,7 @@ function ensureDayState(){
     trades: 0, wins: 0, losses: 0, consecutiveLosses: 0, lastLossAt: null,
     dailyPnlPct: 0, maxDrawdownPct: 0,
     realizedGrossUsd: 0, realizedNetUsd: 0, feesUsd: 0, fundingUsd: 0, slippageUsd: 0,
-    openPositions: 0, openRiskPct: 0, positions: [], quantTrades: [],
+    openPositions: 0, openRiskPct: 0, positions: [],
   };
   return fu().dayState;
 }
@@ -221,7 +217,7 @@ function resetSession(){
     trades: 0, wins: 0, losses: 0, consecutiveLosses: 0, lastLossAt: null,
     dailyPnlPct: 0, maxDrawdownPct: 0,
     realizedGrossUsd: 0, realizedNetUsd: 0, feesUsd: 0, fundingUsd: 0, slippageUsd: 0,
-    openPositions: 0, openRiskPct: 0, positions: [], quantTrades: [],
+    openPositions: 0, openRiskPct: 0, positions: [],
   };
   f.tradeHistory = [];
   f.lastRows = [];
@@ -691,9 +687,6 @@ function runCycle(){
     minConfidence: f.minConfidence, minRiskReward: f.minRiskReward, minNetProfitPct: f.minNetProfitPct,
     riskPctPerTrade: f.riskPctPerTrade, leverage: f.leverage,
     strategies: f.strategies, strategyRR: f.strategyRR,
-    // NxTGen HTF OrderFlow (ignored unless enabled) takes Min confidence / Risk per trade / High Selectivity
-    // from the same top controls as every other strategy — there is no separate Quant panel.
-    quant: getQuantCfg({ log: true, minConfidence: f.minConfidence, riskPct: f.riskPctPerTrade, highSelectivity: f.highSelectivity }),
   };
   refreshPaperWatchlist();
   const { rows } = runScanCycle(cfg, dayState, { symbols: paperScanSymbols(f) });
@@ -1089,8 +1082,6 @@ async function executeLivePendingSignal(){
     minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
     riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage, maxLeverage: LIVE_LEVERAGE_MAX_LEVERAGE,
     strategies: f2.strategies, strategyRR: f2.strategyRR,
-    // Quant follows the same shared top controls — including the live adaptive confidence boost above.
-    quant: getQuantCfg({ log: true, minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost), riskPct: f2.riskPctPerTrade, highSelectivity: f2.highSelectivity }),
   };
   let snap, btcSnap;
   const tf = '5m'; // locked everywhere — see initLiveTimeframeInput's comment
@@ -1588,11 +1579,8 @@ function renderStrategyRows(){
     }
     const enabled = f.strategies[s.id] ?? s.defaultEnabled;
     if(enabled) enabledCount++;
-    const isQuant = s.id === QUANT_ID;
-    // Quant Futures owns its RR (1:1.2 floor, quant/config.js HARD_LIMITS) and its stats wording (INSUFFICIENT SAMPLE) — see quant-ui.js.
-    const rr = isQuant ? getQuantRewardRisk() : (f.strategyRR[s.id] ?? s.defaultRR);
+    const rr = f.strategyRR[s.id] ?? s.defaultRR;
     const rrOptions = s.rrOptions || [1, 1.5, 2, 2.5, 3];
-    if(isQuant) statsLine = quantCardStatsLine();
     return `
       <div class="ov-block" style="margin-bottom:10px;padding:12px;border-color:${enabled ? 'var(--line)' : 'var(--line-dim, var(--line))'};opacity:${enabled ? '1' : '.6'};">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
@@ -1610,27 +1598,17 @@ function renderStrategyRows(){
             </select>
           </div>
         </div>
-        ${isQuant ? quantControlsHtml() : ''}
         <div style="font-size:11px;margin-top:8px;">${statsLine}</div>
       </div>
     `;
   };
-  // HTF OrderFlow has a single, fixed setup and a fixed 5M entry timeframe (30M/1H/4H context is not
-  // configurable — it's the architecture, not a lever) — so unlike the old four-setup Quant Futures, there's
-  // nothing to toggle here; this is just a read-only summary of what runs.
-  const quantControlsHtml = () => `
-      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:12px;color:var(--dim);">
-        <span>Strategy: HTF OrderFlow · HTF 4H/1H/30M · Entry 5M · Supply/Demand + Order Flow</span>
-      </div>`;
-  // Original six first, then NxTGen HTF OrderFlow — so Quant is the 7th
-  // strategy in the list. NxTGen Grid is deliberately NOT rendered here:
-  // it runs its own independent engine (Paper AND Live/Demo both — see
-  // grid.js's header comment), so its on/off switch and stats live only
-  // in its own panel just below, not mixed into this shared list.
-  const strategyRowsHtml = STRATEGY_REGISTRY.filter(s => s.id !== QUANT_ID).map(renderStratRow).join('');
-  const quantRowHtml = STRATEGY_REGISTRY.filter(s => s.id === QUANT_ID).map(renderStratRow).join('');
+  // NxTGen Grid is deliberately NOT rendered here: it runs its own
+  // independent engine (Paper AND Live/Demo both — see grid.js's header
+  // comment), so its on/off switch and stats live only in its own panel
+  // just below, not mixed into this shared list.
+  const strategyRowsHtml = STRATEGY_REGISTRY.map(renderStratRow).join('');
 
-  els.fuStrategyRows.innerHTML = strategyRowsHtml + quantRowHtml;
+  els.fuStrategyRows.innerHTML = strategyRowsHtml;
   // Shown next to "Strategies" in the collapsed <summary> row (see
   // index.html/css/components.css) so collapsing the section to save
   // space doesn't hide which/how many strategies are actually live.
@@ -1678,14 +1656,14 @@ function initStrategySelector(){
       if(e.target.classList.contains('fu-strategy-enable')){
         // Grid no longer has a row/checkbox in this list — see
         // renderStrategyRows()'s comment — so this only ever fires for
-        // the six single-entry strategies and Quant.
+        // the six single-entry strategies.
         const id = e.target.dataset.id;
         f.strategies[id] = e.target.checked;
         persistStrategyConfig();
         renderStrategyRows();
       } else if(e.target.classList.contains('fu-strategy-rr')){
-        if(e.target.dataset.id === QUANT_ID){ updateQuantConfig({ rewardRisk: parseFloat(e.target.value) }); }
-        else { f.strategyRR[e.target.dataset.id] = parseFloat(e.target.value); persistStrategyConfig(); }
+        f.strategyRR[e.target.dataset.id] = parseFloat(e.target.value);
+        persistStrategyConfig();
         renderStrategyRows();
       }
     });
@@ -4108,11 +4086,6 @@ export function initFuturesEngine(){
   initLiveDailyProfitTargetInput();
   initLiveMaxDailyLossInput();
   initLiveTimeframeInput();
-  setQuantProviders({
-    paperLog: () => loadPaperTradeLog(), liveLog: () => loadPersistentTradeLog(),
-    dayState: () => fu().dayState, liveStart: () => fu().liveStartingEquity,
-  });
-  setQuantConfigListener(() => renderStrategyRows()); // keeps the strategy card's RR dropdown in sync with the saved Quant RR
   initStrategySelector();
   initGridPanel();
   initScannerCollapse();

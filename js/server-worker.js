@@ -34,7 +34,6 @@
 import { state } from './state.js';
 import { RISK_DEFAULTS } from './futures/risk.js';
 import { ARM_PHRASE, LIVE_ONLY_EXCHANGES } from './futures/liveEngine.js';
-import { getQuantCfg } from './quant-ui.js';
 
 const TOKEN_KEY = 'nxtgen_server_worker_token_v1';
 const DASH_KEY = 'nxtgen_worker_dash_v1'; // the /worker/ dashboard's own prefs (same origin) — reused if it already has a token
@@ -291,17 +290,12 @@ async function turnOnServer(){
   if(!tok){ setMsg('The access token is needed to switch the server on.', 'error'); return; }
 
   const { _enabledIds, ...sendSettings } = settings;
-  let quantCfg;
-  try{
-    quantCfg = getQuantCfg({ minConfidence: settings.minConfidence, riskPct: settings.riskPctPerTrade, highSelectivity: settings.highSelectivity });
-    delete quantCfg.log;
-  }catch(e){ quantCfg = undefined; }
 
   const body = {
     armPhrase: ARM_PHRASE, explicitSettings: true, // the switch itself is the deliberate act; Live also got the confirm() above
     exchange: sel.exchange, mode: sel.mode,
     apiKey: sel.cred.apiKey, secretKey: sel.cred.secretKey, passphrase: sel.cred.passphrase || '',
-    ...sendSettings, quantCfg,
+    ...sendSettings,
     tzOffsetMinutes: -new Date().getTimezoneOffset(), // so "daily" targets reset at YOUR midnight
   };
   const r = await wcall('/api/worker/arm', 'POST', body, tok);

@@ -16,11 +16,6 @@ import { DEFAULT_FEE_CONFIG } from './futures/costs.js';
 import { runBacktest, summarizeTrades } from './futures/backtest.js';
 import { RISK_DEFAULTS } from './futures/risk.js';
 import { GRID_STRATEGY, GRID_DEFAULTS, runGridBacktestMulti, summarizeGridTrades } from './futures/grid.js';
-import { QUANT_ID, QUANT_TYPE, MIN_SAMPLE_TRADES } from './futures/quant/config.js';
-import { getQuantCfg, setQuantBacktestResult, renderQuantBacktestSection } from './quant-ui.js';
-import { runWalkForward } from './futures/quant/validation.js';
-import { sweepConfigs, analyzeSweep } from './futures/quant/sweep.js';
-import { runSweepInWorkers } from './futures/quant/sweep-runner.js';
 
 let lastResult = null; // kept for CSV/XLS/PDF export after a run
 
@@ -152,28 +147,11 @@ async function fetchSymbolKlines(exchange, symbol, interval, startMs, endMs){
 // dropdown (3m/5m/15m/30m/1h); it's now fixed and disabled in the markup.
 const TIMEFRAME_MINUTES = { '5m': 5 };
 
-// Every registered strategy explicitly OFF except Quant. A partial map ({ quant: true } alone) lets every OTHER
-// strategy fall back to its own defaultEnabled, which would trade alongside Quant and share its position/risk limits.
-function quantOnlyStrategies(){
-  const m = {};
-  for(const st of STRATEGY_REGISTRY) m[st.id] = false;
-  m[QUANT_ID] = true;
-  return m;
-}
-
 async function runBacktestFlow(){
   const range = computeRangeMs();
   if(!range){ showBtMessage('Pick a valid custom date range (From before To).', 'error'); return; }
   let symbols = selectedSymbols();
   const strategies = selectedStrategyConfig();
-  // NxTGen HTF OrderFlow used to force-merge its own separately-configured symbol list into the run here,
-  // on top of whatever's ticked in "Symbols to test" above. That made sense back when Quant's default list
-  // was 5 specific coins that might not be in today's top-25-by-volume ranking. Now that Quant's default is
-  // the whole tradeable universe (see quant/config.js), that merge would silently balloon every backtest run
-  // from the displayed "Top 25" to 45+ symbols regardless of exchange, breaking the Top N label's accuracy.
-  // Quant now just scans whatever's checked in the box above, same as every other strategy — the platform's
-  // excluded pairs (BTC/ETH/SOL/LTC/DOGE/BNB/CL) are still stripped from Quant's own symbol set by
-  // sanitizeQuantConfig regardless of what's ticked here.
   if(!symbols.length){ showBtMessage('Select at least one symbol to test.', 'error'); return; }
   if(!Object.values(strategies).some(Boolean)){ showBtMessage('Enable at least one strategy to test.', 'error'); return; }
 
@@ -248,14 +226,9 @@ async function runBacktestFlow(){
     ? ` ⚠ Only ${bestGotDays.toFixed(1)}d of the ${requestedDays.toFixed(1)}d requested was returned — these results do NOT cover the full range.`
     : '';
 
-  const quantCfgForRun = getQuantCfg({ log: false, minConfidence, riskPct: riskPctPerTrade, highSelectivity: false });
   const cfg = {
     exchange, strategies, minConfidence, riskPctPerTrade, leverage,
     feeConfig: { ...DEFAULT_FEE_CONFIG, [exchange]: { makerPct, takerPct } },
-    // Quant Futures uses this page's Risk per trade / Min confidence (its own 1% risk ceiling still applies),
-    // no selectivity tier (like the other strategies here), and the Reward:Risk set on its Strategies card;
-    // fees, spread, funding, leverage and balance here apply as for every strategy.
-    quant: quantCfgForRun,
   };
 
   showBtMessage(failed.length ? `Simulating (fetch failed for: ${failed.join('; ')})…` : 'Simulating…');
@@ -322,35 +295,6 @@ async function runBacktestFlow(){
     lastResult = { ...result, startingEquity, gridSummary };
     renderBacktestResults(lastResult);
 
-    // Quant Futures: separate stats (never blended with the other strategies), IS/OOS, Monte Carlo, walk-forward.
-    const quantHost = document.getElementById('btQuantSection');
-    if(strategies[QUANT_ID]){
-      setQuantBacktestResult(result.trades, startingEquity);
-      renderQuantBacktestSection(quantHost, {
-        trades: result.trades, startingEquity, diag: result.quantDiag,
-        onWalkForward: (onProgress) => runWalkForward({
-          candlesBySymbol, startingEquity, folds: 4, onProgress,
-          runFn: ({ candlesBySymbol: slice, cfgOverrides }) => runBacktest({
-            candlesBySymbol: slice, symbols: usableSymbols, startingEquity, intervalMinutes, maxDailyLossPct, dailyProfitTargetPct,
-            metaOverrides: { spreadPct, fundingRatePct },
-            cfg: { ...cfg, strategies: quantOnlyStrategies(), quant: { ...quantCfgForRun, ...cfgOverrides } },
-          }),
-        }),
-        onSweep: async (onProgress) => {
-          // Same candles as this run, Quant only, ~22 settings on background workers; TRAIN = first ~2/3 of the period.
-          const candles = {};
-          for(const sym of [...usableSymbols, 'BTCUSDT']) if(candlesBySymbol[sym] && candlesBySymbol[sym].length) candles[sym] = candlesBySymbol[sym];
-          const settings = { exchange, riskPct: riskPctPerTrade, leverage, makerPct, takerPct, spreadPct, fundingRatePct, startingEquity, maxDailyLossPct, dailyProfitTargetPct, minConfidence };
-          const configs = sweepConfigs('quick', false);
-          const { results, errors } = await runSweepInWorkers({ candles, symbols: usableSymbols, settings, configs, onProgress });
-          const firsts = usableSymbols.map(s => candlesBySymbol[s][0].t), lasts = usableSymbols.map(s => candlesBySymbol[s][candlesBySymbol[s].length - 1].t);
-          const t0 = Math.min(...firsts), t1 = Math.max(...lasts);
-          const cut = t0 + (t1 - t0) * 0.67;
-          return { analysis: analyzeSweep(results, cut, 15), errors, cut, days: (t1 - t0) / 86_400_000, symbols: usableSymbols.length };
-        },
-      });
-      if(quantHost) quantHost.style.display = '';
-    } else if(quantHost){ quantHost.style.display = 'none'; }
     const doneOk = `Done — ${result.barsEvaluated.toLocaleString()} symbol-bars evaluated across ${usableSymbols.length} symbol(s). Coverage: ${coverage}${usableSymbols.length > 4 ? ', …' : ''} (requested ~${requestedDays.toFixed(1)}d).${shortCoverageWarning}`;
     showBtMessage(
       failed.length
@@ -461,7 +405,7 @@ function renderBacktestResults(result){
     </div>
     ${strategyRows.map(([name, s]) => `
       <div style="display:grid;grid-template-columns:1.4fr .7fr .7fr .9fr;gap:6px;padding:4px 0;border-top:1px solid var(--line);">
-        <div>${name}</div><div>${s.trades}</div><div>${name === QUANT_TYPE && s.trades < MIN_SAMPLE_TRADES ? `<span style="color:var(--amber);">INSUFFICIENT SAMPLE (${s.trades}/${MIN_SAMPLE_TRADES})</span>` : ((s.wins / s.trades) * 100).toFixed(1) + '%'}</div>
+        <div>${name}</div><div>${s.trades}</div><div>${((s.wins / s.trades) * 100).toFixed(1)}%</div>
         <div style="color:${s.netUsd >= 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(s.netUsd)}</div>
       </div>
     `).join('')}
