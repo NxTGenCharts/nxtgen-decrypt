@@ -163,15 +163,18 @@ export function recordLiveClosure(session, adapter, symbol, tracked, closed){
     ? Math.max(0, Math.round((closedAtMs - tracked.openedAtMs) / 60_000)) : null;
   const entry = closed && closed.avgEntryPrice != null ? closed.avgEntryPrice : tracked.entry;
   const exit = closed && closed.avgExitPrice != null ? closed.avgExitPrice : null;
+  const htfFields = tracked.htfConfluence
+    ? { htfConfluence: { ...tracked.htfConfluence, realizedR: tracked.riskAmountUsd > 0 ? netUsd / tracked.riskAmountUsd : null } }
+    : {};
   session.liveTradeHistory.unshift({
     closedAtMs, time: new Date().toLocaleTimeString(), exchange: tracked.exchange, symbol, side: tracked.side,
     entry, exit, leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-    setupType: tracked.setupType, durationMin,
+    setupType: tracked.setupType, durationMin, ...htfFields,
   });
   adapter.appendPersistentTrade && adapter.appendPersistentTrade({
     closedAtMs, exchange: tracked.exchange, mode: tracked.mode, symbol, side: tracked.side,
     entry, exit, leverage: tracked.leverage, qty: tracked.qty, grossUsd, feesUsd, netUsd, orderId: tracked.orderId,
-    setupType: tracked.setupType, durationMin,
+    setupType: tracked.setupType, durationMin, ...htfFields,
   });
   session.liveTrades = (session.liveTrades || 0) + 1;
   if(netUsd > 0) session.liveWins = (session.liveWins || 0) + 1; else session.liveLosses = (session.liveLosses || 0) + 1;
@@ -263,6 +266,7 @@ export async function placeLiveEntryOrder(session, adapter, approved, side, exch
       tp1Fraction: approved.tpFractions ? approved.tpFractions.tp1 : null,
       breakevenStopPrice: approved.breakevenStopPrice, slAlgoId: result.slAlgoId || null,
       breakevenMoved: false, source: 'bot', lastSize: result.filledQty, lastRealizedPnl: 0,
+      ...(approved.htfConfluence ? { htfConfluence: approved.htfConfluence } : {}),
     };
     adapter.onPositionsChanged && adapter.onPositionsChanged(session);
     const tpNote = usePartialTp

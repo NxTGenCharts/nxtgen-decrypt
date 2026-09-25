@@ -8,6 +8,8 @@
 import { ema, emaSeries, atr, rsi, macdHistogram, vwap, swingLevels, volumeExpansion, relativeVolumePercentile, closes, clamp, parabolicSar, awesomeOscillator, macdSeries } from './indicators.js';
 import { REGIMES } from './regime.js';
 import { smartRangeFilter } from './rangeFilter.js';
+import { HTF_CONFLUENCE_ID, HTF_CONFLUENCE_TYPE } from './htfConfluence/config.js';
+import { detectHtfConfluence } from './htfConfluence/signal.js';
 
 const TREND_REGIMES = new Set([REGIMES.STRONG_BULL, REGIMES.WEAK_BULL, REGIMES.STRONG_BEAR, REGIMES.WEAK_BEAR]);
 const BULL_REGIMES = new Set([REGIMES.STRONG_BULL, REGIMES.WEAK_BULL]);
@@ -289,10 +291,20 @@ export const STRATEGY_REGISTRY = [
     label: 'Breakout + Retest',
     description: 'Consolidation, then a breakout, then a retest of that level with volume confirmation. Entry trigger now runs on M5 (was M15 — see detectBreakoutRetest\'s comment). Off by default: conceptually close to NxTGen Scalp\'s own momentum-chasing character, so it adds less diversification than the two enabled by default.',
   },
+  {
+    id: HTF_CONFLUENCE_ID, type: HTF_CONFLUENCE_TYPE, detector: 'detectHtfConfluence', defaultRR: 2, defaultEnabled: false,
+    rrOptions: [2, 2.5, 3, 4],
+    label: 'NxTGen HTF Confluence',
+    description: 'Multi-timeframe 4H/1H Supply & Demand + Order Block confluence strategy with 5M PSAR, EMA 50/100 and AO confirmation. High-selectivity: 4H and 1H structure must agree, price must be at a validated demand/supply zone, and a deterministic 0-100 confluence score (default minimum 80, 88 under High Selectivity) must clear before a structure-based stop and a fixed 1:2+ HTF-target trade is taken. Off by default; targets a 65%+ win rate as a research goal to validate through this tab\'s own Backtest/Live results, not a guarantee.',
+  },
 ];
 
 // onlyIds (optional): restrict to these strategy ids (no caller currently needs it).
-export function detectAllSetups(snap, regime, strategyConfig, onlyIds){
+// htfCtx (optional): passed straight through to detectHtfConfluence — currently
+// just { highSelectivity }, the platform's existing shared toggle (see
+// engine.js's evaluateSymbol). Without it the detector applies its own
+// defaults (config.js), so every existing caller is unaffected.
+export function detectAllSetups(snap, regime, strategyConfig, htfCtx, onlyIds){
   // strategyConfig: { [id]: boolean } — which strategies from
   // STRATEGY_REGISTRY above are enabled. Defaults to each strategy's own
   // defaultEnabled when no config is passed (e.g. Paper mode calling this
@@ -310,11 +322,17 @@ export function detectAllSetups(snap, regime, strategyConfig, onlyIds){
     liquiditySweep: detectLiquiditySweep,
     rangeReversal: detectRangeReversal,
     breakoutRetest: detectBreakoutRetest,
+    [HTF_CONFLUENCE_ID]: (sn, rg) => detectHtfConfluence(sn, rg, htfCtx || {}),
   };
   // combineEnsemble (engine.js) already handles multiple setups firing on
   // the same symbol/cycle — agreement blends confidence, disagreement is
   // a hard no-trade, so enabling more detectors can only add another way
-  // to get rejected on conflict, never silently stack risk.
+  // to get rejected on conflict, never silently stack risk. NxTGen HTF
+  // Confluence is the one exception: engine.js's evaluateSymbol pulls its
+  // signal out and evaluates it on its own BEFORE combineEnsemble ever
+  // runs (same reasoning as any self-contained strategy — its confluence
+  // score and structure-based stop/target would otherwise be diluted by
+  // averaging against whatever else fired this cycle).
   //
   // Honesty note, same standard as the rest of this file: none of these
   // five have been measured against this engine's current fixed-per-

@@ -34,6 +34,7 @@
 import { classifyRegime } from './regime.js';
 import { evaluateSymbol, netPnlForFraction, EXCLUDED_FUTURES_SYMBOLS } from './engine.js';
 import { RISK_DEFAULTS } from './risk.js';
+import { HTF_CONFLUENCE_TYPE, HTF_CONFLUENCE_DEFAULTS } from './htfConfluence/config.js';
 import { computeBtcShock } from './indicators.js';
 
 export const DEFAULT_BACKTEST_META = {
@@ -177,6 +178,7 @@ function openBacktestPosition(row, dayState, nowMs){
     openedAt: nowMs, remainingFraction: 1, partialsTaken: [], accrued: null,
   };
   position.riskAmountUsd = row.sizing ? row.sizing.riskAmountUsd : 0;
+  if(row.htfConfluence) position.htfConfluence = row.htfConfluence;
   dayState.positions.push(position);
   recomputeOpenRisk(dayState);
   return position;
@@ -206,6 +208,7 @@ function closeBacktestTrade(pos, exitPrice, pnl, exitReason, dayState, closedTra
     grossUsd: totalGrossUsd, feesUsd: totalFeesUsd, fundingUsd: accrued.fundingUsd + pnl.fundingUsd, netUsd: finalNetUsd,
     confidence: pos.confidence, setupType: pos.setup, reasonEntry: (pos.reasons || []).join('; '),
     exitReason, durationMin: Math.round((nowMs - pos.openedAt) / 60_000),
+    ...(pos.htfConfluence ? { htfConfluence: { ...pos.htfConfluence, realizedR: pos.riskAmountUsd > 0 ? finalNetUsd / pos.riskAmountUsd : null } } : {}),
   });
 }
 
@@ -223,7 +226,7 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
     const hitTP = (price) => dir === 1 ? candle.h >= price : candle.l <= price;
     const hitSL = dir === 1 ? candle.l <= pos.stop : candle.h >= pos.stop;
     const ageMinutes = (nowMs - pos.openedAt) / 60_000;
-    const timeStopMinutes = timeStopMinutesFor(pos.setup);
+    const timeStopMinutes = timeStopMinutesFor(pos.setup, pos);
 
     if(hitSL){
       const pnl = netPnlForFraction(pos, pos.stop, pos.remainingFraction, dayState, false);
@@ -276,7 +279,8 @@ function managePositionsAtBar(dayState, closedTrades, base5mBySymbol, idxBySymbo
   recomputeOpenRisk(dayState);
 }
 
-function timeStopMinutesFor(setupType){
+function timeStopMinutesFor(setupType, pos){
+  if(setupType === HTF_CONFLUENCE_TYPE) return (pos && pos.htfConfluence && pos.htfConfluence.timeStopMinutes) || HTF_CONFLUENCE_DEFAULTS.timeStopMinutes;
   return setupType === 'NxTGen Scalp' ? 40 : setupType === 'Nova Scalp' ? Infinity /* no time stop — exits only at stop or 2R (removed on request) */ : setupType === 'Range Scalp' ? 45 : 240;
 }
 

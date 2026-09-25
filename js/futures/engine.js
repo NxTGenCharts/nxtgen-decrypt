@@ -28,6 +28,7 @@ import { evaluateNoTradeFilters, SYMBOL_COOLDOWN_MINUTES } from './noTradeEngine
 import { buildExplanation } from './explain.js';
 import { atr, swingLevels, volumeExpansion, clamp } from './indicators.js';
 import { EXCLUDED_FUTURES_SYMBOLS } from './excludedSymbols.js';
+import { HTF_CONFLUENCE_TYPE, HTF_CONFLUENCE_DEFAULTS } from './htfConfluence/config.js';
 
 function getSnapshot(symbol){ return mockMarket.snapshot(symbol); }
 function getBtcShock(){ return mockMarket.btcShock(); }
@@ -144,6 +145,29 @@ function buildLevels(snap, direction, setupType, signalMeta){
     return { entry, stopPrice, stopDistancePct, atrPct: atrPct5 };
   }
 
+  if(setupType === HTF_CONFLUENCE_TYPE){
+    // Structure stop + structure-aware target: the detector (htfConfluence/
+    // signal.js) already computed both against the validated demand/supply
+    // zone (and order block, when present) plus an ATR buffer, and already
+    // enforced its own minRewardRisk floor when measuring targetR against
+    // the nearest real opposing HTF level — so, like Nova Scalp above,
+    // these are used as-is rather than recomputed generically. Recomputing
+    // a fresh ATR-based stop here would silently detach the trade from the
+    // exact structure the confluence score was built around.
+    const sp = signalMeta && signalMeta.stopPrice;
+    const valid = sp && signalMeta.stopDistancePct > 0 && (direction === 'LONG' ? sp < entry : sp > entry);
+    if(valid){
+      return { entry, stopPrice: sp, stopDistancePct: signalMeta.stopDistancePct, atrPct: signalMeta.atrPct, singleTargetR: signalMeta.targetR };
+    }
+    // Defensive fallback only — detectHtfConfluence always vetoes before
+    // returning a signal without a valid stop, so this should be unreachable.
+    const atrM5 = atr(snap.m5, 14) || entry * 0.0015;
+    const atrPct5 = (atrM5 / entry) * 100;
+    const distPct = clamp(atrPct5 * 1.5, 0.5, 1.2);
+    const stopPrice = direction === 'LONG' ? entry * (1 - distPct / 100) : entry * (1 + distPct / 100);
+    return { entry, stopPrice, stopDistancePct: distPct, atrPct: atrPct5, singleTargetR: 2 };
+  }
+
   const { support, resistance } = swingLevels(snap.m15, 30);
 
   const structuralStopPct = direction === 'LONG'
@@ -245,7 +269,16 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   // Single choke point for Paper, Backtest and Live/Demo (all three evaluate through here): a pair on the
   // platform's excluded list is rejected for EVERY strategy — no exceptions, whatever the caller's symbol list says.
   if(EXCLUDED_FUTURES_SYMBOLS.has(symbol)) return baseRow(symbol, snap, regime, 'REJECTED', ['Symbol is on the platform\'s excluded list (BTC/ETH/SOL/LTC/DOGE/BNB/CL) — not traded by any strategy']);
-  const detected = detectAllSetups(snap, regime, cfg.strategies);
+  const detected = detectAllSetups(snap, regime, cfg.strategies, { highSelectivity: cfg.highSelectivity });
+  // NxTGen HTF Confluence is a self-contained system (own structure-based
+  // stop, own structure-aware target, own 0-100 confluence score standing
+  // in for "confidence") — like any such strategy in this codebase, a
+  // qualifying signal is evaluated on its own, BEFORE the ensemble-combine
+  // below, so its score/stop/target are never diluted by averaging against
+  // whatever else fired this cycle. Its own vetoes still flow into the
+  // shared `vetoed` list below when nothing else fires either.
+  const htfSig = detected.find(sg => sg.type === HTF_CONFLUENCE_TYPE && !(sg.vetoes && sg.vetoes.length));
+  if(htfSig) return evaluateHtfConfluenceRow(symbol, snap, regime, cfg, dayState, btcShock, nowMs, htfSig);
   // A detector can hand back a genuine trigger that one of ITS OWN filters
   // vetoed. Those never take part in the ensemble — they can't create a
   // conflict or lend confidence — but their reasons are surfaced if
@@ -409,6 +442,86 @@ export function evaluateSymbol(symbol, snap, regime, cfg, dayState, btcShock, no
   return row;
 }
 
+// NxTGen HTF Confluence's own row-builder — mirrors evaluateSymbol's
+// pipeline above (same buildLevels/attachTpLevels/estimateCosts/
+// evaluateNoTradeFilters/positionSize/checkLiquidationSafety/
+// buildExplanation calls, so every cost, risk and no-trade rule applies
+// identically) but skips combineEnsemble entirely: confidence here IS
+// the detector's own 0-100 confluence score, never blended with the
+// generic factor-score/ensemble-average path other strategies share.
+function evaluateHtfConfluenceRow(symbol, snap, regime, cfg, dayState, btcShock, nowMs, sig){
+  const direction = sig.direction;
+  const levels = buildLevels(snap, direction, HTF_CONFLUENCE_TYPE, sig.meta);
+  const volExp = volumeExpansion(snap.m5, 10);
+  const execution = decideExecution({ setupType: HTF_CONFLUENCE_TYPE, volExpansionRatio: volExp });
+  const holdMinutes = sig.meta.timeStopMinutes || 360;
+
+  const feeLookup = (cfg.feeConfig || DEFAULT_FEE_CONFIG)[cfg.exchange || 'binance'] || DEFAULT_FEE_CONFIG.binance;
+  const entryFeePct = execution === 'MAKER' ? feeLookup.makerPct : feeLookup.takerPct;
+  const exitFeePct = feeLookup.takerPct;
+  const slippagePct = clamp(snap.meta.spreadPct * 0.6, 0.005, 0.05);
+  const leveledLevels = attachTpLevels(levels, direction, { entryFeePct, exitFeePct, spreadPct: snap.meta.spreadPct, slippagePct });
+
+  const costs = estimateCosts({
+    exchange: cfg.exchange || 'binance', execution, grossTargetPct: leveledLevels.tp1Pct,
+    spreadPct: snap.meta.spreadPct, slippagePct, fundingRatePct: snap.meta.fundingRatePct,
+    holdMinutes, feeConfig: cfg.feeConfig || DEFAULT_FEE_CONFIG,
+  });
+
+  const riskRewardRatio = leveledLevels.stopDistancePct > 0 ? leveledLevels.tp1Pct / leveledLevels.stopDistancePct : 0;
+  const leverage = cfg.leverage || RISK_DEFAULTS.defaultLeverage;
+  const liqSafety = checkLiquidationSafety({ entryPrice: leveledLevels.entry, stopPrice: leveledLevels.stopPrice, side: direction, leverage });
+  const isAltcoin = symbol !== 'BTCUSDT';
+
+  // The confluence score (0-100, already gated against its own threshold
+  // inside the detector) stands in for "confidence" here — minConfidence
+  // is set to 0 so evaluateNoTradeFilters' confidence gate never doubles
+  // up against a threshold the detector already enforced with full
+  // knowledge of its own scoring breakdown.
+  const minRR = HTF_CONFLUENCE_DEFAULTS.minRewardRisk;
+  const riskPctPerTrade = clamp(cfg.riskPctPerTrade || RISK_DEFAULTS.riskPctPerTrade, 0.1, RISK_DEFAULTS.maxRiskPctPerTrade);
+  const feeToStopRatioPct = leveledLevels.stopDistancePct > 0
+    ? ((costs.entryFeePct + costs.exitFeePct) / leveledLevels.stopDistancePct) * 100 : null;
+
+  const gate = evaluateNoTradeFilters({
+    snap, regime, confidence: sig.rawConfidence, minConfidence: 0,
+    netTargetPct: costs.netTargetPct, minNetProfitPct: cfg.minNetProfitPct ?? DEFAULT_MIN_NET_PROFIT_PCT,
+    riskRewardRatio, minRiskReward: minRR,
+    liquidationSafety: liqSafety, dayState, btcShock, isAltcoin,
+    fundingCostPct: costs.fundingCostPct, grossTargetPct: leveledLevels.tp1Pct,
+    nowMs, riskPctPerTrade, feeToStopRatioPct,
+  });
+
+  const sizing = positionSize({ equity: dayState.equity, riskPct: riskPctPerTrade, entryPrice: leveledLevels.entry, stopPrice: leveledLevels.stopPrice, leverage });
+
+  const row = {
+    symbol, exchange: (cfg.exchange === 'gateio' ? 'GATE.IO' : (cfg.exchange || 'binance').toUpperCase()), direction,
+    setup: HTF_CONFLUENCE_TYPE, confidence: sig.rawConfidence,
+    entry: leveledLevels.entry, stop: leveledLevels.stopPrice, tp1: leveledLevels.tp1, tp2: leveledLevels.tp2, tp3: leveledLevels.tp3,
+    tpFractions: leveledLevels.tpFractions, singleTarget: !!leveledLevels.singleTarget,
+    breakevenStopPrice: feeAdjustedBreakevenPrice({ entry: leveledLevels.entry, direction, entryFeePct, exitFeePct, spreadPct: snap.meta.spreadPct, slippagePct }),
+    expectedGrossPct: leveledLevels.tp1Pct, estFeesPct: costs.entryFeePct + costs.exitFeePct,
+    estSlippagePct: costs.slippageCostPct, estFundingPct: costs.fundingCostPct,
+    expectedNetPct: costs.netTargetPct, riskReward: riskRewardRatio,
+    liquidityScore: snap.meta.liquidityScore, regime: regime.regime,
+    status: gate.allowed ? 'APPROVED' : 'REJECTED', rejectReasons: gate.reasons,
+    execution, sizing, leverage, liqPrice: liqSafety.liqPrice,
+    makerFeePct: feeLookup.makerPct, reasons: sig.reasons, costsBreakdown: costs,
+    // Every field the brief's Trade Log/Dashboard spec asks for, beyond
+    // the generic ones above — carried through onto the open position
+    // (openPosition) and the closed-trade record (closeTrade) so it
+    // survives into the trade log exactly as detected, not
+    // reconstructed after the fact.
+    htfConfluence: sig.meta,
+  };
+  row.explanation = buildExplanation({
+    symbol, direction, confidence: sig.rawConfidence, setup: HTF_CONFLUENCE_TYPE, regime: regime.regime,
+    reasons: sig.reasons, netTargetPct: costs.netTargetPct, totalCostPct: costs.totalCostPct,
+    riskRewardRatio, status: row.status, rejectReasons: gate.reasons,
+  });
+  return row;
+}
+
 function baseRow(symbol, snap, regime, status, rejectReasons){
   return {
     symbol, exchange: '—', direction: '—', setup: '—', confidence: 0,
@@ -453,6 +566,7 @@ export function openPosition(row, dayState){
     openedAt: mockMarket.now(), remainingFraction: 1, partialsTaken: [], status: 'OPEN',
   };
   position.riskAmountUsd = row.sizing ? row.sizing.riskAmountUsd : 0;
+  if(row.htfConfluence) position.htfConfluence = row.htfConfluence;
   dayState.positions.push(position);
   recomputeOpenRisk(dayState);
   return position;
@@ -522,6 +636,7 @@ export function managePositions(dayState, tradeHistory, cfg){
       // fire; set cfg.novaScalpTimeStopMinutes to a number to bring one back.
       : pos.setup === 'Nova Scalp' ? (cfg.novaScalpTimeStopMinutes || Infinity)
       : pos.setup === 'Range Scalp' ? (cfg.scalpTimeStopMinutes || 45)
+      : pos.setup === HTF_CONFLUENCE_TYPE ? (pos.htfConfluence && pos.htfConfluence.timeStopMinutes || HTF_CONFLUENCE_DEFAULTS.timeStopMinutes)
       : (cfg.timeStopMinutes || 240);
 
     let closedFraction = 0;
@@ -639,6 +754,7 @@ function closeTrade(pos, exitPrice, pnl, exitReason, dayState, tradeHistory, ext
     grossPnlUsd: totalGrossUsd, feesUsd: totalFeesUsd, fundingUsd: totalFundingUsd, netPnlUsd: pos.finalNetUsd,
     confidence: pos.confidence, strategy: pos.setup, reasonEntry: (pos.reasons || []).join('; '),
     reasonExit: exitReason, durationMin: Math.round((mockMarket.now() - pos.openedAt) / 60_000),
+    ...(pos.htfConfluence ? { htfConfluence: { ...pos.htfConfluence, realizedR: pos.riskAmountUsd > 0 ? pos.finalNetUsd / pos.riskAmountUsd : null } } : {}),
   });
   if(tradeHistory.length > 200) tradeHistory.length = 200;
 }
