@@ -295,7 +295,7 @@ export const STRATEGY_REGISTRY = [
     id: HTF_CONFLUENCE_ID, type: HTF_CONFLUENCE_TYPE, detector: 'detectHtfConfluence', defaultRR: 2, defaultEnabled: false,
     rrOptions: [2, 2.5, 3, 4],
     label: 'NxTGen HTF Confluence',
-    description: 'Multi-timeframe 4H/1H Supply & Demand + Order Block confluence strategy with 5M PSAR, EMA 50/100 and AO confirmation. High-selectivity: 4H and 1H structure must agree, price must be at a validated demand/supply zone, and a deterministic 0-100 confluence score (default minimum 80, 88 under High Selectivity) must clear before a structure-based stop and a fixed 1:2+ HTF-target trade is taken. Off by default; targets a 65%+ win rate as a research goal to validate through this tab\'s own Backtest/Live results, not a guarantee.',
+    description: 'Multi-timeframe 4H/1H Supply & Demand + Order Block confluence strategy with 5M PSAR, EMA 50/100 and AO confirmation. High-selectivity: 4H and 1H structure must agree, price must be at a validated demand/supply zone, and a deterministic 0-100 confluence score (default minimum 70, 88 under High Selectivity) must clear before a structure-based stop and a fixed 1:2+ HTF-target trade is taken. Off by default; targets a 65%+ win rate as a research goal to validate through this tab\'s own Backtest/Live results, not a guarantee.',
   },
 ];
 

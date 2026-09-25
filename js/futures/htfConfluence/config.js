@@ -44,7 +44,7 @@ export const HTF_CONFLUENCE_DEFAULTS = {
   // Confluence score gate (0-100) — see signal.js's scoring breakdown.
   // These are targets to validate through backtesting, not guarantees —
   // see the strategy's description in STRATEGY_REGISTRY.
-  minConfluenceScore: 80,
+  minConfluenceScore: 70,
   minConfluenceScoreHighSelectivity: 88, // used when cfg.highSelectivity is on — the platform's existing shared "stricter tier" toggle
   // Minimum reward:risk a trade must clear, measured against the actual
   // nearest opposing HTF structure level — never fabricated to hit this
