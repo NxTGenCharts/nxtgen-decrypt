@@ -148,9 +148,9 @@ function buildLevels(snap, direction, setupType, signalMeta){
   if(setupType === HTF_CONFLUENCE_TYPE){
     // Structure stop + structure-aware target: the detector (htfConfluence/
     // signal.js) already computed both against the validated demand/supply
-    // zone (and order block, when present) plus an ATR buffer, and already
-    // enforced its own minRewardRisk floor when measuring targetR against
-    // the nearest real opposing HTF level — so, like Nova Scalp above,
+    // zone plus an ATR buffer, and already enforced its own minRewardRisk
+    // floor when measuring targetR against the nearest real opposing HTF
+    // level — so, like Nova Scalp above,
     // these are used as-is rather than recomputed generically. Recomputing
     // a fresh ATR-based stop here would silently detach the trade from the
     // exact structure the confluence score was built around.
