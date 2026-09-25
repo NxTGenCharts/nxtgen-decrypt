@@ -1,0 +1,16 @@
+{
+  "name": "nxtgen-verify-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal server-side proxy that signs Binance/Bybit account-read requests so the Autotrade & Balances panel can verify a key and read a balance without exposing the secret key to CORS restrictions or the browser network tab.",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0"
+  }
+}

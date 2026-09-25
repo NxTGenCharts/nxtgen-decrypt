@@ -1,0 +1,426 @@
+/* =============================================================
+   futures.css — AI Futures Engine tab only. Reuses color/spacing
+   variables already defined in main.css; no variables redefined
+   here so this stays in sync with the rest of the terminal's theme.
+   ============================================================= */
+
+:is(#panelFutures, #panelUtilities) .fu-row,
+:is(#panelFutures, #panelUtilities) .fu-hrow {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--line);
+}
+
+:is(#panelFutures, #panelUtilities) .fu-row {
+  grid-template-columns: 1fr 0.7fr 0.6fr 1.3fr 0.6fr 0.9fr 0.9fr 0.9fr 0.9fr 0.9fr 0.6fr 0.6fr 1fr 1fr;
+}
+
+:is(#panelFutures, #panelUtilities) .fu-hrow {
+  grid-template-columns: 0.9fr 0.7fr 0.9fr 0.6fr 0.9fr 0.9fr 0.5fr 0.9fr 0.8fr 0.9fr 0.6fr 1.2fr 1fr 0.7fr;
+}
+
+:is(#panelFutures, #panelUtilities) .fu-row.fu-head,
+:is(#panelFutures, #panelUtilities) .fu-hrow.fu-head {
+  font-weight: 600;
+  color: var(--dim);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid var(--line-soft);
+  cursor: default;
+}
+
+:is(#panelFutures, #panelUtilities) .fu-row:not(.fu-head) {
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+:is(#panelFutures, #panelUtilities) .fu-row:not(.fu-head):hover {
+  background: rgba(255,255,255,0.03);
+}
+
+:is(#panelFutures, #panelUtilities) .fu-row.fu-approved .fu-status-cell { color: var(--green); font-weight: 600; }
+:is(#panelFutures, #panelUtilities) .fu-row.fu-rejected .fu-status-cell { color: var(--dim); }
+:is(#panelFutures, #panelUtilities) .fu-row.fu-rejected { opacity: 0.7; }
+
+:is(#panelFutures, #panelUtilities) .fu-hrow.fu-win { border-left: 2px solid var(--green); }
+:is(#panelFutures, #panelUtilities) .fu-hrow.fu-loss { border-left: 2px solid var(--red); }
+
+:is(#panelFutures, #panelUtilities) .fu-empty {
+  padding: 18px 10px;
+  color: var(--dim);
+  font-size: 13px;
+  text-align: center;
+}
+
+:is(#panelFutures, #panelUtilities) .fu-explain {
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 8px 0 0;
+  color: var(--ink);
+}
+
+/* -------------------------------------------------------------
+   Futures Engine settings row (Min Confidence / Min Net Profit /
+   Risk / Leverage / High Selectivity). Reuses .controls chrome but
+   keeps each field a sane, readable width instead of stretching
+   five short number inputs across a full-width desktop monitor.
+   ---------------------------------------------------------- */
+.controls.controls--compact{
+  grid-template-columns:repeat(auto-fit, minmax(170px, 230px));
+}
+
+/* -------------------------------------------------------------
+   Account / Trading Summary — Real Balance, Starting Balance,
+   Open Position, Trades, Win Rate, Gross/Fees/Net P&L.
+
+   Desktop (4 columns): row 1 is the four session-stat cards, row 2
+   is Open Position (double-width, so it has real room for symbol /
+   direction / qty / entry / mark / uPnL / SL / TP1-3 / Close) plus
+   Gross P&L and Fees, and Net P&L gets its own full-width highlight
+   bar as the headline number — this also happens to be the exact
+   DOM order already in the HTML, so no reordering is needed here.
+
+   Mobile (2 columns, <=768px further below): Open Position and Net
+   P&L each take the full row; order: is used there (not here) to
+   move Open Position up next to the balance cards without touching
+   desktop, since it sits later in the DOM (after Trades/Win Rate).
+   ---------------------------------------------------------- */
+.fu-summary-grid{
+  display:grid;
+  grid-template-columns:repeat(4, minmax(0, 1fr));
+  gap:12px;
+  margin-top:16px;
+}
+.fu-summary-grid > .ov-card{ min-width:0; }
+.fu-card-pos{ grid-column:span 2; }
+.fu-card-net{ grid-column:1 / -1; }
+
+/* Open Position card: content-driven height (no fixed/huge min-height),
+   generous wrap room for the position line and SL/TP/Close detail. */
+.fu-card-pos{
+  justify-content:flex-start;
+}
+.fu-pos-value{
+  font-size:13.5px !important; /* the shared .ov-value clamp() is sized for short numbers, not this line */
+  font-weight:600;
+  line-height:1.55;
+  font-family:var(--mono);
+  overflow-wrap:break-word;
+  word-break:break-word; /* keeps long symbols like HYPEUSDT from overflowing the card */
+}
+.fu-pos-close-row{
+  display:none; /* toggled to flex by js/futures-ui.js (renderLiveCloseButtons) */
+  flex-direction:column;
+  gap:8px;
+  margin-top:2px;
+}
+.fu-pos-detail{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px;
+  width:100%;
+}
+.fu-pos-detail-text{
+  font-size:11.5px;
+  color:var(--dim);
+  flex:1 1 220px;
+  min-width:0;
+  line-height:1.6;
+  overflow-wrap:break-word;
+  word-break:break-word; /* SL/TP figures wrap cleanly instead of overflowing */
+}
+.fu-pos-detail .fu-close-pos-btn{
+  font-size:11.5px;
+  padding:7px 16px;
+  white-space:nowrap;
+}
+
+@media (max-width:900px){
+  .fu-summary-grid{ grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  .fu-card-pos{ grid-column:1 / -1; }
+}
+
+@media (max-width:768px){
+  .fu-summary-grid{ gap:10px; }
+  /* Reorder without touching the DOM: Open Position moves up next to the
+     balance cards, matching the requested mobile stack (Real/Start, then
+     Open Position full-width, then Trades/Win Rate, then Gross/Fees, then
+     Net P&L full-width). */
+  .fu-card-balance{ order:1; }
+  .fu-card-start{ order:2; }
+  .fu-card-pos{ order:3; }
+  .fu-card-trades{ order:4; }
+  .fu-card-winrate{ order:5; }
+  .fu-card-gross{ order:6; }
+  .fu-card-fees{ order:7; }
+  .fu-card-net{ order:8; }
+}
+
+@media (max-width:600px){
+  /* Close button gets a full-width, easy-to-tap target on phones. */
+  .fu-pos-detail .fu-close-pos-btn{ width:100%; }
+}
+
+/* -------------------------------------------------------------
+   Mobile: dense trade tables (Live Opportunity Scanner, Trade
+   History, Trade Log, Backtest Trades — 12-14 columns each)
+   scroll horizontally instead of squeezing every column unreadably
+   thin or collapsing to one column per cell (the latter needs a
+   data-label attribute on every cell for the ::before content to
+   show anything, which nothing in js/futures-ui.js sets, so that
+   approach silently rendered blank labels). Each header+rows pair
+   in the HTML is wrapped in a .table-scroll container — see
+   autotrade-futures/index.html — which this rule targets.
+   min-width on the row itself is what forces the scrollbar to
+   appear rather than the columns collapsing to illegibly thin. ---- */
+.table-scroll{
+  overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+  /* prevents the scroll container itself from ever pushing the page wider */
+  max-width:100%;
+}
+:is(#panelFutures, #panelUtilities) .table-scroll .fu-row,
+:is(#panelFutures, #panelUtilities) .table-scroll .fu-hrow{
+  min-width:860px; /* below this the fr-based columns become unreadable; scroll instead */
+}
+:is(#panelFutures, #panelUtilities) .table-scroll .fu-row.fu-head,
+:is(#panelFutures, #panelUtilities) .table-scroll .fu-hrow.fu-head{
+  position:sticky; top:0; z-index:1; background:var(--bg);
+}
+
+/* The Live/Demo Trading section is a grouping heading, not a card: the panel
+   border it used to carry drew a second box around content that is already
+   made of bordered cards (exchange picker, summary grid, trade history, trade
+   log), so the whole section read as one giant outlined slab. The heading
+   stays, the chrome goes; the nested .ov-blocks inside keep their own. */
+:is(#panelFutures, #panelUtilities) .fu-live-section{
+  background:none; border:0; border-radius:0; padding:0;
+}
+
+/* Session trade history. Declared once here rather than inline on both the
+   header row (page markup) and the data rows (renderLiveHistory) — those two
+   were duplicate copies of the same 13-column string, which is exactly how a
+   header drifts out of alignment with its own body when a column is added.
+   Columns: Time · Exch · Symbol · Strategy · Dir · Entry · Exit · Lev · Qty ·
+   Gross · Fees · Net · Duration · Order ID. */
+:is(#panelFutures, #panelUtilities) .fu-hrow--live{
+  grid-template-columns:.7fr 1fr 1fr 1.7fr .6fr .8fr .8fr .5fr .7fr .8fr .8fr .8fr .6fr 1.4fr;
+}
+:is(#panelFutures, #panelUtilities) .table-scroll .fu-hrow--live{ min-width:1000px; }
+:is(#panelFutures, #panelUtilities) .fu-strategy-cell{
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  color:var(--ink-dim); font-size:11.5px;
+}
+
+/* Live/Demo Trading — per-exchange selection rows (mirrors Autotrade's
+   Connect Exchanges rows: exchange label + Live/Demo toggle — but here
+   the row itself is also the "which exchange is active" selector, since
+   only one exchange trades Live/Demo at a time in this app).
+
+   Rendered as a COLLAPSIBLE picker (see renderLiveExchangeRows in
+   js/futures-ui.js): only the currently selected exchange is visible, with its
+   own Live/Demo toggle still on the row, and the other four slide out beneath
+   it when the row is tapped. Five permanently-stacked rows was most of a phone
+   screen spent on a choice that gets made once. */
+:is(#panelFutures, #panelUtilities) .fu-live-exch-rows{ margin:14px 0; }
+:is(#panelFutures, #panelUtilities) .fu-exch-select{ position:relative; }
+
+:is(#panelFutures, #panelUtilities) .fu-live-exch-row{
+  display:grid; grid-template-columns:24px minmax(0, 150px) auto 1fr; gap:14px; align-items:center;
+  padding:12px 16px; border:1px solid var(--line); border-radius:var(--r-lg);
+  background:var(--panel2); cursor:pointer;
+  transition:border-color .15s ease, background .15s ease;
+}
+:is(#panelFutures, #panelUtilities) .fu-live-exch-row:hover{ border-color:var(--amber-dim); }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-row.selected{ border-color:var(--amber); background:rgba(240,180,41,.06); }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-row:focus-visible{ outline:2px solid var(--amber); outline-offset:2px; }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-radio{
+  width:16px; height:16px; border-radius:50%; border:2px solid var(--line); flex:none;
+}
+:is(#panelFutures, #panelUtilities) .fu-live-exch-row.selected .fu-live-exch-radio{
+  border-color:var(--amber); background:radial-gradient(circle, var(--amber) 0 40%, transparent 44%);
+}
+:is(#panelFutures, #panelUtilities) .fu-live-exch-label{ font-weight:600; color:var(--ink); }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-note{ font-size:11px; color:var(--dim); text-align:right; min-width:0; }
+:is(#panelFutures, #panelUtilities) .fu-live-exch-note[data-verified="1"]{ color:var(--green); }
+
+/* the collapsed row gets a fifth column for its chevron */
+:is(#panelFutures, #panelUtilities) .fu-exch-current{
+  grid-template-columns:24px minmax(0, 150px) auto 1fr 18px;
+  position:relative; z-index:2;
+}
+:is(#panelFutures, #panelUtilities) .fu-exch-chevron{
+  width:18px; height:18px; fill:none; stroke:var(--dim); stroke-width:2;
+  stroke-linecap:round; stroke-linejoin:round;
+  transition:transform .24s ease, stroke .15s ease;
+}
+:is(#panelFutures, #panelUtilities) .fu-exch-current:hover .fu-exch-chevron{ stroke:var(--amber); }
+:is(#panelFutures, #panelUtilities) .fu-exch-select.is-open .fu-exch-chevron{ transform:rotate(180deg); stroke:var(--amber); }
+
+/* grid-template-rows 0fr -> 1fr animates a list of unknown height without
+   hard-coding a max-height that clips or lags */
+:is(#panelFutures, #panelUtilities) .fu-exch-list{
+  display:grid; grid-template-rows:0fr;
+  opacity:0; visibility:hidden; margin-top:0;
+  transition:grid-template-rows .24s cubic-bezier(.2,.8,.2,1), opacity .18s ease, margin-top .24s ease, visibility 0s .24s;
+}
+:is(#panelFutures, #panelUtilities) .fu-exch-list-inner{
+  overflow:hidden; min-height:0;
+  display:flex; flex-direction:column; gap:8px;
+}
+:is(#panelFutures, #panelUtilities) .fu-exch-select.is-open .fu-exch-list{
+  grid-template-rows:1fr; opacity:1; visibility:visible; margin-top:8px;
+  transition:grid-template-rows .24s cubic-bezier(.2,.8,.2,1), opacity .18s ease, margin-top .24s ease;
+}
+@media (prefers-reduced-motion: reduce){
+  :is(#panelFutures, #panelUtilities) .fu-exch-list,
+  :is(#panelFutures, #panelUtilities) .fu-exch-chevron{ transition:none; }
+}
+
+@media (max-width:640px){
+  /* Markup order is: radio, label, mode-toggle (Live/Demo buttons), note,
+     chevron. A fixed label column plus a right-aligned note is more than an
+     iPhone SE's width, so collapse to: radio + label + mode-toggle + chevron
+     on row one, the verified-status note wrapping full-width beneath. */
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-row{
+    grid-template-columns:20px 1fr auto;
+    grid-template-areas:
+      "radio label mode"
+      "note  note  note";
+    column-gap:10px; row-gap:6px;
+    padding:12px 14px;
+  }
+  :is(#panelFutures, #panelUtilities) .fu-exch-current{
+    grid-template-columns:20px 1fr auto 18px;
+    grid-template-areas:
+      "radio label mode chev"
+      "note  note  note note";
+  }
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-radio{ grid-area:radio; }
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-label{ grid-area:label; font-size:14px; }
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-row .mode-toggle{ grid-area:mode; }
+  :is(#panelFutures, #panelUtilities) .fu-exch-chevron{ grid-area:chev; }
+  :is(#panelFutures, #panelUtilities) .fu-live-exch-note{ grid-area:note; text-align:left; white-space:normal; line-height:1.45; }
+}
+
+/* -------------------- Trading Bots — cards + Details view -------------------- */
+/* Layout modeled on Bybit's own "My Bots" card and bot-details page,
+   using this app's existing dark palette/vars rather than Bybit's light one. */
+.tb-card{
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
+  padding:14px 16px; margin-bottom:10px;
+}
+.tb-card-head{ display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px; }
+.tb-card-id{ display:flex; gap:10px; align-items:flex-start; }
+.tb-icon{
+  width:34px; height:34px; border-radius:var(--r-sm); background:var(--panel2); border:1px solid var(--line);
+  display:flex; align-items:center; justify-content:center; font-size:16px; color:var(--amber); flex:none;
+}
+.tb-card-title{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:13.5px; }
+.tb-card-sub{ font-size:11px; color:var(--dim); margin-top:3px; display:flex; align-items:center; gap:5px; }
+.tb-badge{
+  font-size:10.5px; color:var(--dim); border:1px solid var(--line-soft); border-radius:var(--r-sm);
+  padding:2px 8px; background:var(--panel2); white-space:nowrap;
+}
+.tb-badge-dir{ color:var(--green); border-color:var(--green-line); background:var(--green-soft); }
+.tb-card-actions{ display:flex; gap:8px; align-items:center; }
+.tb-card-actions button{ font-size:11px; padding:5px 12px; min-height:auto; }
+.tb-stats-row{
+  display:flex; gap:26px; flex-wrap:wrap; margin-top:14px; padding-top:12px; border-top:1px solid var(--line-soft);
+}
+.tb-stat{ display:flex; flex-direction:column; gap:3px; min-width:90px; }
+.tb-stat .l{ font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+.tb-stat .n{ font-size:13.5px; font-variant-numeric:tabular-nums; }
+.tb-card-log{ font-size:11px; color:var(--dim); margin-top:8px; }
+
+/* Details overlay */
+.tb-modal-overlay{
+  position:fixed; inset:0; background:rgba(4,5,4,.66); z-index:200;
+  display:flex; align-items:flex-start; justify-content:center; padding:5vh 16px; overflow-y:auto;
+}
+.tb-modal{
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
+  width:100%; max-width:760px; padding:18px 20px 22px;
+}
+.tb-modal-head{ display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px; }
+.tb-modal-close{
+  background:transparent; border:1px solid var(--line); color:var(--dim); border-radius:var(--r-sm);
+  width:28px; height:28px; cursor:pointer; font-size:14px; line-height:1;
+  display:inline-flex; align-items:center; justify-content:center; padding:0;
+}
+.tb-modal-close:hover{ color:var(--ink); border-color:var(--dim2); }
+.tb-tabs{ display:flex; gap:20px; border-bottom:1px solid var(--line-soft); margin:16px 0 16px; }
+.tb-tab{ font-size:12.5px; color:var(--dim); padding-bottom:9px; cursor:pointer; border-bottom:2px solid transparent; }
+.tb-tab.on{ color:var(--ink); border-bottom-color:var(--amber); }
+.tb-metrics-grid{
+  display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:16px 18px;
+}
+.tb-metric{ display:flex; flex-direction:column; gap:4px; min-width:0; }
+.tb-metric .l{ font-size:10.5px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+.tb-metric .v{ font-size:13.5px; font-variant-numeric:tabular-nums; word-break:break-word; }
+.tb-params-head{
+  font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+  border-left:2px solid var(--amber); padding-left:8px; margin:20px 0 14px;
+}
+.tb-orders-table{ width:100%; border-collapse:collapse; font-size:12px; }
+.tb-orders-table th{ text-align:left; color:var(--dim); font-weight:500; font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; padding:6px 8px; border-bottom:1px solid var(--line); }
+.tb-orders-table td{ padding:7px 8px; border-bottom:1px solid var(--line-soft); font-variant-numeric:tabular-nums; }
+
+@media (max-width:640px){
+  .tb-card-actions{ width:100%; }
+  .tb-card-actions button{ flex:1; }
+  .tb-stats-row{ gap:16px; }
+  .tb-modal{ padding:16px; }
+}
+
+/* ---- Live / Demo Trading panel: compact settings row + single arm row ----
+   The five settings (risk, timeframe, daily target, max daily loss, trade mode) used to be
+   five stacked full-height fields; they now sit in one auto-fitting grid (2–3 columns on a
+   phone, one row on a wide screen). The arm switch and Start button share one row. */
+.fu-live-settings{
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px 14px;
+  margin:14px 0 12px; align-items:end;
+}
+.fu-live-settings .field{ min-width:0; max-width:none; margin:0; }
+.fu-live-settings .mode-toggle{ align-self:flex-start; }
+.fu-live-settings .mode-btn{ min-height:var(--touch-target); }
+.fu-live-status{ margin:0 0 4px; max-width:none; }
+/* Live/Demo on-off switch (pill + round thumb). The real <input type=checkbox role=switch> is visually hidden but stays
+   focusable, so keyboard and screen readers work; the track/thumb are drawn from its :checked state. */
+.switch-row{
+  display:flex; align-items:center; gap:14px; cursor:pointer; min-height:var(--touch-target);
+  background:var(--panel2); border:1px solid var(--line); border-radius:var(--r-md); padding:10px 14px;
+}
+.switch-row:hover{ border-color:#33443a; }
+.switch-row:has(input:checked){ border-color:var(--green-line); background:var(--green-soft); }
+.switch{ position:relative; flex:0 0 auto; width:52px; height:30px; display:inline-block; }
+.switch input{ position:absolute; inset:0; width:100%; height:100%; margin:0; opacity:0; cursor:pointer; z-index:1; }
+.switch-track{
+  position:absolute; inset:0; border-radius:999px; border:2px solid var(--dim); background:transparent;
+  transition:background .18s ease, border-color .18s ease;
+}
+.switch-thumb{
+  position:absolute; top:50%; left:4px; width:20px; height:20px; border-radius:50%; background:var(--dim);
+  transform:translateY(-50%); transition:transform .18s ease, background .18s ease;
+}
+.switch input:checked + .switch-track{ background:var(--green); border-color:var(--green); }
+.switch input:checked + .switch-track .switch-thumb{ background:var(--bg); transform:translate(20px, -50%); }
+.switch input:focus-visible + .switch-track{ outline:2px solid var(--amber); outline-offset:2px; }
+.switch-text{ min-width:0; font-size:13px; color:var(--ink); }
+.switch-text b{ display:block; }
+.switch-sub{ display:block; margin-top:2px; font-size:11.5px; color:var(--dim); white-space:normal; overflow-wrap:break-word; }
+@media (prefers-reduced-motion: reduce){ .switch-track, .switch-thumb{ transition:none; } }
+
+/* Check / cross icons in the approve-reject explanation (see explanationHtml in futures-ui.js). */
+:is(#panelFutures, #panelUtilities) .fu-explain .ex-ok{ color:var(--green); }
+:is(#panelFutures, #panelUtilities) .fu-explain .ex-no{ color:var(--red); }

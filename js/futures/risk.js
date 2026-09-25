@@ -1,0 +1,154 @@
+// =============================================================
+// risk.js — position sizing derived from equity/entry/stop (never a
+// fixed dollar amount), liquidation-distance safety checks, and the
+// daily risk-control counters (max daily loss, consecutive losses).
+// =============================================================
+
+export const RISK_DEFAULTS = {
+  riskPctPerTrade: 1.0,        // default risk per trade, as a % of equity — STRICT: this is the max $ lost on
+                                // a losing trade (position size is derived backwards from this + the stop
+                                // distance, never a fixed dollar amount), adjustable via the "Risk per trade
+                                // (%)" field up to maxRiskPctPerTrade below.
+  maxRiskPctPerTrade: 80.0,    // user-adjustable ceiling — the "Risk per trade (%)" field accepts 1-80% of
+                                // whichever exchange's futures-account equity is selected, so the user can
+                                // size as conservatively or aggressively as they choose. positionSize() below
+                                // is unchanged either way: size is always derived from equity x riskPct and
+                                // the stop distance, never a fixed dollar amount, and is still capped by real
+                                // available margin (see maxNotionalByMargin).
+  // Shipped default for the "Min expected net profit (%)" filter — a signal
+  // whose expected net (after fees/slippage) is below this is never taken.
+  // Still fully editable from that field.
+  minNetProfitPct: 0.50,
+  maxSimultaneousPositions: 3,
+  defaultLeverage: 10,          // fallback only, used if a leverage field's value somehow fails to parse —
+                                 // real defaults live on each field itself (10x on Live/Demo, 5x on Paper/Backtest).
+  maxLeverage: 15,               // Paper/Backtest's real ceiling. It's also the fallback the shared scanning
+                                 // engine uses for a strategy's own leverage clamp when a caller doesn't
+                                 // say otherwise — true for both Paper's and Backtest's cfg, neither of which
+                                 // sets cfg.maxLeverage, so this one constant covers both. Live/Demo trading
+                                 // uses a separate, higher ceiling defined next to its own leverage handling in
+                                 // futures-ui.js and liveEngine.js (LIVE_LEVERAGE_MAX_LEVERAGE, 50) — precisely
+                                 // so changing either ceiling never moves the other.
+  maintenanceMarginRate: 0.5,  // % — rough cross-margin estimate for liquidation distance
+  maxDailyLossPct: 15.0,      // Paper's own real default — it has no "Max Daily Loss" field of its own (only
+                                // Backtest and Live/Demo do), so this constant IS what stops a Paper day, via
+                                // noTradeEngine.js's fallback. Backtest has its own field (own default, 15%,
+                                // set directly on btMaxDailyLossPct) and Live/Demo sets its default independently
+                                // too (LIVE_MAX_DAILY_LOSS_DEFAULT_PCT in futures-ui.js) — neither reads this.
+  // Symmetric stop-for-the-day on the upside, per an explicit request —
+  // previously there was no such thing: a losing day had a hard floor,
+  // a winning day had no ceiling at all. This isn't a "cool off and
+  // maybe resume" mechanism like maxConsecutiveLosses below; it's a
+  // deliberate stop for the rest of the day once real profit is banked,
+  // same as maxDailyLossPct is a deliberate stop once real loss is hit.
+  dailyProfitTargetPct: 10.0,
+  maxConsecutiveLosses: 3,
+  coolingOffMinutes: 60,
+  // Every trade is constructed with a fixed 1.5R/2.5R/3.25R TP1/TP2/TP3
+  // structure (TP_LEVELS, costs.js) that weights out to exactly 2.5R
+  // overall — this field itself is no longer read anywhere (TP
+  // placement comes straight from TP_LEVELS, not from here) and is kept
+  // only as documentation of that same 2.5R figure; update TP_LEVELS if
+  // that structure ever changes; this won't follow it automatically.
+  riskRewardRatio: 2.5,
+};
+
+// Total risk allowed open across all simultaneous positions at once. This
+// is derived from whatever "Risk per trade (%)" is actually set to,
+// rather than a fixed number — a fixed 3% cap (sized for the old 1%
+// default x 3 positions) would silently block trading altogether once a
+// user raised risk-per-trade past ~1%, since a single position's risk
+// could already exceed the fixed cap on its own. Always leaves room for
+// maxSimultaneousPositions positions at the user's chosen per-trade risk.
+export function maxPortfolioRiskPct(riskPctPerTrade){
+  return (riskPctPerTrade || RISK_DEFAULTS.riskPctPerTrade) * RISK_DEFAULTS.maxSimultaneousPositions;
+}
+
+// Position size from account equity + stop distance — NOT a fixed dollar amount.
+export function positionSize({ equity, riskPct, entryPrice, stopPrice, leverage, maxMarginUtilizationPct }){
+  const stopDistancePct = Math.abs((entryPrice - stopPrice) / entryPrice);
+  if(stopDistancePct <= 0) return null;
+  const riskAmountUsd = equity * (riskPct / 100);
+  const riskBasedNotionalUsd = riskAmountUsd / stopDistancePct;
+
+  // A real exchange caps notional by available margin, not just by how
+  // much you're willing to lose on the trade — you cannot actually open a
+  // position whose required margin (notional / leverage) exceeds what the
+  // account has. A tight stop otherwise produces a number that's
+  // "correct" in pure risk-% terms but not achievable in practice: e.g. a
+  // 0.15% stop at 1% risk on $10,000 equity implies $66,667 of notional,
+  // which needs $33,333 of margin at 2x leverage — more than triple the
+  // whole account. Every real exchange would reject that outright as
+  // insufficient margin. Cap notional at what leverage x equity can
+  // actually support (with a utilization buffer so one position doesn't
+  // try to consume literally all available margin, leaving room for the
+  // other simultaneous positions this engine allows), and let the ACTUAL
+  // dollar amount at risk fall below the nominal target on trades where
+  // the stop is this tight — that's what a real leveraged account does
+  // too, not something to paper over by pretending the bigger, unaffordable
+  // position was actually opened. This also directly fixes fees/funding
+  // looking disproportionately large relative to the stated risk: both are
+  // charged on notional, and notional was the thing inflating unchecked.
+  const utilization = maxMarginUtilizationPct ?? 0.9;
+  const maxNotionalByMargin = equity * leverage * utilization;
+  const notionalUsd = Math.min(riskBasedNotionalUsd, maxNotionalByMargin);
+  const marginCapped = notionalUsd < riskBasedNotionalUsd;
+
+  const qty = notionalUsd / entryPrice;
+  const marginRequiredUsd = notionalUsd / Math.max(1, leverage);
+  // The dollar amount actually at risk given the (possibly capped)
+  // notional — this is what feeds the daily risk-control gate below, not
+  // the nominal target, since the nominal figure may not reflect a
+  // position that could actually be opened.
+  const actualRiskUsd = notionalUsd * stopDistancePct;
+  return {
+    riskAmountUsd: actualRiskUsd, nominalRiskAmountUsd: riskAmountUsd,
+    notionalUsd, qty, marginRequiredUsd, marginCapped,
+    stopDistancePct: stopDistancePct * 100,
+  };
+}
+
+// Rough liquidation price for an isolated-style position at given leverage.
+export function estimateLiquidationPrice({ entryPrice, leverage, side, maintenanceMarginRate }){
+  const mmr = (maintenanceMarginRate ?? RISK_DEFAULTS.maintenanceMarginRate) / 100;
+  const initialMarginRate = 1 / leverage;
+  const distance = entryPrice * (initialMarginRate - mmr);
+  return side === 'LONG' ? entryPrice - distance : entryPrice + distance;
+}
+
+// Reject the trade if the liquidation price sits too close to (or beyond)
+// the stop-loss / invalidation level — the stop must always be hit first.
+export function checkLiquidationSafety({ entryPrice, stopPrice, side, leverage, maintenanceMarginRate }){
+  const liqPrice = estimateLiquidationPrice({ entryPrice, leverage, side, maintenanceMarginRate });
+  const stopDist = Math.abs(entryPrice - stopPrice);
+  const liqDist = Math.abs(entryPrice - liqPrice);
+  const bufferRatio = stopDist > 0 ? liqDist / stopDist : 0;
+  // Require the liquidation price to be meaningfully farther away than the stop.
+  const safe = (side === 'LONG' ? liqPrice < stopPrice : liqPrice > stopPrice) && bufferRatio >= 1.5;
+  return { safe, liqPrice, bufferRatio };
+}
+
+// Daily risk-control gate: consecutive losses, daily loss cap, cooling-off window.
+export function checkDailyRiskControls(dayState, riskPctPerTrade){
+  const reasons = [];
+  const portfolioCapPct = maxPortfolioRiskPct(riskPctPerTrade);
+  if(dayState.dailyPnlPct <= -RISK_DEFAULTS.maxDailyLossPct){
+    reasons.push(`Daily loss limit reached (${dayState.dailyPnlPct.toFixed(2)}% <= -${RISK_DEFAULTS.maxDailyLossPct}%) — trading stopped for the day`);
+  }
+  if(dayState.dailyPnlPct >= RISK_DEFAULTS.dailyProfitTargetPct){
+    reasons.push(`Daily profit target reached (${dayState.dailyPnlPct.toFixed(2)}% >= +${RISK_DEFAULTS.dailyProfitTargetPct}%) — trading stopped for the day`);
+  }
+  if(dayState.consecutiveLosses >= RISK_DEFAULTS.maxConsecutiveLosses){
+    const cooldownUntil = dayState.lastLossAt ? dayState.lastLossAt + RISK_DEFAULTS.coolingOffMinutes * 60_000 : 0;
+    if(Date.now() < cooldownUntil){
+      reasons.push(`${dayState.consecutiveLosses} consecutive losses — cooling off until ${new Date(cooldownUntil).toLocaleTimeString()}`);
+    }
+  }
+  if(dayState.openPositions >= RISK_DEFAULTS.maxSimultaneousPositions){
+    reasons.push(`Max simultaneous positions (${RISK_DEFAULTS.maxSimultaneousPositions}) already open`);
+  }
+  if(dayState.openRiskPct >= portfolioCapPct){
+    reasons.push(`Max portfolio risk (${portfolioCapPct}%) already committed`);
+  }
+  return { allowed: reasons.length === 0, reasons };
+}

@@ -1,0 +1,4504 @@
+// =============================================================
+// server.js — the backend for the Autotrade & Balances panel.
+//
+// What this is for: confirming a Binance/Bybit/MEXC/Gate.io/Bitget
+// key+secret(+passphrase for Bitget) pair is real, reading its balance,
+// and placing the actual orders when Autotrade's real-order-execution
+// switch is armed. A browser can't do any of this itself — every one of
+// these exchanges rejects cross-origin authenticated requests (CORS), by
+// design, from a static front-end. This server exists to make those
+// signed requests on the front-end's behalf and hand back the result. It
+// also serves the public market-data proxy (see /api/markets below).
+//
+// What this is NOT: a product, or something that persists keys anywhere
+// (no database, no file, no log line contains a key/secret/passphrase).
+// It DOES move funds once real order execution is armed client-side —
+// treat it as the security-sensitive core of this app, not incidental
+// infrastructure, and read this whole file before deploying it.
+// =============================================================
+import express from 'express';
+import cors from 'cors';
+import crypto from 'crypto';
+import rateLimit from 'express-rate-limit';
+
+const app = express();
+app.disable('x-powered-by');
+app.use(express.json({ limit: '10kb' }));
+
+// Lock this down to your actual front-end origin(s) in production — a
+// comma-separated list, e.g. "https://nxtgendecrypt.site,https://www.nxtgendecrypt.site".
+// Left as "*" only for local testing; the README explains why that matters here.
+const allowedOrigins = (process.env.ALLOWED_ORIGIN || '*').split(',').map(s => s.trim());
+app.use(cors({
+  origin: allowedOrigins.includes('*') ? true : allowedOrigins,
+  methods: ['GET', 'POST'],
+}));
+
+// Basic abuse guard — each caller gets a modest number of verify attempts
+// per minute. This is not a substitute for putting this behind your own
+// infra-level rate limiting/WAF if you expose it publicly.
+app.use('/api/verify', rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true, legacyHeaders: false }));
+
+function hmacSha256Hex(secret, message){
+  return crypto.createHmac('sha256', secret).update(message).digest('hex');
+}
+// Bitget signs with the same HMAC-SHA256 algorithm as Binance/Bybit, but
+// base64-encodes the result instead of hex — see bitgetSignedRequest below.
+function hmacSha256Base64(secret, message){
+  return crypto.createHmac('sha256', secret).update(message).digest('base64');
+}
+
+class VerifyRejected extends Error {}
+
+// =============================================================
+// Binance IP ban/rate-limit cooldown tracker.
+//
+// Binance's 418 response for a hard IP ban embeds the exact epoch-ms
+// timestamp the ban lifts ("...banned until 1788811138276...") — every
+// retry sent before that time does nothing but risk extending the ban
+// further, and Binance's own error message explicitly asks callers to
+// back off. Previously this app had no memory of a ban between cycles:
+// every single 8-second Live/Demo cycle (balance check, market-data
+// snapshot, or both) would just try again, unconditionally, for as long
+// as the user left the engine running — actively working against the
+// exact backoff Binance's own error text was asking for, and plausibly
+// why the ban kept recurring ("most times unable to scan").
+// This is IP-wide, not per-account, so it applies equally to the public
+// market-data calls (binanceBuildFuturesSnapshot) and the signed account
+// calls (binanceFuturesSignedRequest/verifyBinance) — one shared cooldown
+// per network (live vs demo hit different hosts, so they're tracked
+// separately) rather than one per call site.
+const BINANCE_BAN_UNTIL_MS = { live: 0, demo: 0 };
+
+// Proactive companion to the reactive ban-memory above. Binance's
+// weight limit is per-IP, and this app's own Binance call volume alone
+// (measured: ~9 weight per symbol per Live/Demo cycle, ~540/min across
+// the whole watchlist at the 8s cadence) sits well under Binance's
+// documented 2400/min cap on its own — which points at Render's shared
+// outbound IP being the real culprit: OTHER tenants' traffic sharing
+// that same egress IP can push the aggregate over the limit regardless
+// of how little this app itself sends. A fixed call cadence can't see
+// that coming; Binance's own `X-MBX-USED-WEIGHT-1M` response header,
+// present on every fapi.binance.com response, can — it reports the
+// REAL current usage against the shared IP's budget, from any tenant.
+// Reading it and backing off before it's exhausted is the one thing
+// actually within this app's control for a shared-IP problem; getting
+// Render's traffic off a shared IP entirely (a static outbound IP,
+// registered as this key's sole allowed IP on Binance) is the real fix
+// and isn't something code here can do — see the AI Futures Engine
+// footer for that operational note.
+const BINANCE_WEIGHT_STATE = { live: { used: 0, atMs: 0 }, demo: { used: 0, atMs: 0 } };
+const BINANCE_WEIGHT_PAUSE_UNTIL_MS = { live: 0, demo: 0 };
+const BINANCE_WEIGHT_SOFT_CAP = 1900; // ~80% of the documented 2400/min cap — leaves headroom for the call currently in flight plus whatever other tenants send in the same window
+const BINANCE_WEIGHT_BACKOFF_MS = 10_000;
+
+function recordBinanceWeight(mode, headers){
+  const raw = headers && (headers.get('x-mbx-used-weight-1m') || headers.get('X-MBX-USED-WEIGHT-1M'));
+  const used = raw != null ? parseInt(raw, 10) : NaN;
+  if(Number.isFinite(used)) BINANCE_WEIGHT_STATE[mode] = { used, atMs: Date.now() };
+}
+
+function checkBinanceWeightBudget(mode){
+  const until = BINANCE_WEIGHT_PAUSE_UNTIL_MS[mode] || 0;
+  if(Date.now() < until){
+    throw new VerifyRejected(`Binance's shared IP weight usage was running high a moment ago (most likely other traffic sharing this server's outbound IP, not this app alone) — pausing Binance calls until ${new Date(until).toLocaleTimeString()} rather than risk being the request that tips it into a full ban.`);
+  }
+  const s = BINANCE_WEIGHT_STATE[mode];
+  // Binance's 1-minute weight window is rolling, so a reading is only
+  // trustworthy for a few seconds after it arrives — if it's older than
+  // that, assume it's reset rather than freezing this app out on stale
+  // data forever.
+  if(s && Date.now() - s.atMs <= 15_000 && s.used >= BINANCE_WEIGHT_SOFT_CAP){
+    BINANCE_WEIGHT_PAUSE_UNTIL_MS[mode] = Date.now() + BINANCE_WEIGHT_BACKOFF_MS;
+    throw new VerifyRejected(`Binance's shared IP weight usage is at ${s.used}/2400 for this minute (most likely other traffic sharing this server's outbound IP, not this app alone) — pausing Binance calls for ${Math.round(BINANCE_WEIGHT_BACKOFF_MS/1000)}s rather than risk being the request that tips it into a full ban.`);
+  }
+}
+
+function checkBinanceBan(mode){
+  const until = BINANCE_BAN_UNTIL_MS[mode] || 0;
+  if(Date.now() < until){
+    throw new VerifyRejected(`Binance rate-limited/banned this server's IP until ${new Date(until).toLocaleTimeString()} — no further requests are being sent until then so as not to extend it. This is a temporary, time-based lock from Binance's side, not something retrying sooner will clear.`);
+  }
+  checkBinanceWeightBudget(mode); // proactive — see the comment above BINANCE_WEIGHT_STATE
+}
+function recordBinanceBanIfPresent(mode, message){
+  const m = /banned until (\d+)/i.exec(String(message || ''));
+  if(m) BINANCE_BAN_UNTIL_MS[mode] = Math.max(BINANCE_BAN_UNTIL_MS[mode] || 0, parseInt(m[1], 10));
+}
+
+
+// Base URLs per network. "demo" is each exchange's own separate sandbox
+// environment (its own keys, created from that exchange's own Demo/Testnet
+// UI) — never the same account as Live. See each exchange's docs:
+//   Binance: https://developers.binance.com/docs/binance-spot-api-docs/demo-mode/general-info
+//   Bybit:   https://bybit-exchange.github.io/docs/v5/demo
+//   Gate.io: https://www.gate.com/docs/developers/apiv4/en/ ("TestNet trading" base URL)
+// Bitget is the odd one out: same host as Live, no separate base URL at
+// all — demo mode is a request header (paptrading: 1) sent alongside a
+// Demo API Key created from Bitget's own Demo Trading UI. See
+// bitgetSignedRequest below for where that header gets added.
+const BINANCE_BASE = { live: 'https://api.binance.com', demo: 'https://demo-api.binance.com' };
+const BYBIT_BASE = { live: 'https://api.bybit.com', demo: 'https://api-demo.bybit.com' };
+const GATEIO_BASE = { live: 'https://api.gateio.ws', demo: 'https://api-testnet.gateapi.io' };
+const BITGET_BASE = 'https://api.bitget.com';
+// MEXC has no public Demo Trading environment — always 'live'.
+const MEXC_BASE = { live: 'https://api.mexc.com' };
+
+function sha512Hex(message){
+  return crypto.createHash('sha512').update(message).digest('hex');
+}
+function hmacSha512Hex(secret, message){
+  return crypto.createHmac('sha512', secret).update(message).digest('hex');
+}
+
+// ---- Binance: GET /api/v3/account, signed with HMAC-SHA256 ----
+async function binanceAccount(mode, apiKey, secretKey){
+  const base = BINANCE_BASE[mode] || BINANCE_BASE.live;
+  const qs = `timestamp=${Date.now()}&recvWindow=5000`;
+  const signature = hmacSha256Hex(secretKey, qs);
+  const res = await fetch(`${base}/api/v3/account?${qs}&signature=${signature}`, {
+    headers: { 'X-MBX-APIKEY': apiKey },
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
+    throw new VerifyRejected(data && data.msg ? data.msg : `HTTP ${res.status}`);
+  }
+  return data;
+}
+async function verifyBinance(mode, apiKey, secretKey){
+  const data = await binanceAccount(mode, apiKey, secretKey);
+  const usdt = (data.balances || []).find(b => b.asset === 'USDT');
+  return { balance: usdt ? parseFloat(usdt.free) + parseFloat(usdt.locked) : null };
+}
+// Actual spendable/sellable balance of one asset right now — used to size
+// every leg after the first, and every unwind step, instead of trusting
+// the previous order's reported fill (which is gross, before whatever fee
+// the exchange took out of the asset you just received).
+async function binanceAssetBalance(mode, apiKey, secretKey, asset){
+  const data = await binanceAccount(mode, apiKey, secretKey);
+  const b = (data.balances || []).find(x => x.asset === asset);
+  return b ? parseFloat(b.free) : 0;
+}
+
+// ---- Bybit v5: GET /v5/account/wallet-balance, signed with HMAC-SHA256 ----
+// Returns the full per-account object (list[0]) rather than just its coin[]
+// array, since account-level fields like totalAvailableBalance live
+// alongside coin[] in the same response and we now need both: coin[] for
+// per-asset walletBalance (equity/PnL-diff tracking, unchanged behavior),
+// and totalAvailableBalance for a true free-margin check (see
+// bybitAvailableBalance below).
+async function bybitWalletBalanceRaw(mode, apiKey, secretKey){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const timestamp = String(Date.now());
+  const recvWindow = '5000';
+  const query = 'accountType=UNIFIED';
+  const signature = hmacSha256Hex(secretKey, timestamp + apiKey + recvWindow + query);
+  const res = await fetch(`${base}/v5/account/wallet-balance?${query}`, {
+    headers: {
+      'X-BAPI-API-KEY': apiKey,
+      'X-BAPI-SIGN': signature,
+      'X-BAPI-SIGN-TYPE': '2',
+      'X-BAPI-TIMESTAMP': timestamp,
+      'X-BAPI-RECV-WINDOW': recvWindow,
+    },
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || !data || data.retCode !== 0){
+    throw new VerifyRejected(data && data.retMsg ? data.retMsg : `HTTP ${res.status}`);
+  }
+  return data.result?.list?.[0] || {};
+}
+async function bybitWalletBalance(mode, apiKey, secretKey){
+  const account = await bybitWalletBalanceRaw(mode, apiKey, secretKey);
+  return account.coin || [];
+}
+async function verifyBybit(mode, apiKey, secretKey){
+  const coins = await bybitWalletBalance(mode, apiKey, secretKey);
+  const usdt = coins.find(c => c.coin === 'USDT');
+  return { balance: usdt ? parseFloat(usdt.walletBalance) : null };
+}
+async function bybitAssetBalance(mode, apiKey, secretKey, asset){
+  const coins = await bybitWalletBalance(mode, apiKey, secretKey);
+  const c = coins.find(x => x.coin === asset);
+  // walletBalance, not equity — equity includes unrealized PnL on
+  // derivatives that spot can't actually spend. Used for equity/day-anchor
+  // tracking and before/after PnL diffing — NOT for margin pre-checks,
+  // since walletBalance stays put even as other open bots lock it up as
+  // margin (it's still "in the account", just not free to spend). For
+  // "can I actually open a new position right now", use
+  // bybitAvailableBalance instead.
+  return c ? parseFloat(c.walletBalance) : 0;
+}
+// Real free/available margin — falls as other open bots/orders lock up
+// margin, rises again the moment a position closes or an order cancels.
+// This is what a pre-deployment "is there enough room" check needs;
+// walletBalance (above) does NOT reflect this and will happily say "yes"
+// even with zero margin free to open anything new.
+async function bybitAvailableBalance(mode, apiKey, secretKey){
+  const account = await bybitWalletBalanceRaw(mode, apiKey, secretKey);
+  return account.totalAvailableBalance != null ? parseFloat(account.totalAvailableBalance) : null;
+}
+
+// ---- MEXC Spot v3: GET /api/v3/account, signed exactly like Binance's
+// v3 API (MEXC modeled its Spot v3 API on Binance's) — query-string
+// HMAC-SHA256, key in the X-MEXC-APIKEY header instead of X-MBX-APIKEY. ----
+async function mexcAccount(mode, apiKey, secretKey){
+  const base = MEXC_BASE.live;
+  const qs = `timestamp=${Date.now()}&recvWindow=5000`;
+  const signature = hmacSha256Hex(secretKey, qs);
+  const res = await fetch(`${base}/api/v3/account?${qs}&signature=${signature}`, {
+    headers: { 'X-MEXC-APIKEY': apiKey },
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
+    throw new VerifyRejected(data && data.msg ? data.msg : `HTTP ${res.status}`);
+  }
+  return data;
+}
+async function verifyMexc(mode, apiKey, secretKey){
+  const data = await mexcAccount(mode, apiKey, secretKey);
+  const usdt = (data.balances || []).find(b => b.asset === 'USDT');
+  return { balance: usdt ? parseFloat(usdt.free) + parseFloat(usdt.locked) : null };
+}
+async function mexcAssetBalance(mode, apiKey, secretKey, asset){
+  const data = await mexcAccount(mode, apiKey, secretKey);
+  const b = (data.balances || []).find(x => x.asset === asset);
+  return b ? parseFloat(b.free) : 0;
+}
+
+// ---- Gate.io Spot v4: GET /api/v4/spot/accounts, signed with the v4
+// scheme — HMAC-SHA512 over METHOD\nPATH\nQUERY\nSHA512(BODY)\nTIMESTAMP,
+// sent as KEY/Timestamp/SIGN headers. Docs:
+// https://www.gate.io/docs/developers/apiv4/en/#authentication ----
+async function gateioSignedRequest(method, path, query, body, apiKey, secretKey, mode){
+  const base = GATEIO_BASE[mode] || GATEIO_BASE.live;
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const bodyStr = body ? JSON.stringify(body) : '';
+  const bodyHash = sha512Hex(bodyStr);
+  const signString = `${method}\n${path}\n${query}\n${bodyHash}\n${timestamp}`;
+  const sign = hmacSha512Hex(secretKey, signString);
+  const res = await fetch(`${base}${path}${query ? '?' + query : ''}`, {
+    method,
+    headers: {
+      KEY: apiKey, Timestamp: timestamp, SIGN: sign,
+      Accept: 'application/json',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: bodyStr } : {}),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok){
+    throw new VerifyRejected(data && data.message ? data.message : `HTTP ${res.status}`);
+  }
+  return data;
+}
+async function verifyGateio(mode, apiKey, secretKey){
+  const accounts = await gateioSignedRequest('GET', '/api/v4/spot/accounts', '', null, apiKey, secretKey, mode);
+  const usdt = Array.isArray(accounts) ? accounts.find(a => a.currency === 'USDT') : null;
+  return { balance: usdt ? parseFloat(usdt.available) + parseFloat(usdt.locked || 0) : null };
+}
+async function gateioAssetBalance(mode, apiKey, secretKey, asset){
+  const accounts = await gateioSignedRequest('GET', '/api/v4/spot/accounts', `currency=${asset}`, null, apiKey, secretKey, mode);
+  const a = Array.isArray(accounts) ? accounts.find(x => x.currency === asset) : null;
+  return a ? parseFloat(a.available) : 0;
+}
+
+// ---- Bitget Spot v2: GET /api/v2/spot/account/assets, signed with
+// Bitget's own scheme — base64(HMAC-SHA256(secretKey, timestamp + METHOD +
+// requestPath + "?" + queryString + body)), sent as ACCESS-KEY/ACCESS-SIGN/
+// ACCESS-TIMESTAMP/ACCESS-PASSPHRASE headers. Bitget requires a third
+// credential (a passphrase set when the API key was created) that none of
+// the other four exchanges use — see js/exchanges.js `needsPassphrase`.
+// Demo mode adds one header (paptrading: 1) to a Demo API Key's requests;
+// see BITGET_BASE above for why there's no separate demo host to switch to.
+// Docs: https://www.bitget.com/api-doc/common/signature ----
+async function bitgetSignedRequest(method, path, query, body, apiKey, secretKey, passphrase, mode){
+  const timestamp = String(Date.now());
+  const bodyStr = body ? JSON.stringify(body) : '';
+  const prehash = `${timestamp}${method.toUpperCase()}${path}${query ? '?' + query : ''}${bodyStr}`;
+  const sign = hmacSha256Base64(secretKey, prehash);
+  const headers = {
+    'ACCESS-KEY': apiKey, 'ACCESS-SIGN': sign, 'ACCESS-TIMESTAMP': timestamp,
+    'ACCESS-PASSPHRASE': passphrase, 'Content-Type': 'application/json', locale: 'en-US',
+  };
+  if(mode === 'demo') headers.paptrading = '1';
+  const res = await fetch(`${BITGET_BASE}${path}${query ? '?' + query : ''}`, {
+    method, headers, ...(body ? { body: bodyStr } : {}),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || !data || data.code !== '00000'){
+    throw new VerifyRejected(data && (data.msg || data.message) ? (data.msg || data.message) : `HTTP ${res.status}`);
+  }
+  return data.data;
+}
+async function verifyBitget(mode, apiKey, secretKey, passphrase){
+  const data = await bitgetSignedRequest('GET', '/api/v2/spot/account/assets', 'coin=USDT', null, apiKey, secretKey, passphrase, mode);
+  const usdt = Array.isArray(data) ? data.find(c => String(c.coin || '').toUpperCase() === 'USDT') : null;
+  const balance = usdt ? parseFloat(usdt.available || '0') + parseFloat(usdt.frozen || '0') + parseFloat(usdt.locked || '0') : null;
+  return { balance };
+}
+async function bitgetAssetBalance(mode, apiKey, secretKey, asset, passphrase){
+  const data = await bitgetSignedRequest('GET', '/api/v2/spot/account/assets', `coin=${asset}`, null, apiKey, secretKey, passphrase, mode);
+  const c = Array.isArray(data) ? data.find(x => String(x.coin || '').toUpperCase() === asset.toUpperCase()) : null;
+  return c ? parseFloat(c.available || '0') : 0;
+}
+
+const ASSET_BALANCE_GETTERS = { binance: binanceAssetBalance, bybit: bybitAssetBalance, mexc: mexcAssetBalance, gateio: gateioAssetBalance, bitget: bitgetAssetBalance };
+
+
+const VERIFIERS = { binance: verifyBinance, bybit: verifyBybit, mexc: verifyMexc, gateio: verifyGateio, bitget: verifyBitget };
+
+app.post('/api/verify', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, passphrase } = req.body || {};
+
+  // Keys live only in this function's local variables for the lifetime of
+  // this one request. Nothing here writes them to disk, a database, or a
+  // log — verify that for yourself, this file is short on purpose.
+  if(!exchange || !apiKey || !secretKey){
+    return res.status(400).json({ verified:false, rejected:false, message:'exchange, apiKey and secretKey are all required.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ verified:false, rejected:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const verifier = VERIFIERS[exchange];
+  if(!verifier){
+    return res.status(400).json({ verified:false, rejected:false, message:`No verifier for "${exchange}" — only binance, bybit, mexc, gateio, and bitget are supported.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+
+  try{
+    const result = await verifier(netMode, apiKey, secretKey, passphrase);
+    return res.json({ verified:true, rejected:false, balance: result.balance, message:`Confirmed with ${exchange}.` });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      // The exchange itself said no — this is a real answer, safe to trust.
+      return res.json({ verified:false, rejected:true, balance:null, message: err.message });
+    }
+    // Network error, timeout, exchange outage, etc. — not a verdict on the key.
+    return res.json({ verified:false, rejected:false, balance:null, message: `Could not reach ${exchange}: ${err.message}` });
+  }
+});
+
+// =============================================================
+// ORDER EXECUTION — this is the part that moves real funds (Live) or demo
+// funds (Demo). Everything above this line is read-only. Read this whole
+// block before deploying it; it was written and reviewed against each
+// exchange's official docs, but has NOT been executed against a live
+// account from this codebase's own testing — there is no substitute for
+// you validating it yourself in Demo mode with small amounts first.
+//
+// Binance and Bybit behave differently after you submit a market order:
+//   - Binance's POST /api/v3/order response is synchronous and already
+//     contains the fill (executedQty, cummulativeQuoteQty, fills[]).
+//   - Bybit's POST /v5/order/create only ACKs that the order was accepted
+//     — you must separately poll GET /v5/order/realtime for the actual
+//     fill (cumExecQty, cumExecValue, avgPrice, orderStatus). This is
+//     documented, not a guess: https://bybit-exchange.github.io/docs/v5/order/create-order
+// Getting this distinction wrong means feeding the next leg of a triangle
+// a guessed amount instead of what was actually received — so Bybit
+// orders below always resolve through the poll before returning.
+// =============================================================
+app.use('/api/order', rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true, legacyHeaders: false }));
+
+function floorToStep(value, step){
+  if(!step || step <= 0) return value;
+  const decimals = (String(step).split('.')[1] || '').length;
+  const floored = Math.floor(value / step) * step;
+  return parseFloat(floored.toFixed(decimals));
+}
+
+// ---- Binance: symbol filters (LOT_SIZE step, NOTIONAL minimum) ----
+async function binanceSymbolFilters(base, symbol){
+  const res = await fetch(`${base}/api/v3/exchangeInfo?symbol=${symbol}`);
+  const data = await res.json().catch(() => null);
+  const s = data?.symbols?.[0];
+  if(!s) throw new Error(`Unknown Binance symbol ${symbol}`);
+  const lot = s.filters.find(f => f.filterType === 'LOT_SIZE');
+  const notional = s.filters.find(f => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
+  return {
+    stepSize: lot ? parseFloat(lot.stepSize) : 0,
+    minQty: lot ? parseFloat(lot.minQty) : 0,
+    minNotional: notional ? parseFloat(notional.minNotional) : 0,
+  };
+}
+
+// side/amountKind come from the caller: 'quote' means "spend this much of
+// the currency I'm converting FROM" (maps to Binance quoteOrderQty, which
+// respects LOT_SIZE automatically per Binance's own docs — no manual
+// rounding needed for this path). 'base' means "sell exactly this much of
+// the base asset I already hold" (needs LOT_SIZE rounding ourselves, since
+// we're handing Binance a raw quantity).
+async function placeBinanceOrder(mode, apiKey, secretKey, { symbol, side, amountKind, amount }){
+  const base = BINANCE_BASE[mode] || BINANCE_BASE.live;
+  const params = new URLSearchParams({ symbol, side, type: 'MARKET', timestamp: String(Date.now()), recvWindow: '5000' });
+
+  if(amountKind === 'quote'){
+    params.set('quoteOrderQty', amount.toString());
+  } else {
+    const filters = await binanceSymbolFilters(base, symbol);
+    const qty = floorToStep(amount, filters.stepSize || 0.00000001);
+    if(qty <= 0 || qty < filters.minQty){
+      throw new VerifyRejected(`Amount ${amount} ${symbol} rounds down to ${qty}, below the exchange minimum (${filters.minQty}) — nothing was sent.`);
+    }
+    params.set('quantity', qty.toString());
+  }
+
+  const signature = hmacSha256Hex(secretKey, params.toString());
+  params.set('signature', signature);
+  const res = await fetch(`${base}/api/v3/order`, {
+    method: 'POST',
+    headers: { 'X-MBX-APIKEY': apiKey, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
+    throw new VerifyRejected(data && data.msg ? data.msg : `HTTP ${res.status}`);
+  }
+  if(data.status !== 'FILLED'){
+    // Spot MARKET orders on Binance either fill immediately or get
+    // rejected — anything else here (e.g. EXPIRED from insufficient
+    // liquidity) means we did not receive what we asked for.
+    throw new VerifyRejected(`Order did not fully fill (status: ${data.status}). No further legs will be attempted automatically.`);
+  }
+  return {
+    orderId: data.orderId,
+    filledBaseQty: parseFloat(data.executedQty),
+    filledQuoteQty: parseFloat(data.cummulativeQuoteQty),
+    avgPrice: parseFloat(data.executedQty) > 0 ? parseFloat(data.cummulativeQuoteQty) / parseFloat(data.executedQty) : 0,
+  };
+}
+
+// ---- MEXC: symbol filters. MEXC's v3 exchangeInfo doesn't populate the
+// Binance-style filters[] array for most symbols — the base-quantity step
+// and minimum notional live directly on the symbol object instead
+// (baseSizePrecision, quoteAmountPrecision). Fall back to Binance-style
+// filters[] first in case a given symbol does have them, since that's the
+// more precise source when present. ----
+async function mexcSymbolFilters(base, symbol){
+  const res = await fetch(`${base}/api/v3/exchangeInfo?symbol=${symbol}`);
+  const data = await res.json().catch(() => null);
+  const s = data?.symbols?.[0];
+  if(!s) throw new Error(`Unknown MEXC symbol ${symbol}`);
+  const lot = (s.filters || []).find(f => f.filterType === 'LOT_SIZE');
+  const notional = (s.filters || []).find(f => f.filterType === 'NOTIONAL' || f.filterType === 'MIN_NOTIONAL');
+  return {
+    stepSize: lot ? parseFloat(lot.stepSize) : parseFloat(s.baseSizePrecision || '0.00000001'),
+    minQty: lot ? parseFloat(lot.minQty) : 0,
+    minNotional: notional ? parseFloat(notional.minNotional) : parseFloat(s.quoteAmountPrecision || '0'),
+  };
+}
+
+// MEXC's Spot v3 order endpoint mirrors Binance's (quoteOrderQty for
+// spend-this-much-quote, quantity for sell-exactly-this-much-base), signed
+// the same way, just under the X-MEXC-APIKEY header.
+async function placeMexcOrder(mode, apiKey, secretKey, { symbol, side, amountKind, amount }){
+  const base = MEXC_BASE.live;
+  const params = new URLSearchParams({ symbol, side, type: 'MARKET', timestamp: String(Date.now()), recvWindow: '5000' });
+
+  if(amountKind === 'quote'){
+    params.set('quoteOrderQty', amount.toString());
+  } else {
+    const filters = await mexcSymbolFilters(base, symbol);
+    const qty = floorToStep(amount, filters.stepSize || 0.00000001);
+    if(qty <= 0 || qty < filters.minQty){
+      throw new VerifyRejected(`Amount ${amount} ${symbol} rounds down to ${qty}, below the exchange minimum (${filters.minQty}) — nothing was sent.`);
+    }
+    params.set('quantity', qty.toString());
+  }
+
+  const signature = hmacSha256Hex(secretKey, params.toString());
+  params.set('signature', signature);
+  const res = await fetch(`${base}/api/v3/order`, {
+    method: 'POST',
+    headers: { 'X-MEXC-APIKEY': apiKey, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
+    throw new VerifyRejected(data && data.msg ? data.msg : `HTTP ${res.status}`);
+  }
+  if(data.status !== 'FILLED'){
+    throw new VerifyRejected(`Order did not fully fill (status: ${data.status}). No further legs will be attempted automatically.`);
+  }
+  return {
+    orderId: data.orderId,
+    filledBaseQty: parseFloat(data.executedQty),
+    filledQuoteQty: parseFloat(data.cummulativeQuoteQty),
+    avgPrice: parseFloat(data.executedQty) > 0 ? parseFloat(data.cummulativeQuoteQty) / parseFloat(data.executedQty) : 0,
+  };
+}
+async function bybitSymbolFilters(base, symbol){
+  const res = await fetch(`${base}/v5/market/instruments-info?category=spot&symbol=${symbol}`);
+  const data = await res.json().catch(() => null);
+  const s = data?.result?.list?.[0];
+  if(!s) throw new Error(`Unknown Bybit symbol ${symbol}`);
+  return {
+    basePrecisionStep: parseFloat(s.lotSizeFilter?.basePrecision || '0.00000001'),
+    quotePrecisionStep: parseFloat(s.lotSizeFilter?.quotePrecision || '0.00000001'),
+    minOrderQty: parseFloat(s.lotSizeFilter?.minOrderQty || '0'),
+    minOrderAmt: parseFloat(s.lotSizeFilter?.minOrderAmt || '0'),
+  };
+}
+
+async function bybitSignedRequest(base, apiKey, secretKey, method, path, bodyOrQuery){
+  const timestamp = String(Date.now());
+  const recvWindow = '5000';
+  const payload = method === 'GET' ? bodyOrQuery : JSON.stringify(bodyOrQuery);
+  const signature = hmacSha256Hex(secretKey, timestamp + apiKey + recvWindow + payload);
+  const url = method === 'GET' ? `${base}${path}?${bodyOrQuery}` : `${base}${path}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      'X-BAPI-API-KEY': apiKey, 'X-BAPI-SIGN': signature, 'X-BAPI-SIGN-TYPE': '2',
+      'X-BAPI-TIMESTAMP': timestamp, 'X-BAPI-RECV-WINDOW': recvWindow,
+      ...(method !== 'GET' ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(method !== 'GET' ? { body: payload } : {}),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || !data || data.retCode !== 0){
+    throw new VerifyRejected(data && data.retMsg ? data.retMsg : `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+async function placeBybitOrder(mode, apiKey, secretKey, { symbol, side, amountKind, amount }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  // Bybit rejects a market order's qty ("Market order amount decimal too
+  // long") if it has more decimal places than the symbol's precision for
+  // whichever side you're specifying — basePrecision when qty means base
+  // coin, quotePrecision when qty means quote coin (amountKind:'quote').
+  // The base-side rounding below was already handled; the quote side was
+  // being sent as a raw, unrounded float, which is what was failing here.
+  const filters = await bybitSymbolFilters(base, symbol);
+  let qty = amount;
+  if(amountKind === 'base'){
+    qty = floorToStep(amount, filters.basePrecisionStep || 0.00000001);
+    if(qty <= 0 || qty < filters.minOrderQty){
+      throw new VerifyRejected(`Amount ${amount} ${symbol} rounds down to ${qty}, below the exchange minimum (${filters.minOrderQty}) — nothing was sent.`);
+    }
+  } else {
+    qty = floorToStep(amount, filters.quotePrecisionStep || 0.00000001);
+    if(qty <= 0 || qty < filters.minOrderAmt){
+      throw new VerifyRejected(`Amount ${amount} ${symbol} rounds down to ${qty}, below the exchange minimum order amount (${filters.minOrderAmt}) — nothing was sent.`);
+    }
+  }
+  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+    category: 'spot', symbol, side, orderType: 'Market',
+    qty: qty.toString(),
+    marketUnit: amountKind === 'quote' ? 'quoteCoin' : 'baseCoin',
+  });
+  const orderId = created.result?.orderId;
+  if(!orderId) throw new VerifyRejected('Bybit accepted the order but returned no orderId to confirm the fill with.');
+
+  // Bybit's create-order response is just an ACK — poll for the actual
+  // fill. Spot market orders fill almost instantly, but "almost" isn't
+  // "always", so this polls briefly rather than assuming.
+  const deadline = Date.now() + 6000;
+  while(Date.now() < deadline){
+    const check = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/order/realtime', `category=spot&orderId=${orderId}`);
+    const order = check.result?.list?.[0];
+    if(order && (order.orderStatus === 'Filled')){
+      const filledBaseQty = parseFloat(order.cumExecQty);
+      const filledQuoteQty = parseFloat(order.cumExecValue);
+      return {
+        orderId,
+        filledBaseQty,
+        filledQuoteQty,
+        avgPrice: filledBaseQty > 0 ? filledQuoteQty / filledBaseQty : parseFloat(order.avgPrice || '0'),
+      };
+    }
+    if(order && ['Cancelled', 'Rejected', 'Deactivated'].includes(order.orderStatus)){
+      throw new VerifyRejected(`Order ${order.orderStatus.toLowerCase()} before filling. No further legs will be attempted automatically.`);
+    }
+    await new Promise(r => setTimeout(r, 400));
+  }
+  throw new VerifyRejected(`Order ${orderId} was accepted but did not confirm as Filled within 6s — check Bybit's order history directly before assuming anything about the position.`);
+}
+
+// =============================================================
+// Bybit Futures (USDT perpetual, category=linear) — for the AI Futures
+// Engine's Live/Demo mode. Reuses bybitSignedRequest, BYBIT_BASE, and
+// bybitAssetBalance/verifyBybit as-is: Bybit's UNIFIED account holds one
+// shared USDT balance across spot AND derivatives, so the same credential
+// and the same balance check already built for spot Autotrade cover this
+// too — nothing new to connect.
+//
+// Safety design, stated explicitly because it's the most important
+// decision in this section: every order placed here carries its
+// stop-loss AND take-profit as native, exchange-side, market-triggered
+// orders (tpslMode: 'Full') attached at creation time — Bybit itself
+// exits the position, not this server watching prices in a loop. That
+// matters because unlike the paper engine (which only "checks" a
+// position when its own code happens to run), a real leveraged position
+// left unmanaged if this server stops running, the browser tab closes,
+// or the network drops would carry open liquidation risk with nothing
+// watching it. Native TP/SL means the exchange enforces the exit
+// regardless of whether anything of ours is still running.
+// =============================================================
+async function bybitFuturesSymbolFilters(base, symbol){
+  const res = await fetch(`${base}/v5/market/instruments-info?category=linear&symbol=${symbol}`);
+  const data = await res.json().catch(() => null);
+  const s = data?.result?.list?.[0];
+  if(!s) throw new Error(`Unknown Bybit linear symbol ${symbol}`);
+  return {
+    qtyStep: parseFloat(s.lotSizeFilter?.qtyStep || '0.001'),
+    minOrderQty: parseFloat(s.lotSizeFilter?.minOrderQty || '0'),
+    minNotionalValue: parseFloat(s.lotSizeFilter?.minNotionalValue || '0'),
+    tickSize: parseFloat(s.priceFilter?.tickSize || '0.01'),
+    maxLeverage: parseFloat(s.leverageFilter?.maxLeverage || '1'),
+  };
+}
+
+async function bybitSetLeverage(mode, apiKey, secretKey, symbol, leverage){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  try{
+    await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/set-leverage', {
+      category: 'linear', symbol, buyLeverage: String(leverage), sellLeverage: String(leverage),
+    });
+  }catch(err){
+    // retCode 110043 "leverage not modified" means it's already set to
+    // this value — not a failure, just a no-op. bybitSignedRequest only
+    // gives us the message text, so match on that rather than the code.
+    if(!/not modified/i.test(err.message)) throw err;
+  }
+}
+
+// Places a market entry, sets leverage first, then polls for the fill
+// exactly like placeBybitOrder does for spot (Bybit's create-order
+// response is an ACK only, not a fill report). side: 'Buy' | 'Sell'.
+// rawQty/rawStopLossPrice are the caller's intended values BEFORE
+// rounding — this function rounds qty to the symbol's qtyStep and
+// prices to its tickSize itself (Bybit rejects values that don't land
+// on-step), same division of responsibility as placeBybitOrder for spot.
+//
+// TP/SL shape (partial take-profit structure — TP1 30% / TP2 30% /
+// TP3 40%, see tpLevels below): the SL is attached to the POSITION
+// itself via /v5/position/trading-stop (tpslMode:'Full', TP fields
+// omitted) rather than embedded on the entry order — that's what makes
+// it amendable later (see moveBybitStopToBreakeven) by simply calling
+// trading-stop again with a new price, no cancel/replace needed. The
+// three TP legs are separate reduce-only conditional MARKET orders
+// (Bybit's single tpslMode:'Full' takeProfit field only supports ONE
+// exit for the whole position, which can't express a 3-level scale-out)
+// — the last leg sets closeOnTrigger so it sweeps whatever's actually
+// left (funding/rounding drift) instead of a qty that could drift a
+// dust amount short of the true remaining size. If tpLevels isn't
+// supplied, falls back to the original single-TP behavior
+// (rawTakeProfitPrice, tpslMode:'Full') for callers that haven't
+// migrated yet.
+async function placeBybitFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice, tpLevels }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+
+  const qty = floorToStep(rawQty, filters.qtyStep);
+  if(qty <= 0 || qty < filters.minOrderQty){
+    throw new VerifyRejected(`Size ${rawQty} ${symbol} rounds down to ${qty}, below the exchange minimum (${filters.minOrderQty}) — nothing was sent.`);
+  }
+  const roundToTick = p => Math.round(p / filters.tickSize) * filters.tickSize;
+  const stopLossPrice = roundToTick(rawStopLossPrice);
+  const clampedLeverage = Math.min(leverage, filters.maxLeverage);
+  const hasLegs = Array.isArray(tpLevels) && tpLevels.length > 0;
+
+  await bybitSetLeverage(mode, apiKey, secretKey, symbol, clampedLeverage);
+
+  // orderLinkId is Bybit's own custom client-order-ID field — stamping
+  // every order this app places with an "nxtgen-" prefix (entry below,
+  // and each TP leg further down) tags them as bot-originated directly on
+  // the exchange side, visible in Bybit's own Order History/API for that
+  // orderId, without needing any separate lookup table. Uses a short
+  // random suffix (not just Date.now()) so a TP leg placed in the same
+  // millisecond as another call can't collide.
+  const botTag = () => `nxtgen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const entryBody = {
+    category: 'linear', symbol, side, orderType: 'Market', qty: qty.toString(),
+    timeInForce: 'IOC', positionIdx: 0, // one-way mode — see note below if this ever rejects
+    orderLinkId: `nxtgen-entry-${botTag()}`,
+  };
+  if(!hasLegs){
+    // Legacy single-TP path — TP/SL embedded directly on the entry order.
+    const takeProfitPrice = roundToTick(rawTakeProfitPrice);
+    Object.assign(entryBody, {
+      takeProfit: takeProfitPrice.toString(), stopLoss: stopLossPrice.toString(),
+      tpOrderType: 'Market', slOrderType: 'Market', tpslMode: 'Full',
+    });
+  }
+  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', entryBody).catch(err => {
+    // positionIdx:0 is one-way mode, which is what a new/default Bybit
+    // derivatives account uses. If this account was switched to hedge
+    // mode (separate Buy/Sell position slots), Bybit rejects positionIdx
+    // mismatches with a clear error — surface it as-is rather than
+    // guessing which hedge-mode slot was meant.
+    if(/position idx/i.test(err.message)){
+      throw new VerifyRejected(`${err.message} — this account appears to be in hedge mode. Switch it to one-way position mode in Bybit's derivatives settings (this app only supports one-way).`);
+    }
+    throw err;
+  });
+  const orderId = created.result?.orderId;
+  if(!orderId) throw new VerifyRejected('Bybit accepted the order but returned no orderId to confirm the fill with.');
+
+  let filledQty = null, avgPrice = null, feeUsd = 0;
+  const deadline = Date.now() + 6000;
+  while(Date.now() < deadline){
+    const check = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/order/realtime', `category=linear&orderId=${orderId}`);
+    const order = check.result?.list?.[0];
+    if(order && order.orderStatus === 'Filled'){
+      filledQty = parseFloat(order.cumExecQty);
+      avgPrice = parseFloat(order.avgPrice || '0');
+      feeUsd = parseFloat(order.cumExecFee || '0');
+      break;
+    }
+    if(order && ['Cancelled', 'Rejected', 'Deactivated'].includes(order.orderStatus)){
+      throw new VerifyRejected(`Order ${order.orderStatus.toLowerCase()} before filling. No position was opened.`);
+    }
+    await new Promise(r => setTimeout(r, 400));
+  }
+  if(filledQty == null){
+    // Don't leave this ambiguous — one direct position check before giving
+    // up, so the error is honest about whether a real position exists
+    // rather than reading like "nothing happened" when it might well have.
+    // (The /api/futures/order route's own pre-flight position check is
+    // what actually prevents a next-cycle retry from stacking a second
+    // entry on top of this either way — this is just making the message
+    // here accurate, not the safety net itself.)
+    const maybeOpen = await getBybitPosition(mode, apiKey, secretKey, symbol).catch(() => null);
+    if(maybeOpen){
+      throw new VerifyRejected(`Order ${orderId} did not confirm as Filled within 6s via the order-status endpoint, but ${symbol} now shows an open ${maybeOpen.side} position of size ${maybeOpen.size} on Bybit — it almost certainly DID fill. Treating this as failed rather than guessing at the fill price/qty from here; check Bybit directly and manage that position manually if this app doesn't pick it up on its own next cycle.`);
+    }
+    throw new VerifyRejected(`Order ${orderId} was accepted but did not confirm as Filled within 6s, and no open ${symbol} position was found either — check Bybit's order history directly before assuming anything about it.`);
+  }
+
+  if(!hasLegs){
+    const takeProfitPrice = roundToTick(rawTakeProfitPrice);
+    return { orderId, filledQty, avgPrice, feeUsd, leverage: clampedLeverage, stopLossPrice, takeProfitPrice };
+  }
+
+  // --- Protective stop, attached to the position itself (see comment
+  // above) — if this fails the position is open with NO protection at
+  // all, which is worse than the order never having gone through, so it
+  // surfaces as a clearly-labeled partial-failure. ---
+  await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/trading-stop', {
+    category: 'linear', symbol, tpslMode: 'Full', slOrderType: 'Market',
+    stopLoss: stopLossPrice.toString(), positionIdx: 0,
+  }).catch(err => {
+    throw new VerifyRejected(`Position OPENED (${symbol} ${side} ${filledQty} @ ${avgPrice}, order ${orderId}) but attaching the stop-loss FAILED: ${err.message}. This position has NO protective stop on it — check Bybit directly and close or protect it manually.`);
+  });
+
+  // --- Take-profit legs: 30% / 30% / remainder, each its own
+  // reduce-only conditional market order. ---
+  const exitSide = side === 'Buy' ? 'Sell' : 'Buy';
+  const isLong = side === 'Buy';
+  const tpOrderIds = [];
+  const placedLevels = [];
+  let allocatedQty = 0;
+  for(let i = 0; i < tpLevels.length; i++){
+    const isLast = i === tpLevels.length - 1;
+    const tpPrice = roundToTick(tpLevels[i].price);
+    const body = {
+      category: 'linear', symbol, side: exitSide, orderType: 'Market',
+      triggerPrice: tpPrice.toString(), triggerBy: 'LastPrice',
+      // 1 = triggers when price rises to triggerPrice, 2 = falls to it —
+      // a LONG's take-profit needs price to rise; a SHORT's needs it to fall.
+      triggerDirection: isLong ? 1 : 2,
+      reduceOnly: true, positionIdx: 0,
+      orderLinkId: `nxtgen-tp${i + 1}-${botTag()}`,
+    };
+    if(isLast){
+      const remainderQty = Math.max(0, qty - allocatedQty);
+      body.qty = (remainderQty > 0 ? remainderQty : qty * tpLevels[i].fraction).toString();
+      body.closeOnTrigger = true; // sweeps whatever's actually left, not just this nominal qty
+    } else {
+      const legQty = floorToStep(qty * tpLevels[i].fraction, filters.qtyStep);
+      allocatedQty += legQty;
+      body.qty = legQty.toString();
+    }
+    try{
+      const tpCreated = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', body);
+      tpOrderIds.push(tpCreated.result?.orderId || null);
+      placedLevels.push({ ...tpLevels[i], price: tpPrice });
+    }catch(err){
+      throw new VerifyRejected(`Position OPENED and stop-loss attached (${symbol} ${side} ${filledQty} @ ${avgPrice}) but take-profit leg ${i + 1}/${tpLevels.length} FAILED: ${err.message}. Remaining TP legs were not attempted — check Bybit directly; the position is protected by its stop-loss but may be missing some/all take-profit exits.`);
+    }
+  }
+
+  return { orderId, filledQty, avgPrice, feeUsd, leverage: clampedLeverage, stopLossPrice, tpOrderIds, tpLevels: placedLevels };
+}
+
+// Amends the SL already attached to an open Bybit position to a new
+// price (used for the fee-adjusted breakeven move once TP2 fully
+// closes) — no cancel/replace needed since the stop lives on the
+// position itself (see placeBybitFuturesOrder's comment above), just a
+// second trading-stop call with the new value. Bybit accepts this while
+// the position is open and TP legs are still resting.
+async function moveBybitStopToBreakeven(mode, apiKey, secretKey, { symbol, newStopPrice }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const roundToTick = p => Math.round(p / filters.tickSize) * filters.tickSize;
+  const stopLossPrice = roundToTick(newStopPrice);
+  await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/trading-stop', {
+    category: 'linear', symbol, tpslMode: 'Full', slOrderType: 'Market',
+    stopLoss: stopLossPrice.toString(), positionIdx: 0,
+  });
+  return { newStopPrice: stopLossPrice };
+}
+
+// Reads the live position for one symbol — size:"0" (or no row at all)
+// means it's closed, whether that was the native TP, the native SL, or a
+// manual close on Bybit's own UI. Used to detect closure from our side;
+// the actual exit was already handled exchange-side per the safety note
+// above, this is just "has it happened yet".
+async function getBybitPosition(mode, apiKey, secretKey, symbol){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const data = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/position/list', `category=linear&symbol=${symbol}`);
+  const pos = data.result?.list?.[0];
+  if(!pos || parseFloat(pos.size || '0') === 0) return null;
+  return {
+    size: parseFloat(pos.size), side: pos.side, avgPrice: parseFloat(pos.avgPrice || '0'),
+    markPrice: parseFloat(pos.markPrice || '0'), unrealisedPnl: parseFloat(pos.unrealisedPnl || '0'),
+    leverage: parseFloat(pos.leverage || '0'), liqPrice: pos.liqPrice ? parseFloat(pos.liqPrice) : null,
+    // Cumulative realized P&L on THIS still-open position (resets to 0 when
+    // the position fully closes and a fresh one opens) — this is what lets
+    // the client detect a TP1/TP2 partial fill (size drops, curRealisedPnl
+    // jumps) between two polls and log it, instead of only ever recording
+    // one row for the whole position's lifetime at final close. Bybit
+    // returns this on every /v5/position/list response, no extra call needed.
+    curRealisedPnl: pos.curRealisedPnl != null ? parseFloat(pos.curRealisedPnl) : null,
+  };
+}
+
+// Manually flattens an open Bybit position — used by the app's own
+// "Close Position" button rather than waiting on the exchange-side
+// TP/SL to trigger. Reads the position fresh (not from any client-
+// cached qty) so it closes exactly what's actually open, places a
+// reduce-only market order in the opposite direction for that size, then
+// best-effort cancels whatever conditional orders are still resting on
+// the symbol (the TP legs from placeBybitFuturesOrder, and the SL lives
+// on the position itself so it clears on its own once flat) — a cancel
+// failure here is untidy, not unsafe, since the position is already
+// closed by the time it runs, so it's swallowed rather than surfaced.
+async function closeBybitFuturesPosition(mode, apiKey, secretKey, symbol){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const pos = await getBybitPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) throw new VerifyRejected(`No open ${symbol} position found on Bybit — nothing to close.`);
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const qty = floorToStep(pos.size, filters.qtyStep);
+  const exitSide = pos.side === 'Buy' ? 'Sell' : 'Buy';
+  const closed = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+    category: 'linear', symbol, side: exitSide, orderType: 'Market', qty: qty.toString(),
+    reduceOnly: true, positionIdx: 0, timeInForce: 'IOC',
+    orderLinkId: `nxtgen-close-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  });
+  await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/cancel-all', { category: 'linear', symbol }).catch(() => {});
+  return { orderId: closed.result?.orderId || null };
+}
+
+// Lists EVERY open Bybit linear position for the account (no symbol
+// filter — settleCoin scopes it to USDT-margined perps), used for
+// broad reconciliation: catching a real open position this app never
+// placed (or lost track of — a different browser/session, a manual
+// open on the exchange itself, cleared localStorage, etc.) that the
+// per-symbol preflight/monitoring checks would otherwise never surface
+// until/unless an order attempt happened to target that exact symbol.
+async function getAllBybitPositions(mode, apiKey, secretKey){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const data = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/position/list', 'category=linear&settleCoin=USDT');
+  const list = data.result?.list || [];
+  return list.filter(p => parseFloat(p.size || '0') !== 0).map(p => ({
+    symbol: p.symbol, size: parseFloat(p.size), side: p.side, avgPrice: parseFloat(p.avgPrice || '0'),
+    markPrice: parseFloat(p.markPrice || '0'), unrealisedPnl: parseFloat(p.unrealisedPnl || '0'),
+    leverage: parseFloat(p.leverage || '0'), liqPrice: p.liqPrice ? parseFloat(p.liqPrice) : null,
+    curRealisedPnl: p.curRealisedPnl != null ? parseFloat(p.curRealisedPnl) : null,
+  }));
+}
+
+// Once getBybitPosition reports a symbol closed, this pulls the actual
+// realized result for it — the net P&L via balance diff (Bybit's
+// /v5/position/closed-pnl does NOT work on Demo accounts — ErrCode 10032
+// "Demo trading are not supported", confirmed from Bybit's own SDK issue
+// trackers, not assumed — so a plain balance-before/balance-after diff is
+// used instead, same trick as the analogous spot-Autotrade fix), PLUS a
+// real fee breakdown pulled from /v5/execution/list, which — unlike
+// closed-pnl — IS listed in Bybit's own Demo Trading API availability
+// table ("Get Trade History | /v5/execution/list"), so this works in
+// both Live and Demo.
+// =============================================================
+// Bybit hedge-mode grid order placement — NxTGen Grid's Live/Demo path.
+// Deliberately SEPARATE functions from placeBybitFuturesOrder/
+// closeBybitFuturesPosition/getBybitPosition above (used by the other
+// six strategies), for one specific safety reason: this switches the
+// SYMBOL to Bybit's hedge/"BothSide" position mode, so it can hold a
+// LONG and a SHORT position on the same symbol at once — which the six
+// strategies' code assumes is never the case (positionIdx:0, one-way).
+//
+// This is safe to do per-symbol rather than needing user sign-off first
+// (unlike the Binance section below) because Bybit's position mode is
+// scoped to category+symbol, not the whole account — and Grid only ever
+// trades GRID_SYMBOLS (BTC/ETH/SOL/BNB/XRP/DOGE), which engine.js's
+// EXCLUDED_FUTURES_SYMBOLS already keeps the other six strategies OFF
+// of entirely (see grid.js's GRID_SYMBOLS comment). So switching one of
+// these symbols to hedge mode can never affect an order the six
+// strategies place, on Bybit or otherwise — the two symbol sets never
+// overlap by construction.
+//
+// positionIdx convention used throughout this section: 1 = hedge-mode
+// LONG slot, 2 = hedge-mode SHORT slot (0 stays reserved for one-way,
+// which these functions never use).
+// =============================================================
+async function bybitGridEnsureHedgeMode(mode, apiKey, secretKey, symbol){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  try{
+    await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/switch-mode', {
+      category: 'linear', symbol, mode: 3, // 3 = BothSide (hedge)
+    });
+  }catch(err){
+    // Same "already set" tolerance as bybitSetLeverage above — Bybit
+    // returns a distinct retCode/message when the symbol is already in
+    // the requested mode, which isn't a failure.
+    if(!/not modified|same as current/i.test(err.message)){
+      throw new VerifyRejected(`Could not switch ${symbol} to hedge mode on Bybit: ${err.message}. NxTGen Grid needs hedge mode to hold both a long and short leg on the same symbol — if this symbol currently has an OPEN position or resting orders from a previous one-way session, Bybit will refuse the switch until those are closed/cancelled first.`);
+    }
+  }
+}
+
+// Places one resting entry LIMIT order for a single grid level — NOT a
+// market order, because the whole fee-aware profit model (grid.js's
+// netCycleProfit) assumes maker fills on both sides of a cycle, same as
+// the backtest. side/positionIdx: LONG -> Buy/1, SHORT -> Sell/2.
+async function placeBybitGridLevelOrder(mode, apiKey, secretKey, { symbol, direction, price, qty, leverage, orderLinkTag }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  if(roundedQty <= 0 || roundedQty < filters.minOrderQty){
+    throw new VerifyRejected(`Grid level size ${qty} ${symbol} rounds down to ${roundedQty}, below the exchange minimum (${filters.minOrderQty}) — level skipped, not sent.`);
+  }
+  const roundedPrice = Math.round(price / filters.tickSize) * filters.tickSize;
+  const clampedLeverage = Math.min(leverage, filters.maxLeverage);
+  await bybitSetLeverage(mode, apiKey, secretKey, symbol, clampedLeverage);
+  const side = direction === 'LONG' ? 'Buy' : 'Sell';
+  const positionIdx = direction === 'LONG' ? 1 : 2;
+  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+    category: 'linear', symbol, side, orderType: 'Limit', qty: roundedQty.toString(),
+    price: roundedPrice.toString(), timeInForce: 'GTC', positionIdx,
+    orderLinkId: `nxgrid-lvl-${orderLinkTag || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  });
+  const orderId = created.result?.orderId;
+  if(!orderId) throw new VerifyRejected('Bybit accepted the grid level order but returned no orderId.');
+  return { orderId, price: roundedPrice, qty: roundedQty, leverage: clampedLeverage };
+}
+
+// Places the reduce-only closing LIMIT order for a leg that just filled
+// — rests at that leg's target (the next grid level), same maker-fill
+// assumption as the entry. Called right after placeBybitGridLevelOrder's
+// order is detected as filled (see getBybitGridOpenOrders below).
+async function placeBybitGridCloseOrder(mode, apiKey, secretKey, { symbol, direction, price, qty, orderLinkTag }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  const roundedPrice = Math.round(price / filters.tickSize) * filters.tickSize;
+  const exitSide = direction === 'LONG' ? 'Sell' : 'Buy'; // closes the LONG or SHORT slot, doesn't flip it
+  const positionIdx = direction === 'LONG' ? 1 : 2;
+  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+    category: 'linear', symbol, side: exitSide, orderType: 'Limit', qty: roundedQty.toString(),
+    price: roundedPrice.toString(), timeInForce: 'GTC', reduceOnly: true, positionIdx,
+    orderLinkId: `nxgrid-cls-${orderLinkTag || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  });
+  const orderId = created.result?.orderId;
+  if(!orderId) throw new VerifyRejected('Bybit accepted the grid close order but returned no orderId.');
+  return { orderId, price: roundedPrice, qty: roundedQty };
+}
+
+// Attaches (or refreshes) a protective stop on one hedge-mode side slot
+// at the grid's own outer boundary — see the header note on grid.js's
+// live wiring for why this exists even though the backtested strategy
+// itself doesn't model a per-leg stop: this app's whole safety design
+// (see the file-level comment on placeBybitFuturesOrder above) is that
+// a real position must never depend on a browser tab staying open and
+// polling to stay protected. Re-calling this with the same price is a
+// safe no-op; call it again whenever the grid recalculates its bounds.
+async function setBybitGridSideStop(mode, apiKey, secretKey, { symbol, direction, stopPrice }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const roundedStop = Math.round(stopPrice / filters.tickSize) * filters.tickSize;
+  const positionIdx = direction === 'LONG' ? 1 : 2;
+  await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/trading-stop', {
+    category: 'linear', symbol, tpslMode: 'Full', slOrderType: 'Market',
+    stopLoss: roundedStop.toString(), positionIdx,
+  });
+  return { stopPrice: roundedStop };
+}
+
+async function cancelBybitOrder(mode, apiKey, secretKey, { symbol, orderId }){
+  await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'POST', '/v5/order/cancel', {
+    category: 'linear', symbol, orderId,
+  }).catch(err => {
+    // Already filled or already cancelled — not a failure worth
+    // surfacing; the caller's own reconciliation (position/open-orders
+    // read right after) is what actually determines state, this is
+    // best-effort tidiness.
+    if(!/order not exists|too late to cancel/i.test(err.message)) throw err;
+  });
+}
+
+async function cancelAllBybitGridOrders(mode, apiKey, secretKey, symbol){
+  await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'POST', '/v5/order/cancel-all', {
+    category: 'linear', symbol,
+  }).catch(() => {});
+}
+
+// Lists currently-open (unfilled/partially-filled) orders for the
+// symbol — this is how the client detects a grid level's LIMIT order
+// having filled: an orderId it placed and is tracking is no longer in
+// this list. Bybit's /v5/order/realtime with just category+symbol (no
+// orderId) returns the open-orders book for that symbol.
+async function getBybitGridOpenOrders(mode, apiKey, secretKey, symbol){
+  const data = await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'GET', '/v5/order/realtime', `category=linear&symbol=${symbol}`);
+  const list = data.result?.list || [];
+  return list.map(o => ({ orderId: o.orderId, side: o.side, price: parseFloat(o.price), qty: parseFloat(o.qty), status: o.orderStatus, positionIdx: o.positionIdx }));
+}
+
+// Reads BOTH hedge-mode position slots for the symbol — in BothSide
+// mode Bybit returns one row per positionIdx (1=Long, 2=Short) even
+// when one side is flat (size:"0"), unlike one-way mode's single row.
+async function getBybitGridPositions(mode, apiKey, secretKey, symbol){
+  const data = await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'GET', '/v5/position/list', `category=linear&symbol=${symbol}`);
+  const list = data.result?.list || [];
+  const long = list.find(p => p.positionIdx === 1);
+  const short = list.find(p => p.positionIdx === 2);
+  return {
+    long: long && parseFloat(long.size || '0') > 0 ? { size: parseFloat(long.size), avgPrice: parseFloat(long.avgPrice || '0'), liqPrice: long.liqPrice ? parseFloat(long.liqPrice) : null, unrealisedPnl: parseFloat(long.unrealisedPnl || '0') } : null,
+    short: short && parseFloat(short.size || '0') > 0 ? { size: parseFloat(short.size), avgPrice: parseFloat(short.avgPrice || '0'), liqPrice: short.liqPrice ? parseFloat(short.liqPrice) : null, unrealisedPnl: parseFloat(short.unrealisedPnl || '0') } : null,
+  };
+}
+
+// Breakout/emergency/manual flatten — cancels every resting grid order
+// on the symbol, then market-closes whichever side(s) actually hold
+// size. Best-effort on the cancel (a leg mid-fill when this runs is not
+// an error state, just something the immediately-following position
+// read will pick up and this will still close).
+async function flattenBybitGrid(mode, apiKey, secretKey, symbol){
+  await cancelAllBybitGridOrders(mode, apiKey, secretKey, symbol);
+  const positions = await getBybitGridPositions(mode, apiKey, secretKey, symbol);
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const closed = [];
+  for(const [direction, pos] of [['LONG', positions.long], ['SHORT', positions.short]]){
+    if(!pos) continue;
+    const qty = floorToStep(pos.size, filters.qtyStep);
+    if(qty <= 0) continue;
+    const exitSide = direction === 'LONG' ? 'Sell' : 'Buy';
+    const positionIdx = direction === 'LONG' ? 1 : 2;
+    const result = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+      category: 'linear', symbol, side: exitSide, orderType: 'Market', qty: qty.toString(),
+      reduceOnly: true, positionIdx, timeInForce: 'IOC',
+      orderLinkId: `nxgrid-flat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    }).catch(err => { throw new VerifyRejected(`Cancelled resting grid orders but FAILED to flatten the ${direction} side (size ${qty}) on Bybit: ${err.message}. Check ${symbol} on Bybit directly.`); });
+    closed.push({ direction, qty, orderId: result.result?.orderId || null });
+  }
+  return { closed };
+}
+
+// =============================================================
+// Trading Bots — DCA (Bybit + Binance only, same two exchanges as Grid).
+// Deliberately ONE-WAY position mode (positionIdx 0 / no positionSide on
+// Binance) — unlike Grid, a DCA deployment only ever holds ONE side at a
+// time, so it doesn't need hedge mode at all. Safety orders are just
+// plain same-direction LIMIT entries with reduceOnly unset/false: both
+// exchanges natively average same-side fills into one bigger position at
+// a blended entry price, so "adding a safety order" is nothing more than
+// placing another ordinary entry order — no special "add" flag exists or
+// is needed. Take-profit is re-set (not re-created) via the position-
+// level trading-stop endpoint every time the average price moves, same
+// idempotent-replace approach as setBybitGridSideStop/
+// setBinanceGridSideStop above use for the stop side.
+// =============================================================
+async function placeBybitDcaOrder(mode, apiKey, secretKey, { symbol, direction, orderType, price, qty, leverage }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  if(roundedQty <= 0 || roundedQty < filters.minOrderQty){
+    throw new VerifyRejected(`DCA order size ${qty} ${symbol} rounds down to ${roundedQty}, below the exchange minimum (${filters.minOrderQty}) — order skipped, not sent.`);
+  }
+  if(leverage != null){
+    const clampedLeverage = Math.min(leverage, filters.maxLeverage);
+    await bybitSetLeverage(mode, apiKey, secretKey, symbol, clampedLeverage);
+  }
+  const side = direction === 'LONG' ? 'Buy' : 'Sell';
+  const body = {
+    category: 'linear', symbol, side, orderType: orderType === 'MARKET' ? 'Market' : 'Limit',
+    qty: roundedQty.toString(), positionIdx: 0,
+    orderLinkId: `nxdca-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  };
+  if(orderType !== 'MARKET'){
+    const roundedPrice = Math.round(price / filters.tickSize) * filters.tickSize;
+    body.price = roundedPrice.toString();
+    body.timeInForce = 'GTC';
+  } else {
+    body.timeInForce = 'IOC';
+  }
+  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', body).catch(err => {
+    // If NxTGen Grid ever ran Live on this same symbol, it switched Bybit
+    // to hedge (BothSide) mode for it — DCA needs one-way mode instead,
+    // and Bybit refuses positionIdx:0 orders on a hedge-mode symbol with
+    // a distinctive error. Surface that plainly rather than a bare retCode.
+    if(/position idx not match|position mode/i.test(err.message)){
+      throw new VerifyRejected(`${symbol} on Bybit is currently in hedge (BothSide) mode — likely from running NxTGen Grid Live/Demo on it earlier. DCA needs one-way mode. Close/cancel anything open on ${symbol} on Bybit, then switch it back to one-way yourself (Bybit app > Futures settings > Position Mode) before creating a DCA bot on it.`);
+    }
+    throw err;
+  });
+  const orderId = created.result?.orderId;
+  if(!orderId) throw new VerifyRejected('Bybit accepted the DCA order but returned no orderId.');
+  return { orderId, price: body.price ? parseFloat(body.price) : null, qty: roundedQty };
+}
+
+// Sets (or replaces) the take-profit for the WHOLE current one-way
+// position, recalculated every time a safety order fills and the
+// average entry moves — trading-stop's tpPrice fully replaces whatever
+// was set before, so this never needs to "cancel" a prior TP first.
+// stopLossPrice is optional (DCA's own hard stop, distinct from a
+// safety-order ladder running out) — omit to leave/clear it.
+async function setBybitDcaTakeProfit(mode, apiKey, secretKey, { symbol, direction, takeProfitPrice, stopLossPrice }){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const body = { category: 'linear', symbol, tpslMode: 'Full', positionIdx: 0 };
+  if(takeProfitPrice != null){
+    body.takeProfit = (Math.round(takeProfitPrice / filters.tickSize) * filters.tickSize).toString();
+    body.tpOrderType = 'Market';
+  }
+  if(stopLossPrice != null){
+    body.stopLoss = (Math.round(stopLossPrice / filters.tickSize) * filters.tickSize).toString();
+    body.slOrderType = 'Market';
+  }
+  await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/trading-stop', body);
+  return { takeProfitPrice: body.takeProfit ? parseFloat(body.takeProfit) : null, stopLossPrice: body.stopLoss ? parseFloat(body.stopLoss) : null };
+}
+
+async function getBybitDcaOpenOrders(mode, apiKey, secretKey, symbol){
+  const data = await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'GET', '/v5/order/realtime', `category=linear&symbol=${symbol}`);
+  const list = data.result?.list || [];
+  return list.map(o => ({ orderId: o.orderId, side: o.side, price: parseFloat(o.price), qty: parseFloat(o.qty), status: o.orderStatus }));
+}
+
+// One-way position read — a single row (no positionIdx split like
+// Grid's hedge-mode getBybitGridPositions needs).
+async function getBybitDcaPosition(mode, apiKey, secretKey, symbol){
+  const data = await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'GET', '/v5/position/list', `category=linear&symbol=${symbol}`);
+  const list = data.result?.list || [];
+  const pos = list.find(p => (p.positionIdx === 0 || p.positionIdx == null) && parseFloat(p.size || '0') > 0);
+  return pos ? { size: parseFloat(pos.size), avgPrice: parseFloat(pos.avgPrice || '0'), side: pos.side, liqPrice: pos.liqPrice ? parseFloat(pos.liqPrice) : null, unrealisedPnl: parseFloat(pos.unrealisedPnl || '0') } : null;
+}
+
+async function flattenBybitDca(mode, apiKey, secretKey, symbol){
+  await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'POST', '/v5/order/cancel-all', { category: 'linear', symbol }).catch(() => {});
+  const pos = await getBybitDcaPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) return { closed: null };
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const filters = await bybitFuturesSymbolFilters(base, symbol);
+  const qty = floorToStep(pos.size, filters.qtyStep);
+  if(qty <= 0) return { closed: null };
+  const exitSide = pos.side === 'Buy' ? 'Sell' : 'Buy';
+  const result = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+    category: 'linear', symbol, side: exitSide, orderType: 'Market', qty: qty.toString(),
+    reduceOnly: true, positionIdx: 0, timeInForce: 'IOC',
+    orderLinkId: `nxdca-flat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+  }).catch(err => { throw new VerifyRejected(`Cancelled resting DCA orders but FAILED to close the position (size ${qty}) on Bybit: ${err.message}. Check ${symbol} on Bybit directly.`); });
+  return { closed: { qty, orderId: result.result?.orderId || null } };
+}
+
+async function getBybitExecutionFees(mode, apiKey, secretKey, symbol, openedAtMs){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const startTime = String(openedAtMs || (Date.now() - 24 * 60 * 60 * 1000));
+  const data = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/execution/list', `category=linear&symbol=${symbol}&startTime=${startTime}&endTime=${Date.now()}&limit=100`);
+  const list = data.result?.list || [];
+  if(list.length === 0) return null;
+  // execFee is Bybit's per-fill cost (positive = fee paid, small negative
+  // = maker rebate) — stored here as a NEGATIVE figure, matching the sign
+  // convention every other exchange's fee getter in this file already
+  // uses (a "change" that closedPnl already had subtracted out of it).
+  const feesUsd = -list.reduce((a, e) => a + parseFloat(e.execFee || '0'), 0);
+  return { feesUsd, entries: list.length };
+}
+
+async function getBybitClosedPnl(mode, apiKey, secretKey, symbol, passphrase, openedAtMs, balanceBeforeUsd){
+  if(balanceBeforeUsd == null) return null; // caller didn't have a starting balance to diff against — can't compute this safely
+  const afterUsd = await bybitAssetBalance(mode, apiKey, secretKey, 'USDT');
+  const closedPnl = afterUsd - balanceBeforeUsd;
+  // Best-effort: if the execution list can't be read for any reason (rate
+  // limit, transient error, a Demo-account restriction that turns out to
+  // apply after all), fall back to the net-only figure exactly as before
+  // rather than blocking the result on it.
+  const fees = await getBybitExecutionFees(mode, apiKey, secretKey, symbol, openedAtMs).catch(() => null);
+  if(!fees) return { closedPnl, grossPnl: null, feesUsd: null, entries: 1 };
+  const grossPnl = closedPnl - fees.feesUsd; // feesUsd is negative, so this adds the cost back to get the pre-fee result
+  return { closedPnl, grossPnl, feesUsd: fees.feesUsd, entries: fees.entries };
+}
+
+// =============================================================
+// Real Bybit market data for Live/Demo trading — builds the exact same
+// {symbol, price, m5, m15, h1, meta} shape mockMarket.snapshot() produces
+// (see that file's header), from real klines + a real ticker, so the
+// unmodified scoring/regime/setup logic can run against it. This is what
+// makes Live/Demo trading safe to wire up at all — entries, stops, and
+// targets are computed from wherever Bybit is actually trading, not from
+// the synthetic Paper-mode feed. Always reads from BYBIT_BASE.live
+// (public market data is the same whether you go on to trade it in Live
+// or Demo mode — only account/order execution differs between the two).
+// =============================================================
+function bybitCandlesFromKline(raw){
+  const list = raw?.result?.list || [];
+  // Bybit returns most-recent-first; reverse to oldest-first, matching
+  // the {t,o,h,l,c,v} shape every js/futures/*.js module already expects.
+  return list.slice().reverse().map(row => ({
+    t: parseInt(row[0], 10), o: parseFloat(row[1]), h: parseFloat(row[2]), l: parseFloat(row[3]), c: parseFloat(row[4]), v: parseFloat(row[5]),
+  }));
+}
+
+// Per-exchange native kline-interval string for each selectable Live/
+// Demo timeframe (js/futures-ui.js's fuLiveTimeframe field / Backtest's
+// btTimeframe). Bybit and Binance both support a native 3m kline;
+// Gate.io's and MEXC's futures kline endpoints do not (confirmed against
+// their own API docs — Gate.io: 10s/1m/5m/15m/30m/1h/...; MEXC:
+// Min1/Min5/Min15/Min30/Min60/...), so those two fall back to 5m when 3m
+// is requested — resolveSnapshotTimeframe below reports that fallback so
+// the caller can surface it once instead of silently trading a different
+// timeframe than what's selected.
+//
+// LOCKED TO 5m, on direct request that every strategy's entry decision
+// run on the same 5m candle everywhere (Paper, Backtest, Live/Demo) —
+// see setups.js's own comments on the Breakout+Retest/Range Reversal
+// timeframe fix for the client-side half of this. This map/function
+// keeps its full shape (rather than being deleted outright) so the
+// per-exchange interval strings stay documented and the lock can be
+// lifted deliberately later if ever wanted — but resolveSnapshotTimeframe
+// now ignores whatever timeframe argument it's called with and always
+// resolves to each exchange's own 5m string. This is the authoritative,
+// server-side lock: even if a client sent a different `interval` query
+// param directly (bypassing the UI entirely), the execution leg of every
+// snapshot this server builds is still 5m.
+const SNAPSHOT_TIMEFRAME_MAP = {
+  bybit:   { '3m': '3',   '5m': '5',   '15m': '15',  '30m': '30',  '1h': '60' },
+  binance: { '3m': '3m',  '5m': '5m',  '15m': '15m', '30m': '30m', '1h': '1h' },
+  bitget:  { '3m': '3m',  '5m': '5m',  '15m': '15m', '30m': '30m', '1h': '1H' },
+  gateio:  {              '5m': '5m',  '15m': '15m', '30m': '30m', '1h': '1h' }, // no 3m
+  mexc:    {              '5m': 'Min5','15m': 'Min15','30m': 'Min30','1h': 'Min60' }, // no 3m
+};
+function resolveSnapshotTimeframe(exchange, timeframe){
+  const map = SNAPSHOT_TIMEFRAME_MAP[exchange] || {};
+  // Locked: always request this exchange's own 5m string, regardless of
+  // what was asked for. `fallback` now only reports the (now-impossible-
+  // to-hit-any-other-way) case of a caller asking for something other
+  // than 5m, kept so the one-time client-side notice still fires if this
+  // ever gets called with a non-5m value again in the future.
+  return { native: map['5m'], fallback: !!timeframe && timeframe !== '5m' };
+}
+
+async function bybitBuildFuturesSnapshot(symbol, timeframe){
+  const base = BYBIT_BASE.live;
+  const { native: m5Interval, fallback } = resolveSnapshotTimeframe('bybit', timeframe);
+  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([
+    fetchJSON(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=${m5Interval}&limit=150`),
+    fetchJSON(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=15&limit=150`),
+    fetchJSON(`${base}/v5/market/kline?category=linear&symbol=${symbol}&interval=60&limit=80`),
+    fetchJSON(`${base}/v5/market/tickers?category=linear&symbol=${symbol}`),
+  ]);
+
+  const m5 = bybitCandlesFromKline(m5Data);
+  const m15 = bybitCandlesFromKline(m15Data);
+  const h1 = bybitCandlesFromKline(h1Data);
+  if(m5.length < 30 || m15.length < 20 || h1.length < 10){
+    throw new Error(`Not enough Bybit kline history for ${symbol} yet (${m5.length}/${m15.length}/${h1.length} m5/m15/h1 candles).`);
+  }
+
+  const t = tickerData?.result?.list?.[0];
+  if(!t) throw new Error(`No Bybit ticker data for ${symbol}.`);
+  const bid = parseFloat(t.bid1Price || '0'), ask = parseFloat(t.ask1Price || '0'), last = parseFloat(t.lastPrice || '0');
+  const spreadPct = (bid > 0 && ask > 0) ? ((ask - bid) / ((ask + bid) / 2)) * 100 : 0.02;
+  const volume24hUsd = parseFloat(t.turnover24h || '0');
+  // Same formula mockMarket.js uses for its synthetic liquidityScore, applied to a real volume figure.
+  const liquidityScore = Math.max(5, Math.min(99, Math.round(40 + 45 * Math.min(1, volume24hUsd / 2.2e9))));
+  const fundingRatePct = parseFloat(t.fundingRate || '0') * 100;
+  const openInterestUsd = parseFloat(t.openInterestValue || '0');
+
+  return {
+    symbol, price: last || m5[m5.length - 1].c,
+    m5, m15, h1, timeframeFallback: fallback,
+    meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd },
+  };
+}
+
+// ---- Binance USDⓈ-M real market data — same shape, klines are already
+// chronological (unlike Bybit's, which need reversing) and interval
+// strings are "5m"/"15m"/"1h" rather than raw minute counts. ----
+function binanceCandlesFromKline(raw){
+  if(!Array.isArray(raw)) return [];
+  return raw.map(row => ({
+    t: row[0], o: parseFloat(row[1]), h: parseFloat(row[2]), l: parseFloat(row[3]), c: parseFloat(row[4]), v: parseFloat(row[5]),
+  }));
+}
+// ---- Binance scan-weight reduction ------------------------------------------------------------
+// Per symbol per cycle the scan used to cost ~9 IP weight (three klines 2+2+1, bookTicker 2, premiumIndex 1,
+// 24hr ticker 1). With a 25-pair watchlist on an 8s cycle that is ~1,700/min against Binance's 2,400/min
+// per-IP cap — and on a shared host IP other tenants add to the same counter. So everything that does NOT
+// need to be per-symbol-per-cycle is now shared:
+//   * bookTicker and premiumIndex: ONE all-symbols call (weight 5 / 10) serves every symbol in the cycle
+//     (3s / 5s cache) instead of 25 single-symbol calls (weight 50 / 25). Falls back to the per-symbol call if
+//     the batch call fails or the symbol is missing from it.
+//   * 24h volume / last price: read from the cached futures universe (already fetched for the watchlist)
+//     instead of a per-symbol 24hr ticker call; falls back to the per-symbol call if it isn't cached.
+//   * 15m and 1h context candles: cached briefly (20s / 90s). Only the 5m entry candle is fetched fresh
+//     every cycle. The context candles feed regime/trend reads, which don't need sub-minute freshness.
+// Net: roughly 700 weight/min for 25 pairs instead of ~1,700. Every cache is in this process only and keyed by
+// symbol, so multiple browser tabs share it too.
+const BINANCE_BOOK_TTL_MS = 3_000;
+const BINANCE_PREMIUM_TTL_MS = 5_000;
+const BINANCE_KLINE_15M_TTL_MS = 20_000;
+const BINANCE_KLINE_1H_TTL_MS = 90_000;
+const BINANCE_UNIVERSE_MAX_AGE_MS = 10 * 60_000;
+const binanceBatchCache = {};        // slot -> { atMs, map, pending }
+const binanceKlineCache = new Map(); // `${symbol}:${interval}` -> { atMs, rows }
+
+async function binanceBatchMap(slot, path, ttlMs){
+  const c = binanceBatchCache[slot] || (binanceBatchCache[slot] = { atMs: 0, map: null, pending: null });
+  if(c.map && Date.now() - c.atMs < ttlMs) return c.map;
+  if(!c.pending){
+    // One in-flight request shared by every symbol asking in the same moment (25 snapshots start together).
+    c.pending = fetchJSON(`${BINANCE_FAPI_BASE.live}${path}`, 10_000, h => recordBinanceWeight('live', h))
+      .then(rows => {
+        const m = new Map();
+        for(const r of (Array.isArray(rows) ? rows : [])) if(r && r.symbol) m.set(r.symbol, r);
+        c.map = m; c.atMs = Date.now();
+        return m;
+      })
+      .finally(() => { c.pending = null; });
+  }
+  return c.pending;
+}
+
+async function binanceCachedKlines(symbol, interval, limit, ttlMs){
+  const key = `${symbol}:${interval}`;
+  const hit = binanceKlineCache.get(key);
+  if(hit && Date.now() - hit.atMs < ttlMs) return hit.rows;
+  const rows = await fetchJSON(`${BINANCE_FAPI_BASE.live}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`, 10_000, h => recordBinanceWeight('live', h));
+  if(binanceKlineCache.size >= 400) binanceKlineCache.delete(binanceKlineCache.keys().next().value); // bounded
+  binanceKlineCache.set(key, { atMs: Date.now(), rows });
+  return rows;
+}
+
+// 24h volume + last price for `symbol` from the cached universe (null if it isn't cached / is too old).
+function binanceUniverseEntry(symbol){
+  const c = FUTURES_UNIVERSE_CACHE.binance;
+  if(!c || Date.now() - c.atMs > BINANCE_UNIVERSE_MAX_AGE_MS) return null;
+  if(!c.bySymbol) c.bySymbol = new Map(c.symbols.map(x => [x.symbol, x]));
+  return c.bySymbol.get(symbol) || null;
+}
+
+async function binanceBuildFuturesSnapshot(symbol, timeframe){
+  checkBinanceBan('live'); // public data always hits the live host regardless of Live/Demo trading mode — see the base comment below
+  const base = BINANCE_FAPI_BASE.live; // public market data — same regardless of Live/Demo trading mode
+  const { native: m5Interval, fallback } = resolveSnapshotTimeframe('binance', timeframe);
+  const single = (path) => fetchJSON(`${base}${path}?symbol=${symbol}`, 10_000, h => recordBinanceWeight('live', h));
+  const uni = binanceUniverseEntry(symbol);
+  let m5Raw, m15Raw, h1Raw, book, premium, ticker24h;
+  try{
+    [m5Raw, m15Raw, h1Raw, book, premium, ticker24h] = await Promise.all([
+      fetchJSON(`${base}/fapi/v1/klines?symbol=${symbol}&interval=${m5Interval}&limit=150`, 10_000, h => recordBinanceWeight('live', h)),
+      binanceCachedKlines(symbol, '15m', 150, BINANCE_KLINE_15M_TTL_MS),
+      binanceCachedKlines(symbol, '1h', 80, BINANCE_KLINE_1H_TTL_MS),
+      binanceBatchMap('book', '/fapi/v1/ticker/bookTicker', BINANCE_BOOK_TTL_MS).then(m => m.get(symbol) || null).catch(() => null)
+        .then(b => b || single('/fapi/v1/ticker/bookTicker')),
+      binanceBatchMap('premium', '/fapi/v1/premiumIndex', BINANCE_PREMIUM_TTL_MS).then(m => m.get(symbol) || null).catch(() => null)
+        .then(p => p || single('/fapi/v1/premiumIndex')),
+      uni ? Promise.resolve({ quoteVolume: uni.volume24hUsd, lastPrice: uni.lastPrice }) : single('/fapi/v1/ticker/24hr'),
+    ]);
+  }catch(err){
+    recordBinanceBanIfPresent('live', err.message);
+    throw err;
+  }
+
+  const m5 = binanceCandlesFromKline(m5Raw);
+  const m15 = binanceCandlesFromKline(m15Raw);
+  const h1 = binanceCandlesFromKline(h1Raw);
+  if(m5.length < 30 || m15.length < 20 || h1.length < 10){
+    throw new Error(`Not enough Binance kline history for ${symbol} yet (${m5.length}/${m15.length}/${h1.length} m5/m15/h1 candles).`);
+  }
+  if(!book || !book.bidPrice) throw new Error(`No Binance book ticker data for ${symbol}.`);
+
+  const bid = parseFloat(book.bidPrice || '0'), ask = parseFloat(book.askPrice || '0');
+  const spreadPct = (bid > 0 && ask > 0) ? ((ask - bid) / ((ask + bid) / 2)) * 100 : 0.02;
+  const volume24hUsd = parseFloat(ticker24h?.quoteVolume || '0');
+  const liquidityScore = Math.max(5, Math.min(99, Math.round(40 + 45 * Math.min(1, volume24hUsd / 2.2e9))));
+  const fundingRatePct = parseFloat(premium?.lastFundingRate || '0') * 100;
+  const last = parseFloat(premium?.markPrice || ticker24h?.lastPrice || '0');
+
+  return {
+    symbol, price: last || m5[m5.length - 1].c,
+    m5, m15, h1, timeframeFallback: fallback,
+    meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
+  };
+}
+
+// ---- Gate.io USDT-M real market data. Candlestick objects are already
+// chronological and use short keys ({t,o,h,l,c,v}) that happen to
+// already match this app's own candle shape almost exactly. ----
+function gateioCandlesFromKline(raw){
+  if(!Array.isArray(raw)) return [];
+  return raw.map(row => ({
+    t: (parseInt(row.t, 10) || 0) * 1000, o: parseFloat(row.o), h: parseFloat(row.h), l: parseFloat(row.l), c: parseFloat(row.c), v: parseFloat(row.v),
+  }));
+}
+async function gateioBuildFuturesSnapshot(symbol, timeframe){
+  const base = GATEIO_FAPI_BASE.live; // public market data — same regardless of Live/Demo trading mode
+  const contract = toGateioContract(symbol);
+  const { native: m5Interval, fallback } = resolveSnapshotTimeframe('gateio', timeframe);
+  const [m5Raw, m15Raw, h1Raw, tickerRaw] = await Promise.all([
+    fetchJSON(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=${m5Interval}&limit=150`),
+    fetchJSON(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=15m&limit=150`),
+    fetchJSON(`${base}/api/v4/futures/usdt/candlesticks?contract=${contract}&interval=1h&limit=80`),
+    fetchJSON(`${base}/api/v4/futures/usdt/tickers?contract=${contract}`),
+  ]);
+
+  const m5 = gateioCandlesFromKline(m5Raw);
+  const m15 = gateioCandlesFromKline(m15Raw);
+  const h1 = gateioCandlesFromKline(h1Raw);
+  if(m5.length < 30 || m15.length < 20 || h1.length < 10){
+    throw new Error(`Not enough Gate.io kline history for ${symbol} yet (${m5.length}/${m15.length}/${h1.length} m5/m15/h1 candles).`);
+  }
+  const t = Array.isArray(tickerRaw) ? tickerRaw[0] : tickerRaw;
+  if(!t) throw new Error(`No Gate.io ticker data for ${symbol}.`);
+
+  const bid = parseFloat(t.highest_bid || '0'), ask = parseFloat(t.lowest_ask || '0');
+  const last = parseFloat(t.last || '0');
+  const spreadPct = (bid > 0 && ask > 0) ? ((ask - bid) / ((ask + bid) / 2)) * 100 : 0.02;
+  const volume24hUsd = parseFloat(t.volume_24h_quote || t.volume_24h_settle || '0');
+  const liquidityScore = Math.max(5, Math.min(99, Math.round(40 + 45 * Math.min(1, volume24hUsd / 2.2e9))));
+  const fundingRatePct = parseFloat(t.funding_rate || '0') * 100;
+
+  return {
+    symbol, price: last || m5[m5.length - 1].c,
+    m5, m15, h1, timeframeFallback: fallback,
+    meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
+  };
+}
+
+
+// Short cache + request coalescing, same pattern as getMarketsCached
+// above — Live/Demo cycles run every few seconds, but real kline data
+// doesn't need refetching that often, and this keeps a handful of
+// concurrent app instances from each hammering an exchange's public
+// endpoints independently. Keyed by exchange+symbol since the same
+// symbol string can mean different things (or just different data) on
+// different exchanges.
+// ---- MEXC Futures real market data. Kline response is COLUMNAR (parallel
+// arrays: time[], open[], high[], low[], close[], vol[]) rather than an
+// array of candle objects like every other exchange here — needs zipping
+// into the shared {t,o,h,l,c,v} shape. ----
+function mexcCandlesFromKline(raw){
+  if(!raw || !Array.isArray(raw.time)) return [];
+  const out = [];
+  for(let i = 0; i < raw.time.length; i++){
+    out.push({ t: raw.time[i] * 1000, o: raw.open[i], h: raw.high[i], l: raw.low[i], c: raw.close[i], v: raw.vol[i] });
+  }
+  return out;
+}
+async function mexcBuildFuturesSnapshot(symbol, timeframe){
+  const contract = toMexcContract(symbol);
+  const { native: m5Interval, fallback } = resolveSnapshotTimeframe('mexc', timeframe);
+  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=${m5Interval}`),
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min15`),
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/kline/${contract}?interval=Min60`),
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/ticker?symbol=${contract}`),
+  ]);
+
+  const m5 = mexcCandlesFromKline(m5Data && m5Data.data);
+  const m15 = mexcCandlesFromKline(m15Data && m15Data.data);
+  const h1 = mexcCandlesFromKline(h1Data && h1Data.data);
+  if(m5.length < 30 || m15.length < 20 || h1.length < 10){
+    throw new Error(`Not enough MEXC kline history for ${symbol} yet (${m5.length}/${m15.length}/${h1.length} m5/m15/h1 candles).`);
+  }
+  const t = tickerData && tickerData.data;
+  if(!t) throw new Error(`No MEXC ticker data for ${symbol}.`);
+
+  const bid = parseFloat(t.bid1 || '0'), ask = parseFloat(t.ask1 || '0');
+  const spreadPct = (bid > 0 && ask > 0) ? ((ask - bid) / ((ask + bid) / 2)) * 100 : 0.02;
+  const volume24hUsd = parseFloat(t.amount24 || '0'); // already quote-currency turnover
+  const liquidityScore = Math.max(5, Math.min(99, Math.round(40 + 45 * Math.min(1, volume24hUsd / 2.2e9))));
+  const fundingRatePct = parseFloat(t.fundingRate || '0') * 100;
+  const last = parseFloat(t.lastPrice || t.fairPrice || '0');
+
+  return {
+    symbol, price: last || m5[m5.length - 1].c,
+    m5, m15, h1, timeframeFallback: fallback,
+    meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
+  };
+}
+
+const FUTURES_SNAPSHOT_BUILDERS = { bybit: bybitBuildFuturesSnapshot, binance: binanceBuildFuturesSnapshot, gateio: gateioBuildFuturesSnapshot, mexc: mexcBuildFuturesSnapshot, bitget: bitgetBuildFuturesSnapshot };
+const FUTURES_SNAPSHOT_CACHE_TTL_MS = 15_000;
+const futuresSnapshotCache = new Map(); // "exchange:symbol" -> { data, at }
+const futuresSnapshotInFlight = new Map();
+
+async function getFuturesSnapshotCached(exchange, symbol, timeframe){
+  const builder = FUTURES_SNAPSHOT_BUILDERS[exchange];
+  if(!builder) throw new Error(`No real-data snapshot builder for "${exchange}" yet.`);
+  const tf = timeframe || '5m';
+  const key = `${exchange}:${symbol}:${tf}`; // timeframe included — a 3m and a 1h snapshot for the same symbol are genuinely different data, not interchangeable cache hits
+  const now = Date.now();
+  const cached = futuresSnapshotCache.get(key);
+  if(cached && (now - cached.at) < FUTURES_SNAPSHOT_CACHE_TTL_MS) return cached.data;
+  if(futuresSnapshotInFlight.has(key)) return futuresSnapshotInFlight.get(key);
+  const p = (async () => {
+    const data = await builder(symbol, tf);
+    futuresSnapshotCache.set(key, { data, at: Date.now() });
+    return data;
+  })();
+  futuresSnapshotInFlight.set(key, p);
+  try{
+    return await p;
+  } finally {
+    futuresSnapshotInFlight.delete(key);
+  }
+}
+
+app.use('/api/futures/snapshot', rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
+app.get('/api/futures/snapshot', async (req, res) => {
+  const symbol = req.query.symbol;
+  const exchange = String(req.query.exchange || 'bybit');
+  const timeframe = String(req.query.interval || req.query.timeframe || '5m');
+  if(!symbol) return res.status(400).json({ ok:false, message:'symbol is required.' });
+  try{
+    const snap = await getFuturesSnapshotCached(exchange, String(symbol), timeframe);
+    res.set('Cache-Control', 'public, max-age=10');
+    res.json({ ok:true, snapshot: snap, timeframeFallback: !!snap.timeframeFallback });
+  }catch(err){
+    res.status(502).json({ ok:false, message: `Could not fetch ${exchange} market data for ${symbol}: ${err.message}` });
+  }
+});
+
+// =============================================================
+// Backtest: historical OHLCV klines — public endpoints, no API key
+// needed (this is exactly why the Backtest tab can run for anyone, no
+// connected/verified exchange key required, unlike Live/Demo trading).
+// Binance USDT-M futures klines: GET /fapi/v1/klines. Bybit linear
+// klines: GET /v5/market/kline. Both exchanges cap each request to a
+// few hundred/thousand candles, so a wide date range is walked forward
+// in pages and merged here rather than in the browser — keeps the
+// front-end to one request per symbol regardless of range length, and
+// lets results be cached server-side across repeat backtests over the
+// same symbol/interval/range (common — e.g. testing different risk %
+// or strategy combinations against identical price history).
+// MEXC and Gate.io are now wired up too (see fetchMexcFuturesKlines/
+// fetchGateioFuturesKlines below) — added specifically so the Backtest
+// tab can model their real, genuinely-lower published fee rates
+// (0%/0.02% and 0.01%/0.05% — see DEFAULT_FEE_CONFIG, costs.js) against
+// REAL history from those venues, not just Bybit/Binance's own fees
+// applied to Bybit/Binance data. Bitget still isn't wired up (no
+// historical-klines fetcher below yet).
+// =============================================================
+const klineCache = new Map(); // `${exchange}:${symbol}:${interval}:${startMs}:${endMs}` -> { fetchedAt, candles }
+const KLINE_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — candles this far in the past never change, this just bounds cache growth
+const KLINE_CACHE_MAX_ENTRIES = 500; // simple unbounded-growth guard — oldest entries evicted past this
+
+const BINANCE_KLINE_INTERVAL = { '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h' };
+const BACKTEST_INTERVAL_MS = { '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000, '1h': 3_600_000 };
+const BYBIT_KLINE_INTERVAL = { '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60' };
+// MEXC contract kline has no 3-minute granularity at all (Min1/Min5/
+// Min15/Min30/Min60/Hour4/Hour8/Day1/Week1/Month1 — see
+// https://www.mexc.com/api-docs/futures/market-endpoints/get-candlestick-data).
+// Gate.io's futures candlesticks endpoint doesn't offer 3m either
+// (10s/1m/5m/15m/30m/1h/4h/8h/1d/7d/30d). Both fetchers below throw a
+// clear error rather than silently falling back to a different
+// granularity if 3m is requested against either.
+const MEXC_KLINE_INTERVAL = { '5m': 'Min5', '15m': 'Min15', '30m': 'Min30', '1h': 'Min60' };
+const GATEIO_KLINE_INTERVAL = { '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1h' };
+
+// ---- Backtest history: pacing, rate-limit retry, and symbol aliases ----
+// A 30-day 5m backtest of a top-25 list is ~150-250 paged requests from this server's (shared) IP in a few
+// seconds. Bybit answers the overflow with "Too many visits. Exceeded the API Rate Limit." (HTTP 200, retCode
+// 10006) and Binance with 429/418 — which the Backtest tab used to show as "skipped" symbols and, worse, as
+// silently missing history. Every kline request now goes through klineFetch(): it keeps a minimum gap between
+// requests per exchange and retries 429s with backoff (honouring Retry-After).
+const KLINE_MIN_GAP_MS = { binance: 260, bybit: 150, mexc: 120, gateio: 100, bitget: 0 }; // bitget paces itself below
+const klineNextSlot = {};
+async function paceKline(exchange){
+  const gap = KLINE_MIN_GAP_MS[exchange] || 0;
+  if(!gap) return;
+  const now = Date.now();
+  const slot = Math.max(now, klineNextSlot[exchange] || 0);
+  klineNextSlot[exchange] = slot + gap; // reserve the slot synchronously, so concurrent callers queue behind each other
+  if(slot > now) await new Promise(resolve => setTimeout(resolve, slot - now));
+}
+async function klineFetch(exchange, url){
+  let last = null;
+  for(let attempt = 0; attempt < 5; attempt++){
+    await paceKline(exchange);
+    last = await fetch(url);
+    if(last.status !== 429 && last.status !== 418) return last;
+    const ra = parseInt(last.headers.get('retry-after') || '', 10);
+    const waitMs = Number.isFinite(ra) ? Math.min(ra * 1000, 15_000) : Math.min(1000 * 2 ** attempt, 8000);
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+  }
+  return last; // still rate limited after 5 tries — caller turns this into a clear error
+}
+// Thrown when the exchange says the symbol doesn't exist (as opposed to a network/rate-limit failure), so the
+// route can try an alias and the UI can report "not listed" calmly instead of as an error.
+class KlineNotListed extends Error { constructor(msg){ super(msg); this.notListed = true; } }
+
+// Candidate names to try for a requested symbol on an exchange, original first. Exchanges list the same coin
+// under different perpetual names: Binance and Bybit use 1000PEPEUSDT / 1000BONKUSDT (prices are x1000, which
+// doesn't matter to a backtest — everything is relative), Binance uses 1000SHIBUSDT, Bybit uses SHIB1000USDT;
+// MEXC / Gate.io / Bitget use the plain name. So PEPEUSDT/SHIBUSDT/BONKUSDT resolve where they exist under a
+// scaled name, and 1000XUSDT resolves to XUSDT on venues that have no 1000x contract.
+function klineSymbolCandidates(exchange, symbol){
+  const base = symbol.endsWith('USDT') ? symbol.slice(0, -4) : symbol;
+  const out = [symbol];
+  const scaled = /^1000[A-Z0-9]/.test(base);
+  if(exchange === 'binance' || exchange === 'bybit'){
+    if(!scaled) out.push(`1000${base}USDT`);
+    if(exchange === 'bybit' && !scaled) out.push(`${base}1000USDT`);
+  }
+  if(scaled) out.push(`${base.slice(4)}USDT`);
+  return Array.from(new Set(out));
+}
+const klineResolvedSymbol = new Map(); // `${exchange}:${requested}` -> the candidate that worked
+const klineNotListedUntil = new Map(); // `${exchange}:${requested}` -> ms; don't re-probe a name that isn't listed for 30 min
+
+// TRADEABLE_FUTURES_SYMBOLS (engine.js) are always plain "XRPUSDT"-style
+// strings (no separator) — Binance/Bybit want it exactly that way, but
+// MEXC and Gate.io both name USDT-margined contracts with an underscore
+// ("XRP_USDT"). This is the one place that conversion happens; nothing
+// else in the pipeline needs to know either format exists.
+function toUnderscoreSymbol(symbol){
+  return symbol.endsWith('USDT') ? `${symbol.slice(0, -4)}_USDT` : symbol;
+}
+
+// Binance USDT-M klines: with BOTH startTime and endTime set and a window wider than `limit` bars, the
+// endpoint hands back the FIRST `limit` bars from startTime (ascending) — it does NOT anchor to endTime.
+// (Proof from real runs: a "Last 30 days" backtest returned trades dated ~27 days ago, i.e. the oldest
+// ~5.2 days of the window, and every range showed "1500 bars (~5.2d)".) An earlier version of this fetcher
+// assumed the opposite (end-anchored), paged backward from endMs, saw the first page's oldest bar sit at
+// startMs, and stopped after ONE page — so every range longer than ~5.2 days silently got only 1500 bars.
+//
+// This version doesn't depend on which way the exchange anchors: each request asks for a window of at most
+// `limit` bars (startTime..startTime + limit*interval - 1), so start-anchored and end-anchored behaviour are
+// identical, then the cursor walks FORWARD one window at a time until endMs.
+async function fetchBinanceFuturesKlines(symbol, interval, startMs, endMs){
+  const LIMIT = 1500;
+  const stepMs = (BACKTEST_INTERVAL_MS[interval] || 300_000);
+  const seenT = new Set();
+  const out = [];
+  let cursor = startMs;
+  let guard = 0;
+  while(cursor < endMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
+    guard++;
+    const windowEnd = Math.min(endMs, cursor + LIMIT * stepMs - 1);
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${BINANCE_KLINE_INTERVAL[interval]}&startTime=${cursor}&endTime=${windowEnd}&limit=${LIMIT}`;
+    const r = await klineFetch('binance', url);
+    if(!r.ok){
+      let eb = null; try{ eb = await r.json(); }catch(e){ /* body optional */ }
+      if(r.status === 400 && eb && (eb.code === -1121 || /invalid symbol/i.test(eb.msg || ''))) throw new KlineNotListed(`Binance has no ${symbol} perpetual`);
+      throw new Error(`Binance klines HTTP ${r.status}${eb && eb.msg ? ` (${eb.msg})` : ''}`);
+    }
+    const rows = await r.json();
+    if(Array.isArray(rows)){
+      for(const row of rows){
+        const t = row[0];
+        if(t < startMs || t > endMs || seenT.has(t)) continue;
+        seenT.add(t);
+        out.push({ t, o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] });
+      }
+    }
+    // A symbol listed part-way through the range legitimately returns empty windows before its listing date,
+    // so an empty window just advances the cursor instead of ending the fetch.
+    cursor = windowEnd + 1;
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+
+// Bybit's /v5/market/kline does NOT behave like Binance's when a
+// start+end window spans more bars than `limit`: it anchors to `end` and
+// hands back the most recent `limit` candles inside the window, not the
+// oldest ones from `start`. A forward-cursor loop (like Binance's, and
+// like this used to be) therefore only ever fetches one page near
+// `endMs` before its own cursor jumps almost all the way to `endMs` and
+// the loop exits — silently capping every fetch at ~limit bars of the
+// MOST RECENT history, regardless of how far back `startMs` actually
+// asked for. This is what made the Backtest tab show the same small
+// handful of trades clustered on one recent date no matter which date
+// range (7/30/60/90 days) was selected — the extra history was simply
+// never being fetched. Paging backward from `endMs` instead — each
+// request asks for "everything up to this cursor", then moves the
+// cursor to just before the oldest bar that page returned — matches how
+// Bybit actually anchors the window and reliably walks the full range.
+async function fetchBybitLinearKlines(symbol, interval, startMs, endMs){
+  // Anchor-agnostic paging (same approach as the Binance fetcher): every request covers a window of at most
+  // `limit` bars, so it makes no difference whether the endpoint returns the oldest or the newest bars of an
+  // over-wide window. The cursor walks FORWARD one window at a time until endMs.
+  const LIMIT = 1000;
+  const stepMs = BACKTEST_INTERVAL_MS[interval] || 300_000;
+  const seenT = new Set();
+  const out = [];
+  let cursor = startMs;
+  let guard = 0;
+  while(cursor < endMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
+    guard++;
+    const windowEnd = Math.min(endMs, cursor + LIMIT * stepMs - 1);
+    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${encodeURIComponent(symbol)}&interval=${BYBIT_KLINE_INTERVAL[interval]}&start=${cursor}&end=${windowEnd}&limit=${LIMIT}`;
+    let data = null;
+    for(let attempt = 0; attempt < 6; attempt++){
+      const r = await klineFetch('bybit', url);
+      if(!r.ok) throw new Error(`Bybit klines HTTP ${r.status}${r.status === 403 ? ' (this server\'s IP is temporarily rate-limited by Bybit — retry in a few minutes)' : ''}`);
+      data = await r.json();
+      if(data.retCode === 0) break;
+      // Bybit reports rate limiting as HTTP 200 + retCode 10006/10018 — back off and retry instead of giving up.
+      if(data.retCode === 10006 || data.retCode === 10018 || /too many visits|rate limit/i.test(data.retMsg || '')){
+        await new Promise(resolve => setTimeout(resolve, 1200 * (attempt + 1)));
+        continue;
+      }
+      if(/symbol is? invalid|invalid symbol/i.test(data.retMsg || '')) throw new KlineNotListed(`Bybit has no ${symbol} perpetual`);
+      throw new Error(`Bybit klines error: ${data.retMsg || data.retCode}`);
+    }
+    if(!data || data.retCode !== 0) throw new Error(`Bybit klines error: ${(data && data.retMsg) || 'rate limited'} (still rate limited after retries)`);
+    const rows = (data.result && data.result.list) || [];
+    for(const row of rows){ // Bybit returns newest-first; order doesn't matter here, everything is sorted at the end
+      const t = +row[0];
+      if(t < startMs || t > endMs || seenT.has(t)) continue;
+      seenT.add(t);
+      out.push({ t, o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] });
+    }
+    cursor = windowEnd + 1; // an empty window (pair not listed yet that far back) just moves on
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+
+// MEXC contract kline: GET /api/v1/contract/kline/{symbol}, start/end in
+// UNIX SECONDS (not ms — different from Binance/Bybit above), response
+// is columnar (parallel time[]/open[]/high[]/low[]/close[]/vol[] arrays,
+// not one object per candle) capped at 2000 points/request.
+//
+// Two fixes applied here, both confirmed directly against MEXC's current
+// official docs (mexc.com/api-docs/futures/market-endpoints/get-candlestick-data,
+// checked 2026-09):
+//
+// 1. Domain: this was hitting contract.mexc.com, which MEXC decommissioned
+//    for the Futures API around 2026-01-14 in favor of api.mexc.com (see
+//    the comment above mexcFuturesSignedRequest, further down this file,
+//    which already correctly uses api.mexc.com for the signed/account
+//    endpoints) — this fetcher just hadn't been updated to match. The
+//    Introduction page's own "Access URL" section now lists only
+//    https://api.mexc.com as the whole Futures API's domain.
+//
+// 2. Pagination direction: MEXC's own docs state that when ONLY `end` is
+//    given, "the 2000 data points closest to end are returned" — i.e.
+//    this endpoint is anchored to the end of the window, same as Bybit's
+//    kline endpoint (see fetchBybitLinearKlines's comment above for the
+//    full explanation of why that matters). The previous version here
+//    paged FORWARD from `start` while holding `end` fixed at the final
+//    requested end time on every single page. If MEXC's "both start and
+//    end given" behavior anchors the same way its documented "end only"
+//    behavior does (which the docs don't state outright, but is the more
+//    likely reading given the above), every page would return roughly
+//    the same ~2000 bars closest to that fixed `end`, regardless of
+//    `start` — and the loop's own stuck-page guard would then exit after
+//    just one page, silently capping every fetch at ~2000 bars (~6.9
+//    days at 5m) of the MOST RECENT history, no matter how far back
+//    `startMs` actually asked for. That matches the reported symptom
+//    exactly: a 14-day Backtest run returning the same trades as a
+//    7-day one, because both requests were silently truncated to the
+//    same ~6.9-day tail window ending at `endMs`. Paging BACKWARD from
+//    `end` instead — the same approach as fetchBybitLinearKlines —
+//    matches how the endpoint is documented to anchor and reliably
+//    walks the full requested range either way.
+async function fetchMexcFuturesKlines(symbol, interval, startMs, endMs){
+  const mexcInterval = MEXC_KLINE_INTERVAL[interval];
+  if(!mexcInterval) throw new Error(`MEXC's contract kline API has no ${interval} granularity — try 5m, 15m, 30m, or 1h.`);
+  const mexcSymbol = toUnderscoreSymbol(symbol);
+  // Anchor-agnostic paging (same approach as the Binance fetcher): each request covers a window of at most 2000
+  // bars, so it doesn't matter whether MEXC returns the oldest or newest bars of an over-wide window. The cursor
+  // walks FORWARD one window at a time (seconds, as MEXC expects) until endMs.
+  const LIMIT = 2000;
+  const stepSec = Math.round((BACKTEST_INTERVAL_MS[interval] || 300_000) / 1000);
+  const endSec = Math.floor(endMs / 1000);
+  const seenT = new Set();
+  const out = [];
+  let cursorSec = Math.floor(startMs / 1000);
+  let guard = 0;
+  while(cursorSec < endSec && guard < 500){ // guard: a stuck/misbehaving page should never spin forever
+    guard++;
+    const windowEndSec = Math.min(endSec, cursorSec + (LIMIT - 1) * stepSec);
+    const url = `https://api.mexc.com/api/v1/contract/kline/${mexcSymbol}?interval=${mexcInterval}&start=${cursorSec}&end=${windowEndSec}`;
+    const r = await klineFetch('mexc', url);
+    if(!r.ok) throw new Error(`MEXC klines HTTP ${r.status}`);
+    const body = await r.json();
+    if(!body || body.success !== true) break; // an error reply (e.g. unknown contract) — stop; the route reports "not available"
+    const d = body.data;
+    if(d && Array.isArray(d.time)){
+      d.time.forEach((tSec, i) => {
+        const t = tSec * 1000;
+        if(t < startMs || t > endMs || seenT.has(t)) return;
+        seenT.add(t);
+        out.push({ t, o: +d.open[i], h: +d.high[i], l: +d.low[i], c: +d.close[i], v: +(d.vol ? d.vol[i] : 0) });
+      });
+    }
+    cursorSec = windowEndSec + 1; // an empty window (pair not listed yet that far back) just moves on
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+
+// Gate.io futures candlesticks: GET /api/v4/futures/usdt/candlesticks,
+// from/to in UNIX SECONDS, one object per candle ({t,o,h,l,c,v}, all
+// but t as strings), capped at 2000 points/request. Same forward-paging
+// shape as MEXC's fetcher just above.
+const GATEIO_INTERVAL_SECONDS = { '5m': 300, '15m': 900, '30m': 1800, '1h': 3600 };
+const GATEIO_PAGE_LIMIT = 2000; // Gate.io's own documented per-request cap
+
+async function fetchGateioFuturesKlines(symbol, interval, startMs, endMs){
+  const gateInterval = GATEIO_KLINE_INTERVAL[interval];
+  if(!gateInterval) throw new Error(`Gate.io's futures candlestick API has no ${interval} granularity — try 5m, 15m, 30m, or 1h.`);
+  const intervalSec = GATEIO_INTERVAL_SECONDS[interval];
+  const gateSymbol = toUnderscoreSymbol(symbol);
+  const toSecFinal = Math.floor(endMs / 1000);
+  const out = [];
+  let cursorFromSec = Math.floor(startMs / 1000);
+  let guard = 0;
+  // Unlike Binance/MEXC (which silently cap an over-wide request at
+  // their own per-page max and just hand back what fits), Gate.io's own
+  // docs warn the caller must not exceed the limit when specifying
+  // from/to/interval together — it 400s the WHOLE request instead of
+  // capping it. A 30-day range at 5m is ~8,640 candles against a 2,000
+  // cap, so passing the full range's `to` on every page (the original
+  // bug here) got every single symbol rejected outright. Each page's
+  // `to` is now bounded to at most GATEIO_PAGE_LIMIT candles past its
+  // own `from`, so no single request can ever ask for more than the
+  // documented max.
+  while(cursorFromSec < toSecFinal && guard < 500){
+    guard++;
+    const pageToSec = Math.min(toSecFinal, cursorFromSec + (GATEIO_PAGE_LIMIT - 1) * intervalSec);
+    const url = `https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=${encodeURIComponent(gateSymbol)}&from=${cursorFromSec}&to=${pageToSec}&interval=${gateInterval}`;
+    const r = await klineFetch('gateio', url);
+    if(!r.ok) throw new Error(`Gate.io klines HTTP ${r.status}`);
+    const rows = await r.json();
+    if(!Array.isArray(rows) || !rows.length){ cursorFromSec = pageToSec + intervalSec; continue; } // no trades in this window — skip forward rather than getting stuck
+    let lastT = cursorFromSec - intervalSec;
+    for(const row of rows){
+      const tSec = Number(row.t);
+      const t = tSec * 1000;
+      if(t >= startMs && t <= endMs){
+        out.push({ t, o: +row.o, h: +row.h, l: +row.l, c: +row.c, v: +(row.v ?? 0) });
+      }
+      if(tSec > lastT) lastT = tSec;
+    }
+    cursorFromSec = lastT >= cursorFromSec ? lastT + intervalSec : pageToSec + intervalSec; // always move forward, even on a stuck/empty-in-range page
+  }
+  const seenT = new Set();
+  const dedup = out.filter(c => (seenT.has(c.t) ? false : (seenT.add(c.t), true)));
+  dedup.sort((a, b) => a.t - b.t);
+  return dedup;
+}
+
+// Bitget USDT-M futures history: GET /api/v2/mix/market/history-candles, up to 200 rows per request, rows are
+// [ts(ms), open, high, low, close, baseVolume, quoteVolume]. Like Binance/Bybit/MEXC above, a window wider than
+// one page anchors to `endTime` (Bitget's own examples/community tooling page BACKWARD from the end), so this
+// pages backward from endMs. Only `endTime` is sent on purpose: sending `startTime` too risks a "time range too
+// large" rejection on long ranges, and the loop stops on its own once a page reaches startMs. A 30-day 5m
+// range is ~8,640 bars = ~44 pages per symbol, so pages are paced (Bitget's public market-data limit is ~20
+// requests/sec/IP) and a rate-limited page (HTTP 429 / code 429xx) gets one short retry.
+const BITGET_KLINE_INTERVAL = { '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m', '1h': '1H' };
+const BITGET_HISTORY_PAGE_LIMIT = 200;
+const BITGET_HISTORY_PAGE_DELAY_MS = 120;
+const sleepMs = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function fetchBitgetFuturesKlines(symbol, interval, startMs, endMs){
+  const granularity = BITGET_KLINE_INTERVAL[interval];
+  if(!granularity) throw new Error(`Bitget's futures candle API has no ${interval} granularity — try 3m, 5m, 15m, 30m, or 1h.`);
+  const pages = []; // oldest page unshifted to the front, so pages[0] is the oldest chunk once the loop ends
+  let cursorEnd = endMs;
+  let guard = 0;
+  while(cursorEnd > startMs && guard < 1000){ // guard: a stuck/misbehaving page should never spin forever
+    guard++;
+    const url = `${BITGET_BASE}/api/v2/mix/market/history-candles?symbol=${encodeURIComponent(symbol)}&productType=USDT-FUTURES&granularity=${granularity}&endTime=${cursorEnd}&limit=${BITGET_HISTORY_PAGE_LIMIT}`;
+    let body = null;
+    for(let attempt = 0; attempt < 2; attempt++){
+      const r = await fetch(url);
+      if(r.status === 429 && attempt === 0){ await sleepMs(1000); continue; }
+      if(!r.ok) throw new Error(`Bitget klines HTTP ${r.status}`);
+      body = await r.json();
+      if(body && /^429/.test(String(body.code)) && attempt === 0){ await sleepMs(1000); continue; }
+      break;
+    }
+    if(!body || body.code !== '00000') throw new Error(`Bitget klines: ${(body && body.msg) || 'unexpected response'}`);
+    const rows = Array.isArray(body.data) ? body.data : [];
+    if(!rows.length) break;
+    const chron = rows
+      .map(row => ({ t: parseInt(row[0], 10), o: +row[1], h: +row[2], l: +row[3], c: +row[4], v: +row[5] }))
+      .filter(c => Number.isFinite(c.t) && Number.isFinite(c.c))
+      .sort((a, b) => a.t - b.t); // sorted defensively — don't rely on the page's own order
+    if(!chron.length) break;
+    pages.unshift(chron);
+    const oldestT = chron[0].t;
+    if(oldestT <= startMs) break; // this page already reached back to (or past) the requested start — done
+    if(oldestT >= cursorEnd) break; // stuck page (didn't move backward at all) — stop rather than loop forever
+    cursorEnd = oldestT - 1; // next page: everything up to just before this page's oldest bar
+    await sleepMs(BITGET_HISTORY_PAGE_DELAY_MS);
+  }
+  const seenT = new Set();
+  const out = [];
+  for(const page of pages){
+    for(const c of page){
+      if(c.t < startMs || c.t > endMs || seenT.has(c.t)) continue;
+      seenT.add(c.t);
+      out.push(c);
+    }
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+
+const BACKTEST_KLINE_FETCHERS = {
+  binance: fetchBinanceFuturesKlines, bybit: fetchBybitLinearKlines,
+  mexc: fetchMexcFuturesKlines, gateio: fetchGateioFuturesKlines, bitget: fetchBitgetFuturesKlines,
+};
+
+app.post('/api/backtest/klines', async (req, res) => {
+  const { exchange, symbol, startMs, endMs } = req.body || {};
+  // Was hard-locked to 5m outright (every strategy's entry decision runs
+  // on 5m everywhere, so backtests couldn't silently drift from that).
+  // Still the default, and the six-strategy Backtest tab never sends
+  // anything else, so nothing changes for it. Trading Bots Grid's own
+  // backtest (runTradingBotsGridBacktest) is a genuinely different case
+  // though: its multi-timeframe context (m15/h1) is aggregated straight
+  // from whatever base candles it's given, not fetched separately at a
+  // fixed interval the way the live snapshot builders above do — so,
+  // unlike live Grid trading, there's no architectural reason its
+  // backtest has to stay on 5m specifically. An explicit, validated
+  // interval in the request body is now honored; anything missing or
+  // not in the allowed set still falls back to 5m exactly as before.
+  const ALLOWED_BACKTEST_INTERVALS = new Set(['3m', '5m', '15m', '30m', '1h']);
+  const interval = ALLOWED_BACKTEST_INTERVALS.has(req.body?.interval) ? req.body.interval : '5m';
+  const fetcher = BACKTEST_KLINE_FETCHERS[exchange];
+  if(!fetcher) return res.json({ ok: false, message: `Historical data isn't wired up for "${exchange}" yet — ${Object.keys(BACKTEST_KLINE_FETCHERS).join('/')} are supported.` });
+  if(!symbol || !startMs || !endMs || endMs <= startMs){
+    return res.json({ ok: false, message: 'symbol, startMs and endMs (with endMs after startMs) are all required.' });
+  }
+  const cacheKey = `${exchange}:${symbol}:${interval}:${startMs}:${endMs}`;
+  const cached = klineCache.get(cacheKey);
+  if(cached && Date.now() - cached.fetchedAt < KLINE_CACHE_TTL_MS){
+    return res.json({ ok: true, candles: cached.candles, cached: true });
+  }
+  const nlKey = `${exchange}:${symbol}`;
+  if((klineNotListedUntil.get(nlKey) || 0) > Date.now()){
+    return res.json({ ok: false, notListed: true, message: `${symbol} isn't listed as a USDT perpetual on ${exchange}` });
+  }
+  try{
+    // Try the resolved alias first (if a previous request found one), then the requested name, then the aliases.
+    const known = klineResolvedSymbol.get(nlKey);
+    const candidates = Array.from(new Set([...(known ? [known] : []), ...klineSymbolCandidates(exchange, symbol)]));
+    let candles = null, used = symbol, lastErr = null, sawRealError = false;
+    for(const cand of candidates){
+      try{
+        const got = await fetcher(cand, interval, startMs, endMs);
+        if(got.length){ candles = got; used = cand; break; }
+      }catch(err){
+        lastErr = err;
+        if(!err.notListed) sawRealError = true; // rate limit / network / etc — not a "this symbol doesn't exist" answer
+      }
+    }
+    if(!candles){
+      if(lastErr && sawRealError) throw lastErr;
+      // Every candidate was either "no such symbol" or came back empty: the pair simply isn't available there.
+      klineNotListedUntil.set(nlKey, Date.now() + 30 * 60_000);
+      return res.json({ ok: false, notListed: true, message: `${symbol} isn't available as a USDT perpetual on ${exchange} (tried ${candidates.join(', ')})` });
+    }
+    if(used !== symbol) klineResolvedSymbol.set(nlKey, used);
+    if(klineCache.size >= KLINE_CACHE_MAX_ENTRIES){
+      const oldestKey = klineCache.keys().next().value;
+      klineCache.delete(oldestKey);
+    }
+    klineCache.set(cacheKey, { fetchedAt: Date.now(), candles });
+    res.json({ ok: true, candles, cached: false, resolvedSymbol: used });
+  }catch(err){
+    res.json({ ok: false, message: `Could not fetch ${exchange} history for ${symbol}: ${err.message}` });
+  }
+});
+
+// ---- Gate.io: currency pair details (precision, minimum amounts) ----
+async function gateioSymbolFilters(base, symbol){
+  const res = await fetch(`${base}/api/v4/spot/currency_pairs/${symbol}`);
+  const s = await res.json().catch(() => null);
+  if(!s || !s.id) throw new Error(`Unknown Gate.io pair ${symbol}`);
+  return {
+    amountPrecision: parseInt(s.amount_precision, 10) || 8,   // base-side decimal places
+    minBaseAmount: parseFloat(s.min_base_amount || '0'),
+    minQuoteAmount: parseFloat(s.min_quote_amount || '0'),
+  };
+}
+
+function floorToDecimals(value, decimals){
+  const factor = Math.pow(10, decimals);
+  return Math.floor(value * factor) / factor;
+}
+
+// Gate.io market orders are IOC (immediate-or-cancel) and take a single
+// "amount" field whose meaning flips with side: for a market BUY, amount is
+// the quote currency to spend (mirrors Binance's quoteOrderQty); for a
+// market SELL, amount is the base currency to sell. There is no separate
+// "quoteOrderQty" parameter the way Binance/MEXC have one, so amountKind
+// here maps straight onto that side-dependent meaning rather than a
+// distinct API field.
+// Docs: https://www.gate.io/docs/developers/apiv4/en/#create-an-order
+async function placeGateioOrder(mode, apiKey, secretKey, { symbol, side, amountKind, amount }){
+  const base = GATEIO_BASE[mode] || GATEIO_BASE.live;
+  const gateSide = side.toLowerCase(); // 'buy' | 'sell'
+  let sendAmount = amount;
+  if(amountKind === 'base'){
+    const filters = await gateioSymbolFilters(base, symbol);
+    sendAmount = floorToDecimals(amount, filters.amountPrecision);
+    const floorAgainst = gateSide === 'buy' ? filters.minQuoteAmount : filters.minBaseAmount;
+    if(sendAmount <= 0 || sendAmount < floorAgainst){
+      throw new VerifyRejected(`Amount ${amount} ${symbol} rounds down to ${sendAmount}, below the exchange minimum (${floorAgainst}) — nothing was sent.`);
+    }
+  }
+  // amountKind:'quote' is only ever used for the BUY leg with a plain
+  // quote-currency spend amount, which is exactly what Gate.io's "amount"
+  // already means for a market buy — no rounding needed there, same as
+  // Binance's quoteOrderQty path.
+
+  const created = await gateioSignedRequest('POST', '/api/v4/spot/orders', '', {
+    currency_pair: symbol, side: gateSide, type: 'market',
+    account: 'spot', time_in_force: 'ioc',
+    amount: sendAmount.toString(),
+  }, apiKey, secretKey, mode);
+
+  const orderId = created.id;
+  if(!orderId) throw new VerifyRejected('Gate.io accepted the order but returned no id to confirm the fill with.');
+  if(created.status !== 'closed'){
+    throw new VerifyRejected(`Order did not fully fill (status: ${created.status}). No further legs will be attempted automatically.`);
+  }
+  const filledBaseQty = parseFloat(created.filled_amount || created.amount || '0');
+  const filledQuoteQty = parseFloat(created.filled_total || '0');
+  return {
+    orderId,
+    filledBaseQty,
+    filledQuoteQty,
+    avgPrice: filledBaseQty > 0 ? filledQuoteQty / filledBaseQty : parseFloat(created.avg_deal_price || '0'),
+  };
+}
+
+// ---- Bitget: symbol precision (base-side decimal places, minimum trade
+// amount, minimum USDT notional). Same endpoint the market-data proxy
+// already uses (fetchBitgetMarkets below) — public, live-only, no mode
+// needed since Bitget's demo mode shares Live's host and market data. ----
+async function bitgetSymbolFilters(symbol){
+  const res = await fetch(`${BITGET_BASE}/api/v2/spot/public/symbols?symbol=${symbol}`);
+  const data = await res.json().catch(() => null);
+  const s = data && Array.isArray(data.data) ? data.data[0] : null;
+  if(!s) throw new Error(`Unknown Bitget pair ${symbol}`);
+  return {
+    quantityPrecision: parseInt(s.quantityPrecision, 10) || 6,
+    minTradeAmount: parseFloat(s.minTradeAmount || '0'),
+    minTradeUSDT: parseFloat(s.minTradeUSDT || '0'),
+  };
+}
+
+// Bitget's market orders follow the same side-dependent "size" convention
+// as Binance/MEXC/Gate.io: for a market BUY, size is the quote amount to
+// spend; for a market SELL, size is the base amount to sell.
+//
+// The one genuinely different thing about Bitget here: place-order's
+// response is just `{orderId, clientOid}` — no fill data at all, unlike
+// every other exchange in this file, which return executed
+// quantity/price synchronously. Bitget's own Best Practices Guide says as
+// much: "the order may not have reached the matching system yet, and
+// users need to further check the order status for confirmation." So
+// this polls GET /api/v2/spot/trade/orderInfo after placing until it
+// reports filled (or we give up) — a market order on a liquid pair
+// should resolve in well under a second, but there is a real, new-to-
+// this-exchange failure mode here that the other four don't have: an
+// order that filled but hasn't been confirmed as such within the poll
+// window comes back as a thrown error, which the caller (executeCycleReal)
+// treats as a failed leg and attempts to unwind. That's the safe
+// direction to fail in — but a genuinely slow confirmation could trigger
+// an unwind against an order that actually did fill, worth knowing before
+// trusting this with real size.
+async function placeBitgetOrder(mode, apiKey, secretKey, { symbol, side, amountKind, amount }, passphrase){
+  const bgSide = side.toLowerCase(); // 'buy' | 'sell'
+  let sendSize = amount;
+  if(amountKind === 'base'){
+    const filters = await bitgetSymbolFilters(symbol);
+    sendSize = floorToDecimals(amount, filters.quantityPrecision);
+    if(sendSize <= 0 || sendSize < filters.minTradeAmount){
+      throw new VerifyRejected(`Amount ${amount} ${symbol} rounds down to ${sendSize}, below the exchange minimum (${filters.minTradeAmount}) — nothing was sent.`);
+    }
+  }
+  // amountKind:'quote' (the BUY leg) is exactly what Bitget's market-buy
+  // "size" already means — no rounding needed there.
+
+  const placed = await bitgetSignedRequest('POST', '/api/v2/spot/trade/place-order', '', {
+    symbol, side: bgSide, orderType: 'market', force: 'gtc', size: sendSize.toString(),
+  }, apiKey, secretKey, passphrase, mode);
+  const orderId = placed && placed.orderId;
+  if(!orderId) throw new VerifyRejected('Bitget accepted the order but returned no id to confirm the fill with.');
+
+  const POLL_ATTEMPTS = 6, POLL_DELAY_MS = 400;
+  let info = null;
+  for(let i = 0; i < POLL_ATTEMPTS; i++){
+    await new Promise(r => setTimeout(r, POLL_DELAY_MS));
+    const orderInfoData = await bitgetSignedRequest('GET', '/api/v2/spot/trade/orderInfo', `orderId=${orderId}`, null, apiKey, secretKey, passphrase, mode);
+    info = Array.isArray(orderInfoData) ? orderInfoData[0] : orderInfoData;
+    if(info && (info.status === 'filled' || info.status === 'cancelled' || info.status === 'rejected')) break;
+  }
+  if(!info || info.status !== 'filled'){
+    throw new VerifyRejected(`Order placed (id ${orderId}) but did not confirm as filled within ${(POLL_ATTEMPTS * POLL_DELAY_MS / 1000).toFixed(1)}s (status: ${info ? info.status : 'unknown'}). No further legs will be attempted automatically.`);
+  }
+  const filledBaseQty = parseFloat(info.baseVolume || '0');
+  const filledQuoteQty = parseFloat(info.quoteVolume || '0');
+  return {
+    orderId,
+    filledBaseQty,
+    filledQuoteQty,
+    avgPrice: filledBaseQty > 0 ? filledQuoteQty / filledBaseQty : parseFloat(info.priceAvg || '0'),
+  };
+}
+
+// =============================================================
+// Gate.io USDT-M Futures — the third Live/Demo exchange.
+//
+// Two things genuinely different from Bybit/Binance here, worth stating
+// plainly: (1) Gate.io futures runs on its own base domain entirely
+// separate from spot — fx-api.gateio.ws / fx-api-testnet.gateio.ws, not
+// api.gateio.ws / api-testnet.gateapi.io — confirmed from Gate's own API
+// changelog ("Domain of base URLs are changed to fx-api.gateio.ws...").
+// Reusing the spot base here would silently hit the wrong host. (2)
+// Gate.io futures orders are sized in whole CONTRACTS, not base-asset
+// quantity — each contract represents a fixed amount of the underlying
+// (quanto_multiplier, from the contract's own public info), so the
+// engine's computed base qty has to be converted to a contract count
+// before it means anything to this API. This implementation floors to
+// whole contracts (no partial-contract sizing) since that's correct for
+// the large majority of contracts, which don't support decimal sizes.
+//
+// TP/SL uses Gate's price-triggered order API (POST
+// /futures/{settle}/price_orders) — two separate trigger orders after
+// the entry fills, same "separate calls" shape as Binance rather than
+// Bybit's one-call inline attachment, using order_type:
+// plan-close-long-position / plan-close-short-position so each trigger
+// closes the WHOLE position regardless of size, the same closePosition
+// semantic as the other two exchanges. Gate does have a newer, less
+// battle-tested inline TP/SL field on the entry order itself
+// (tpsl_tp_trigger_price/tpsl_sl_trigger_price per their changelog) —
+// deliberately not used here: the trigger-order API is older, more
+// thoroughly documented, and this is not code to guess on.
+// =============================================================
+const GATEIO_FAPI_BASE = { live: 'https://fx-api.gateio.ws', demo: 'https://fx-api-testnet.gateio.ws' };
+
+async function gateioFuturesSignedRequest(method, path, query, body, apiKey, secretKey, mode){
+  const base = GATEIO_FAPI_BASE[mode] || GATEIO_FAPI_BASE.live;
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const bodyStr = body ? JSON.stringify(body) : '';
+  const bodyHash = sha512Hex(bodyStr);
+  const signString = `${method}\n${path}\n${query}\n${bodyHash}\n${timestamp}`;
+  const sign = hmacSha512Hex(secretKey, signString);
+  const res = await fetch(`${base}${path}${query ? '?' + query : ''}`, {
+    method,
+    headers: {
+      KEY: apiKey, Timestamp: timestamp, SIGN: sign,
+      Accept: 'application/json',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    ...(body ? { body: bodyStr } : {}),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok){
+    throw new VerifyRejected(data && data.message ? data.message : `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+// USDT-M symbol like "BTCUSDT" -> Gate.io's underscore-separated contract
+// name "BTC_USDT". Every symbol on this app's futures watchlist ends in
+// USDT, so this is a fixed suffix split rather than a lookup table.
+function toGateioContract(symbol){
+  return symbol.endsWith('USDT') ? `${symbol.slice(0, -4)}_USDT` : symbol;
+}
+// The reverse — Gate.io's "BTC_USDT" back to this app's "BTCUSDT" — needed
+// once symbols are being discovered FROM Gate.io (gateioFuturesUniverse
+// below) rather than only ever converted the other way.
+function fromGateioContract(contract){
+  return String(contract || '').replace('_', '');
+}
+
+async function gateioFuturesBalance(mode, apiKey, secretKey){
+  const account = await gateioFuturesSignedRequest('GET', '/api/v4/futures/usdt/accounts', '', null, apiKey, secretKey, mode);
+  return account && account.available != null ? parseFloat(account.available) : null;
+}
+
+async function gateioContractInfo(mode, contract){
+  const base = GATEIO_FAPI_BASE[mode] || GATEIO_FAPI_BASE.live;
+  const res = await fetch(`${base}/api/v4/futures/usdt/contracts/${contract}`);
+  const data = await res.json().catch(() => null);
+  if(!data || !data.name) throw new Error(`Unknown Gate.io futures contract ${contract}`);
+  return {
+    quantoMultiplier: parseFloat(data.quanto_multiplier || '1'), // base-asset amount represented by 1 contract
+    orderSizeMin: parseInt(data.order_size_min, 10) || 1,        // in contracts
+    leverageMax: parseFloat(data.leverage_max || '20'),
+  };
+}
+
+async function gateioFuturesSetLeverage(mode, apiKey, secretKey, contract, leverage){
+  await gateioFuturesSignedRequest('POST', `/api/v4/futures/usdt/positions/${contract}/leverage`, `leverage=${leverage}`, null, apiKey, secretKey, mode);
+}
+
+async function placeGateioFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice }){
+  const contract = toGateioContract(symbol);
+  const info = await gateioContractInfo(mode, contract);
+
+  // Convert base-asset qty to a whole number of contracts.
+  const contracts = Math.floor(rawQty / info.quantoMultiplier);
+  if(contracts < info.orderSizeMin){
+    throw new VerifyRejected(`Size ${rawQty} ${symbol} converts to ${contracts} contract(s) (1 contract = ${info.quantoMultiplier} ${symbol.replace('USDT','')}), below the exchange minimum (${info.orderSizeMin}) — nothing was sent.`);
+  }
+  const clampedLeverage = Math.min(leverage, info.leverageMax);
+  const signedSize = side === 'buy' ? contracts : -contracts; // Gate.io encodes direction in the sign of size, not a separate side field
+
+  await gateioFuturesSetLeverage(mode, apiKey, secretKey, contract, clampedLeverage);
+
+  const order = await gateioFuturesSignedRequest('POST', '/api/v4/futures/usdt/orders', '', {
+    contract, size: signedSize, price: '0', tif: 'ioc', text: 't-nxtgen', // price:"0" + tif:"ioc" = market order
+  }, apiKey, secretKey, mode);
+  if(!order || order.status !== 'finished' || parseFloat(order.size || '0') === parseFloat(order.left ?? order.size ?? '0')){
+    // A market IOC order that didn't finish (fully or partially cancelled
+    // for lack of liquidity) is not something to treat as a live position.
+    if(!order || order.status !== 'finished'){
+      throw new VerifyRejected(`Order did not finish (status: ${order ? order.status : 'unknown'}). No further legs will be attempted automatically.`);
+    }
+  }
+  const filledContracts = Math.abs(parseFloat(order.size || '0') - parseFloat(order.left || '0')) || Math.abs(parseFloat(order.size || '0'));
+  const filledQty = filledContracts * info.quantoMultiplier;
+  const avgPrice = parseFloat(order.fill_price || order.price || '0');
+
+  const closeOrderType = side === 'buy' ? 'plan-close-long-position' : 'plan-close-short-position';
+  // rule 1 = triggers when price >= trigger.price; rule 2 = triggers when price <= trigger.price.
+  const slRule = side === 'buy' ? 2 : 1;
+  const tpRule = side === 'buy' ? 1 : 2;
+  try{
+    await gateioFuturesSignedRequest('POST', '/api/v4/futures/usdt/price_orders', '', {
+      initial: { contract, size: 0, price: '0', tif: 'ioc', reduce_only: true },
+      trigger: { strategy_type: 0, price_type: 0, price: rawStopLossPrice.toString(), rule: slRule },
+      order_type: closeOrderType,
+    }, apiKey, secretKey, mode);
+    await gateioFuturesSignedRequest('POST', '/api/v4/futures/usdt/price_orders', '', {
+      initial: { contract, size: 0, price: '0', tif: 'ioc', reduce_only: true },
+      trigger: { strategy_type: 0, price_type: 0, price: rawTakeProfitPrice.toString(), rule: tpRule },
+      order_type: closeOrderType,
+    }, apiKey, secretKey, mode);
+  }catch(err){
+    throw new VerifyRejected(`Position OPENED (${symbol} ${side} ${filledQty} @ ${avgPrice}, order ${order.id}) but attaching stop-loss/take-profit FAILED: ${err.message}. This position has no protective orders on it — check Gate.io directly and close or protect it manually.`);
+  }
+
+  return { orderId: order.id, filledQty, avgPrice, leverage: clampedLeverage, stopLossPrice: rawStopLossPrice, takeProfitPrice: rawTakeProfitPrice };
+}
+
+async function getGateioFuturesPosition(mode, apiKey, secretKey, symbol){
+  const contract = toGateioContract(symbol);
+  const pos = await gateioFuturesSignedRequest('GET', `/api/v4/futures/usdt/positions/${contract}`, '', null, apiKey, secretKey, mode);
+  const size = pos ? parseFloat(pos.size || '0') : 0;
+  if(!pos || size === 0) return null;
+  return {
+    size: Math.abs(size), side: size > 0 ? 'Buy' : 'Sell', avgPrice: parseFloat(pos.entry_price || '0'),
+    markPrice: parseFloat(pos.mark_price || '0'), unrealisedPnl: parseFloat(pos.unrealised_pnl || '0'),
+    leverage: parseFloat(pos.leverage || '0'), liqPrice: pos.liq_price ? parseFloat(pos.liq_price) : null,
+  };
+}
+
+// Manually flattens an open Gate.io position using its dedicated
+// close:true order flag (size must be 0 when set — Gate.io then closes
+// whatever's actually open on that contract itself, in whichever
+// direction that requires, rather than this app having to compute and
+// sign an opposite-direction size). Also best-effort cancels any
+// resting SL/TP price-triggered orders left on the contract (see
+// placeGateioFuturesOrder) now that the position is flat.
+async function closeGateioFuturesPosition(mode, apiKey, secretKey, symbol){
+  const contract = toGateioContract(symbol);
+  const pos = await getGateioFuturesPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) throw new VerifyRejected(`No open ${symbol} position found on Gate.io — nothing to close.`);
+  const order = await gateioFuturesSignedRequest('POST', '/api/v4/futures/usdt/orders', '', {
+    contract, size: 0, price: '0', tif: 'ioc', close: true, text: 't-nxtgen-close',
+  }, apiKey, secretKey, mode);
+  await gateioFuturesSignedRequest('DELETE', '/api/v4/futures/usdt/price_orders', `contract=${contract}`, null, apiKey, secretKey, mode).catch(() => {});
+  return { orderId: order && order.id };
+}
+
+// No single "closed PnL" endpoint — sums the account ledger's pnl entries
+// for this contract since the position was opened, matching the same
+// approach used for Binance (see getBinanceFuturesRealizedResult).
+async function getGateioFuturesRealizedResult(mode, apiKey, secretKey, symbol, passphrase, openedAtMs){
+  const contract = toGateioContract(symbol);
+  const sinceSec = Math.floor((openedAtMs || (Date.now() - 24 * 60 * 60 * 1000)) / 1000);
+  const rows = await gateioFuturesSignedRequest('GET', '/api/v4/futures/usdt/account_book', `contract=${contract}&from=${sinceSec}&limit=200`, null, apiKey, secretKey, mode);
+  if(!Array.isArray(rows) || rows.length === 0) return null;
+  const relevant = rows.filter(r => ['pnl', 'fee', 'fund'].includes(r.type));
+  if(relevant.length === 0) return null;
+  const grossPnl = relevant.filter(r => r.type === 'pnl').reduce((a, r) => a + parseFloat(r.change || '0'), 0);
+  const feesUsd = relevant.filter(r => r.type === 'fee').reduce((a, r) => a + parseFloat(r.change || '0'), 0); // negative
+  const fundingUsd = relevant.filter(r => r.type === 'fund').reduce((a, r) => a + parseFloat(r.change || '0'), 0);
+  const closedPnl = grossPnl + feesUsd + fundingUsd;
+  return { closedPnl, grossPnl, feesUsd, fundingUsd, entries: relevant.length };
+}
+
+// =============================================================
+// MEXC Futures — the fourth and final Live/Demo exchange, LIVE ONLY (see
+// below for why there's no Demo option here, unlike the other three).
+//
+// Worth stating plainly, because it's a real difference from the other
+// three exchanges: MEXC only launched programmatic Futures order
+// placement via API on 2026-03-31 — about five months before this was
+// written. That's not a reason to distrust the mechanics below (the
+// official docs for it are thorough and internally consistent, and
+// everything here is sourced directly from them, not guessed by analogy
+// to MEXC's older, more established spot API), but it does mean this
+// exchange has the least real-world mileage of the four — the smallest
+// body of other bots/tooling having already found and fixed the rough
+// edges. Treat it accordingly.
+//
+// Also worth noting: MEXC's Futures API domain itself changed as
+// recently as 2026-01-14 (contract.mexc.com -> api.mexc.com, old domain
+// fully decommissioned within a week) — confirmed from MEXC's own
+// announcement, not assumed from older docs/tooling that would now point
+// at a dead host.
+//
+// No Demo mode: MEXC's Futures Demo Trading exists, but only as a
+// website/app feature (with its own separate "receive demo coins" flow)
+// — nothing in MEXC's current API documentation exposes a demo/testnet
+// base URL the way Binance/Bybit/Gate.io each do. Same situation as
+// MEXC spot, which has never had Live/Demo toggle in this app either.
+//
+// Simpler than the other three in one respect: MEXC's order-create
+// endpoint takes stopLossPrice/takeProfitPrice AND leverage directly —
+// one call opens the position with both already attached, no separate
+// leverage-setting or exit-order calls needed.
+// =============================================================
+const MEXC_FAPI_BASE = 'https://api.mexc.com';
+
+async function mexcFuturesSignedRequest(method, path, params, apiKey, secretKey){
+  const timestamp = String(Date.now());
+  let paramString, url;
+  if(method === 'GET'){
+    const qs = new URLSearchParams(params || {});
+    paramString = qs.toString(); // already key=value&key=value in insertion order; MEXC just wants sorted-dictionary-order concatenation
+    url = `${MEXC_FAPI_BASE}${path}${paramString ? '?' + paramString : ''}`;
+  } else {
+    paramString = params ? JSON.stringify(params) : '';
+    url = `${MEXC_FAPI_BASE}${path}`;
+  }
+  const target = apiKey + timestamp + paramString;
+  const signature = hmacSha256Hex(secretKey, target);
+  const res = await fetch(url, {
+    method,
+    headers: {
+      ApiKey: apiKey, 'Request-Time': timestamp, Signature: signature,
+      'Content-Type': 'application/json',
+    },
+    ...(method !== 'GET' ? { body: paramString } : {}),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok || !data || data.success !== true){
+    throw new VerifyRejected(data && data.message ? data.message : `HTTP ${res.status}`);
+  }
+  return data.data;
+}
+
+async function mexcFuturesBalance(mode, apiKey, secretKey){
+  const asset = await mexcFuturesSignedRequest('GET', '/api/v1/private/account/asset/USDT', null, apiKey, secretKey);
+  return asset && asset.availableBalance != null ? parseFloat(asset.availableBalance) : null;
+}
+
+function toMexcContract(symbol){
+  return symbol.endsWith('USDT') ? `${symbol.slice(0, -4)}_USDT` : symbol;
+}
+function fromMexcContract(contract){
+  return String(contract || '').replace('_', '');
+}
+
+async function mexcContractInfo(contract){
+  const res = await fetch(`${MEXC_FAPI_BASE}/api/v1/contract/detail/country?symbol=${contract}`);
+  const data = await res.json().catch(() => null);
+  if(!data || !data.success || !data.data) throw new Error(`Unknown MEXC futures contract ${contract}`);
+  const c = data.data;
+  return {
+    contractSize: parseFloat(c.contractSize || '1'), volUnit: parseFloat(c.volUnit || '1'),
+    minVol: parseFloat(c.minVol || '1'), maxLeverage: parseFloat(c.maxLeverage || '20'),
+    priceUnit: parseFloat(c.priceUnit || '0.01'),
+  };
+}
+
+async function placeMexcFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawEntryPrice, rawStopLossPrice, rawTakeProfitPrice }){
+  const contract = toMexcContract(symbol);
+  const info = await mexcContractInfo(contract);
+
+  // Convert base-asset qty to whole contracts (volUnit step, floored).
+  const contracts = Math.floor((rawQty / info.contractSize) / info.volUnit) * info.volUnit;
+  if(contracts < info.minVol){
+    throw new VerifyRejected(`Size ${rawQty} ${symbol} converts to ${contracts} contract(s) (1 contract = ${info.contractSize} ${symbol.replace('USDT', '')}), below the exchange minimum (${info.minVol}) — nothing was sent.`);
+  }
+  const roundToTick = p => Math.round(p / info.priceUnit) * info.priceUnit;
+  const entryPrice = roundToTick(rawEntryPrice);
+  const stopLossPrice = roundToTick(rawStopLossPrice);
+  const takeProfitPrice = roundToTick(rawTakeProfitPrice);
+  const clampedLeverage = Math.min(Math.round(leverage), info.maxLeverage);
+  const mexcSide = side === 'buy' ? 1 : 3; // 1 = open long, 3 = open short (this app never sends close orders through this path)
+
+  const order = await mexcFuturesSignedRequest('POST', '/api/v1/private/order/create', {
+    symbol: contract, price: entryPrice, // required even for type:5 (market) — used as a price-protection reference, not a limit
+    vol: contracts, leverage: clampedLeverage, side: mexcSide, type: 5, openType: 1,
+    stopLossPrice, takeProfitPrice, lossTrend: 2, profitTrend: 2, // trigger off fair (mark) price, not last price
+  }, apiKey, secretKey);
+  const orderId = order && order.orderId;
+  if(!orderId) throw new VerifyRejected('MEXC accepted the order but returned no orderId to confirm the fill with.');
+
+  // Order-create's own response is just {orderId, ts} — no fill data —
+  // so confirm the position actually opened by reading it back, same
+  // polling need as Bitget/Bybit had for their own order-ack-only responses.
+  const deadline = Date.now() + 6000;
+  let filled = null;
+  while(Date.now() < deadline){
+    await new Promise(r => setTimeout(r, 400));
+    const positions = await mexcFuturesSignedRequest('GET', '/api/v1/private/position/open_positions', { symbol: contract }, apiKey, secretKey);
+    const pos = Array.isArray(positions) ? positions.find(p => p.symbol === contract && p.state === 1) : null;
+    if(pos && parseFloat(pos.holdVol) > 0){ filled = pos; break; }
+  }
+  if(!filled){
+    throw new VerifyRejected(`Order ${orderId} was accepted but no open position confirmed within 6s — check MEXC directly before assuming anything about it.`);
+  }
+  const filledQty = parseFloat(filled.holdVol) * info.contractSize;
+  const avgPrice = parseFloat(filled.openAvgPrice || filled.holdAvgPrice || '0');
+  return { orderId, filledQty, avgPrice, leverage: clampedLeverage, stopLossPrice, takeProfitPrice };
+}
+
+async function getMexcFuturesPosition(mode, apiKey, secretKey, symbol){
+  const contract = toMexcContract(symbol);
+  const positions = await mexcFuturesSignedRequest('GET', '/api/v1/private/position/open_positions', { symbol: contract }, apiKey, secretKey);
+  const pos = Array.isArray(positions) ? positions.find(p => p.symbol === contract && p.state === 1) : null;
+  if(!pos || parseFloat(pos.holdVol) === 0) return null;
+  return {
+    size: parseFloat(pos.holdVol), side: pos.positionType === 1 ? 'Buy' : 'Sell',
+    avgPrice: parseFloat(pos.holdAvgPrice || '0'), markPrice: null,
+    unrealisedPnl: parseFloat(pos.unRealizedPnl || '0'), leverage: parseFloat(pos.leverage || '0'),
+    liqPrice: pos.liquidatePrice ? parseFloat(pos.liquidatePrice) : null,
+  };
+}
+
+// Manually flattens an open MEXC position — side 4 closes an existing
+// long, side 2 closes an existing short (MEXC's side enum: 1/3 open
+// long/short, 2/4 close short/long), sized to the position's own current
+// holdVol (already in contracts, matching what placeMexcFuturesOrder
+// itself sends — see getMexcFuturesPosition's size field) rather than
+// anything cached client-side.
+async function closeMexcFuturesPosition(mode, apiKey, secretKey, symbol){
+  const contract = toMexcContract(symbol);
+  const pos = await getMexcFuturesPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) throw new VerifyRejected(`No open ${symbol} position found on MEXC — nothing to close.`);
+  const closeSide = pos.side === 'Buy' ? 4 : 2;
+  const order = await mexcFuturesSignedRequest('POST', '/api/v1/private/order/create', {
+    symbol: contract, vol: Math.round(pos.size), side: closeSide, type: 5, openType: 1, reduceOnly: true,
+  }, apiKey, secretKey);
+  const orderId = order && order.orderId;
+  if(!orderId) throw new VerifyRejected('MEXC accepted the close order but returned no orderId to confirm with.');
+  return { orderId };
+}
+
+async function getMexcFuturesRealizedResult(mode, apiKey, secretKey, symbol, passphrase, openedAtMs){
+  const contract = toMexcContract(symbol);
+  const history = await mexcFuturesSignedRequest('GET', '/api/v1/private/position/list/history_positions', {
+    symbol: contract, start_time: String(openedAtMs || (Date.now() - 24 * 60 * 60 * 1000)), page_num: '1', page_size: '5',
+  }, apiKey, secretKey);
+  const list = Array.isArray(history) ? history : (history && history.resultList) || [];
+  const row = list[0]; // most recent closed position for this contract
+  if(!row) return null;
+  const grossPnl = parseFloat(row.closeProfitLoss || '0');
+  const feesUsd = -Math.abs(parseFloat(row.fee || row.closeFee || row.openFee || '0')); // MEXC reports fee as a positive magnitude; normalize to a negative delta like the other exchanges
+  const closedPnl = parseFloat(row.realised != null ? row.realised : (grossPnl + feesUsd));
+  return { closedPnl, grossPnl, feesUsd, entries: 1 };
+}
+
+// =============================================================
+// Bitget Futures (USDT-M) — the fifth and final Live/Demo exchange.
+// Same host, same signing, same paptrading:1 demo mechanism as Bitget
+// spot above — reuses bitgetSignedRequest as-is, just against
+// /api/v2/mix/... paths with productType:"USDT-FUTURES" instead of
+// /api/v2/spot/... paths. No separate futures domain to get wrong here,
+// unlike MEXC and Gate.io.
+//
+// Demo mode carries the same caveat noted for Bitget spot: the
+// paptrading:1 header is documented as Bitget's general mechanism for
+// their Demo API keys, but its exact behavior specifically on these mix
+// (futures) endpoints hasn't been independently verified end-to-end
+// against a real Demo account from this codebase's own testing — same
+// honesty bar as everywhere else here. Start in Demo and confirm a few
+// trades look right on Bitget's own UI before trusting it further.
+//
+// One genuinely under-confirmed piece, flagged rather than silently
+// assumed: the exact field names on Get Contract Config
+// (/api/v2/mix/market/contracts) for size step / minimum size / price
+// precision weren't pinned down with the same certainty as everything
+// else here (Bitget's spot symbols endpoint uses different field names
+// than its docs example responses for this one suggest futures might).
+// bitgetFuturesSymbolFilters below tries several plausible field names
+// defensively rather than trusting a single guess.
+// =============================================================
+async function bitgetFuturesSymbolFilters(symbol){
+  const res = await fetch(`${BITGET_BASE}/api/v2/mix/market/contracts?productType=USDT-FUTURES&symbol=${symbol}`);
+  const json = await res.json().catch(() => null);
+  const s = json && Array.isArray(json.data) ? json.data[0] : null;
+  if(!s) throw new Error(`Unknown Bitget futures symbol ${symbol}`);
+  // volumePlace (decimal places) is the field named in Bitget's own
+  // futures docs; sizeMultiplier is kept as a fallback in case a
+  // response ever uses the other naming — see the uncertainty note above.
+  const sizeStep = s.volumePlace != null ? Math.pow(10, -parseInt(s.volumePlace, 10)) : parseFloat(s.sizeMultiplier || '0.001');
+  return {
+    sizeStep,
+    minSize: parseFloat(s.minTradeNum || '0.001'),
+    pricePrecision: parseInt(s.pricePlace, 10) || 2,
+    maxLeverage: parseFloat(s.maxLever || s.maxLeverage || '20'),
+  };
+}
+
+async function bitgetFuturesBalance(mode, apiKey, secretKey, passphrase){
+  const data = await bitgetSignedRequest('GET', '/api/v2/mix/account/accounts', 'productType=USDT-FUTURES', null, apiKey, secretKey, passphrase, mode);
+  const usdt = Array.isArray(data) ? data.find(a => String(a.marginCoin || '').toUpperCase() === 'USDT') : null;
+  return usdt ? parseFloat(usdt.available || '0') : null;
+}
+
+async function placeBitgetFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice }, passphrase){
+  const filters = await bitgetFuturesSymbolFilters(symbol);
+  const size = floorToStep(rawQty, filters.sizeStep);
+  if(size <= 0 || size < filters.minSize){
+    throw new VerifyRejected(`Size ${rawQty} ${symbol} rounds down to ${size}, below the exchange minimum (${filters.minSize}) — nothing was sent.`);
+  }
+  const roundPrice = p => Number(p.toFixed(filters.pricePrecision));
+  const stopLossPrice = roundPrice(rawStopLossPrice);
+  const takeProfitPrice = roundPrice(rawTakeProfitPrice);
+  const clampedLeverage = Math.min(Math.round(leverage), filters.maxLeverage);
+
+  await bitgetSignedRequest('POST', '/api/v2/mix/account/set-leverage', '', {
+    symbol, productType: 'USDT-FUTURES', marginCoin: 'USDT', leverage: String(clampedLeverage),
+  }, apiKey, secretKey, passphrase, mode);
+
+  const order = await bitgetSignedRequest('POST', '/api/v2/mix/order/place-order', '', {
+    symbol, productType: 'USDT-FUTURES', marginMode: 'isolated', marginCoin: 'USDT',
+    size: size.toString(), side, tradeSide: 'open', orderType: 'market', force: 'gtc',
+    presetStopSurplusPrice: takeProfitPrice.toString(), presetStopLossPrice: stopLossPrice.toString(),
+  }, apiKey, secretKey, passphrase, mode);
+  const orderId = order && order.orderId;
+  if(!orderId) throw new VerifyRejected('Bitget accepted the order but returned no orderId to confirm the fill with.');
+
+  // place-order's own response is just {orderId, clientOid} — no fill
+  // data — so poll order detail until it confirms filled, same pattern
+  // already used for Bitget spot above.
+  const deadline = Date.now() + 6000;
+  let filled = null;
+  while(Date.now() < deadline){
+    await new Promise(r => setTimeout(r, 400));
+    const detail = await bitgetSignedRequest('GET', '/api/v2/mix/order/detail', `symbol=${symbol}&orderId=${orderId}&productType=USDT-FUTURES`, null, apiKey, secretKey, passphrase, mode).catch(() => null);
+    if(detail && detail.state === 'filled'){ filled = detail; break; }
+    if(detail && ['cancelled', 'rejected'].includes(detail.state)){
+      throw new VerifyRejected(`Order ${detail.state} before filling. No position was opened.`);
+    }
+  }
+  if(!filled){
+    throw new VerifyRejected(`Order ${orderId} was accepted but did not confirm as filled within 6s — check Bitget directly before assuming anything about the position.`);
+  }
+  return {
+    orderId, filledQty: parseFloat(filled.baseVolume || size), avgPrice: parseFloat(filled.priceAvg || '0'),
+    leverage: clampedLeverage, stopLossPrice, takeProfitPrice,
+  };
+}
+
+async function getBitgetFuturesPosition(mode, apiKey, secretKey, symbol, passphrase){
+  const data = await bitgetSignedRequest('GET', '/api/v2/mix/position/single-position', `symbol=${symbol}&productType=USDT-FUTURES&marginCoin=USDT`, null, apiKey, secretKey, passphrase, mode);
+  const pos = Array.isArray(data) ? data[0] : null;
+  const total = pos ? parseFloat(pos.total || '0') : 0;
+  if(!pos || total === 0) return null;
+  return {
+    size: total, side: pos.holdSide === 'long' ? 'Buy' : 'Sell', avgPrice: parseFloat(pos.openPriceAvg || '0'),
+    markPrice: parseFloat(pos.markPrice || '0'), unrealisedPnl: parseFloat(pos.unrealizedPL || '0'),
+    leverage: parseFloat(pos.leverage || '0'), liqPrice: pos.liquidationPrice ? parseFloat(pos.liquidationPrice) : null,
+  };
+}
+
+// Manually flattens an open Bitget position using Bitget's own dedicated
+// close-positions endpoint (closes everything open on this symbol/side
+// itself, rather than this app computing an opposite-direction market
+// order) — holdSide tells it which side to close, read fresh from the
+// position rather than anything cached client-side.
+async function closeBitgetFuturesPosition(mode, apiKey, secretKey, symbol, passphrase){
+  const pos = await getBitgetFuturesPosition(mode, apiKey, secretKey, symbol, passphrase);
+  if(!pos) throw new VerifyRejected(`No open ${symbol} position found on Bitget — nothing to close.`);
+  const holdSide = pos.side === 'Buy' ? 'long' : 'short';
+  const result = await bitgetSignedRequest('POST', '/api/v2/mix/order/close-positions', '', {
+    symbol, productType: 'USDT-FUTURES', marginCoin: 'USDT', holdSide,
+  }, apiKey, secretKey, passphrase, mode);
+  const first = result && Array.isArray(result.successList) ? result.successList[0] : null;
+  return { orderId: first ? (first.orderId || null) : null };
+}
+
+// No single "closed PnL" endpoint — sums the account bill ledger's
+// realized-P&L and fee entries for this symbol since the position
+// opened, same approach used for Binance/Gate.io/MEXC.
+async function getBitgetFuturesRealizedResult(mode, apiKey, secretKey, symbol, passphrase, openedAtMs){
+  const startTime = String(openedAtMs || (Date.now() - 24 * 60 * 60 * 1000));
+  const data = await bitgetSignedRequest('GET', '/api/v2/mix/account/bill', `symbol=${symbol}&productType=USDT-FUTURES&startTime=${startTime}&endTime=${Date.now()}&limit=100`, null, apiKey, secretKey, passphrase, mode);
+  const bills = data && Array.isArray(data.bills) ? data.bills : (Array.isArray(data) ? data : []);
+  if(bills.length === 0) return null;
+  const relevant = bills.filter(b => ['open_long', 'close_long', 'open_short', 'close_short', 'contract_settle_fee'].includes(b.businessType));
+  if(relevant.length === 0) return null;
+  const grossPnl = relevant.filter(b => ['open_long', 'close_long', 'open_short', 'close_short'].includes(b.businessType)).reduce((a, b) => a + parseFloat(b.amount || '0'), 0);
+  const feesUsd = relevant.reduce((a, b) => a + parseFloat(b.fee || '0'), 0); // Bitget reports a fee alongside every bill entry, regardless of businessType
+  const fundingUsd = relevant.filter(b => b.businessType === 'contract_settle_fee').reduce((a, b) => a + parseFloat(b.amount || '0'), 0);
+  const closedPnl = grossPnl + feesUsd + fundingUsd;
+  return { closedPnl, grossPnl, feesUsd, fundingUsd, entries: relevant.length };
+}
+
+// ---- Bitget Futures real market data. Klines use the same "candles"
+// terminology and array-row shape as several other exchanges here. ----
+function bitgetFuturesCandlesFromKline(raw){
+  if(!Array.isArray(raw)) return [];
+  return raw.map(row => ({
+    t: parseInt(row[0], 10), o: parseFloat(row[1]), h: parseFloat(row[2]), l: parseFloat(row[3]), c: parseFloat(row[4]), v: parseFloat(row[5]),
+  }));
+}
+async function bitgetBuildFuturesSnapshot(symbol, timeframe){
+  const base = BITGET_BASE;
+  const { native: m5Interval, fallback } = resolveSnapshotTimeframe('bitget', timeframe);
+  const [m5Data, m15Data, h1Data, tickerData] = await Promise.all([
+    fetchJSON(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=${m5Interval}&limit=150`),
+    fetchJSON(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=15m&limit=150`),
+    fetchJSON(`${base}/api/v2/mix/market/candles?symbol=${symbol}&productType=USDT-FUTURES&granularity=1H&limit=80`),
+    fetchJSON(`${base}/api/v2/mix/market/ticker?symbol=${symbol}&productType=USDT-FUTURES`),
+  ]);
+
+  const m5 = bitgetFuturesCandlesFromKline(m5Data && m5Data.data);
+  const m15 = bitgetFuturesCandlesFromKline(m15Data && m15Data.data);
+  const h1 = bitgetFuturesCandlesFromKline(h1Data && h1Data.data);
+  if(m5.length < 30 || m15.length < 20 || h1.length < 10){
+    throw new Error(`Not enough Bitget kline history for ${symbol} yet (${m5.length}/${m15.length}/${h1.length} m5/m15/h1 candles).`);
+  }
+  const t = tickerData && Array.isArray(tickerData.data) ? tickerData.data[0] : null;
+  if(!t) throw new Error(`No Bitget ticker data for ${symbol}.`);
+
+  const bid = parseFloat(t.bidPr || '0'), ask = parseFloat(t.askPr || '0');
+  const spreadPct = (bid > 0 && ask > 0) ? ((ask - bid) / ((ask + bid) / 2)) * 100 : 0.02;
+  const volume24hUsd = parseFloat(t.usdtVolume || t.quoteVolume || '0');
+  const liquidityScore = Math.max(5, Math.min(99, Math.round(40 + 45 * Math.min(1, volume24hUsd / 2.2e9))));
+  const fundingRatePct = parseFloat(t.fundingRate || '0') * 100;
+  const last = parseFloat(t.lastPr || '0');
+
+  return {
+    symbol, price: last || m5[m5.length - 1].c,
+    m5, m15, h1, timeframeFallback: fallback,
+    meta: { spreadPct, volume24hUsd, liquidityScore, fundingRatePct, openInterestUsd: 0 },
+  };
+}
+
+const ORDER_PLACERS = { binance: placeBinanceOrder, bybit: placeBybitOrder, mexc: placeMexcOrder, gateio: placeGateioOrder, bitget: placeBitgetOrder };
+
+
+
+
+// =============================================================
+// Binance USDⓈ-M Futures — the second Live/Demo exchange (after Bybit).
+// Reuses hmacSha256Hex + the X-MBX-APIKEY header scheme already proven
+// for Binance spot, and binanceAssetBalance/verifyBinance's account
+// balance path doesn't apply here — futures has its own wallet, queried
+// separately below (binanceFuturesBalance).
+//
+// The one thing that made this NOT a copy-paste of the Bybit version:
+// Binance does not support attaching a stop-loss/take-profit to a market
+// order the way Bybit does. As of a Binance API change on 2025-12-09,
+// conditional orders (STOP_MARKET/TAKE_PROFIT_MARKET) also can't go
+// through the regular order endpoint at all anymore — they 404/reject
+// with "-4120, use the Algo Order API instead". So opening a position
+// here is three signed calls, not one: the market entry, then a
+// STOP_MARKET algo order and a TAKE_PROFIT_MARKET algo order, both with
+// closePosition:true (close the whole thing, not a fixed quantity) and
+// workingType:MARK_PRICE (trigger off mark price, harder to wick-hunt
+// than last-traded price). Same safety property as Bybit's native
+// TP/SL either way: Binance enforces the exit, not this server watching
+// a price feed in a loop.
+// =============================================================
+const BINANCE_FAPI_BASE = { live: 'https://fapi.binance.com', demo: 'https://testnet.binancefuture.com' };
+
+async function binanceFuturesSignedRequest(method, path, params, apiKey, secretKey, mode){
+  checkBinanceBan(mode);
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const qs = new URLSearchParams({ ...params, timestamp: String(Date.now()), recvWindow: '5000' });
+  const signature = hmacSha256Hex(secretKey, qs.toString());
+  qs.set('signature', signature);
+  const url = method === 'GET' ? `${base}${path}?${qs.toString()}` : `${base}${path}`;
+  const res = await fetch(url, {
+    method,
+    headers: { 'X-MBX-APIKEY': apiKey, ...(method !== 'GET' ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}) },
+    ...(method !== 'GET' ? { body: qs.toString() } : {}),
+  });
+  recordBinanceWeight(mode, res.headers);
+  const data = await res.json().catch(() => null);
+  if(!res.ok || (data && typeof data.code === 'number' && data.code < 0)){
+    const message = data && data.msg ? data.msg : `HTTP ${res.status}`;
+    recordBinanceBanIfPresent(mode, message);
+    throw new VerifyRejected(message);
+  }
+  return data;
+}
+
+async function binanceFuturesBalance(mode, apiKey, secretKey){
+  // Previously also called /fapi/v3/positionRisk first purely to give a
+  // clearer permissions error before the real balance call — but that
+  // doubled the request weight of every single balance poll (this runs
+  // once per Live/Demo cycle whenever no position is open, i.e. very
+  // frequently) for a marginal error-message improvement. /fapi/v2/account
+  // itself already returns a clear permissions error on a spot-only key,
+  // so the probe call is gone; this halves Binance weight usage for the
+  // single most-frequent call in the Live/Demo loop.
+  const account = await binanceFuturesSignedRequest('GET', '/fapi/v2/account', {}, apiKey, secretKey, mode);
+  const usdt = (account.assets || []).find(a => a.asset === 'USDT');
+  return usdt ? parseFloat(usdt.availableBalance) : null;
+}
+
+// USDⓈ-M futures' GET /fapi/v1/exchangeInfo takes NO symbol parameter (Binance's docs list none and its own
+// connector sends none) — the old `?symbol=` was silently ignored, so `symbols[0]` was always the FIRST listed
+// contract (BTCUSDT) and every pair was sized/rounded with BTCUSDT's step and precision. That is exactly what
+// produces "-1111 Precision is over the maximum defined for this asset" on any pair whose real quantity step
+// is coarser than 0.001 (or whose tick differs from BTC's). So: fetch the full list once, index it by symbol,
+// cache it (rules change on the order of days), and look the pair up properly. Per base URL, because the demo
+// (testnet) host has its own list.
+const BINANCE_FUTURES_INFO_TTL_MS = 30 * 60_000;
+const binanceFuturesInfoCache = {}; // base -> { atMs, bySymbol: Map, pending }
+
+const decimalsOf = (n) => {
+  const str = String(n);
+  if(/e-/i.test(str)) return parseInt(str.split(/e-/i)[1], 10) + ((str.split(/e-/i)[0].split('.')[1] || '').length);
+  return (str.split('.')[1] || '').length;
+};
+
+function buildBinanceFuturesFilters(s){
+  const f = (type) => (s.filters || []).find(x => x.filterType === type);
+  const lot = f('LOT_SIZE'), mlot = f('MARKET_LOT_SIZE'), price = f('PRICE_FILTER'), notional = f('MIN_NOTIONAL');
+  // Entry and TP legs are MARKET-type orders, which are checked against MARKET_LOT_SIZE when it is present;
+  // use the coarser step / larger minimum of the two so a quantity satisfies both.
+  const steps = [lot, mlot].filter(Boolean).map(x => parseFloat(x.stepSize)).filter(x => x > 0);
+  const qtyStep = steps.length ? Math.max(...steps) : Math.pow(10, -(s.quantityPrecision ?? 3));
+  const minQty = Math.max(0, ...[lot, mlot].filter(Boolean).map(x => parseFloat(x.minQty) || 0));
+  const tickSize = price && parseFloat(price.tickSize) > 0 ? parseFloat(price.tickSize) : Math.pow(10, -(s.pricePrecision ?? 2));
+  const pricePrecision = decimalsOf(tickSize);
+  // Round to a multiple of the TICK (not just to N decimals) — a tick of 0.05 or 0.5 rejects a price that is
+  // merely rounded to 2 decimals with "-4014 price not increased by tick size".
+  const roundPrice = (p) => {
+    const ticks = Math.round(p / tickSize);
+    return Number((ticks * tickSize).toFixed(pricePrecision));
+  };
+  return {
+    qtyStep, minQty, tickSize, pricePrecision, roundPrice,
+    minNotional: notional ? parseFloat(notional.notional) : 0,
+  };
+}
+
+async function binanceFuturesSymbolFilters(base, symbol){
+  let c = binanceFuturesInfoCache[base];
+  if(!c || Date.now() - c.atMs > BINANCE_FUTURES_INFO_TTL_MS){
+    if(!c) c = binanceFuturesInfoCache[base] = { atMs: 0, bySymbol: new Map(), pending: null };
+    if(!c.pending){
+      c.pending = (async () => {
+        const res = await fetch(`${base}/fapi/v1/exchangeInfo`);
+        const data = await res.json().catch(() => null);
+        if(!data || !Array.isArray(data.symbols)) throw new Error(`Could not read Binance futures exchange rules (HTTP ${res.status}).`);
+        const m = new Map();
+        for(const sym of data.symbols) m.set(sym.symbol, buildBinanceFuturesFilters(sym));
+        c.bySymbol = m; c.atMs = Date.now();
+      })().finally(() => { c.pending = null; });
+    }
+    try{ await c.pending; }
+    catch(err){ if(!c.bySymbol.size) throw err; /* stale rules beat none */ }
+  }
+  const filters = c.bySymbol.get(symbol);
+  if(!filters) throw new Error(`Unknown Binance futures symbol ${symbol}`);
+  return filters;
+}
+
+async function binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage){
+  await binanceFuturesSignedRequest('POST', '/fapi/v1/leverage', { symbol, leverage: String(Math.round(leverage)) }, apiKey, secretKey, mode);
+}
+
+// Cached read of the account's hedge-mode flag (binanceGridCheckHedgeMode,
+// defined in the Grid section further down this file) — needed here too
+// because once a person switches their Binance account to hedge mode
+// (to use NxTGen Grid — see that section's header comment on why this
+// app never does that switch itself), EVERY order on the account must
+// include `positionSide`, including these six-strategy functions' own
+// orders on whatever OTHER symbols they're trading on the same account.
+// Cached for a few minutes since this rarely changes and every one of
+// these functions would otherwise cost an extra signed call per order.
+const binanceHedgeModeCache = new Map(); // `${mode}:${apiKey}` -> { value, checkedAt }
+const BINANCE_HEDGE_MODE_CACHE_TTL_MS = 5 * 60 * 1000;
+async function getCachedBinanceHedgeMode(mode, apiKey, secretKey){
+  const key = `${mode}:${apiKey}`;
+  const cached = binanceHedgeModeCache.get(key);
+  if(cached && Date.now() - cached.checkedAt < BINANCE_HEDGE_MODE_CACHE_TTL_MS) return cached.value;
+  const value = await binanceGridCheckHedgeMode(mode, apiKey, secretKey).catch(() => false); // fail closed to one-way assumption — matches what every account defaults to
+  binanceHedgeModeCache.set(key, { value, checkedAt: Date.now() });
+  return value;
+}
+
+
+// TP/SL shape (partial take-profit structure — TP1 30% / TP2 30% /
+// TP3 40%, see tpLevels below): the SL is one STOP_MARKET conditional
+// order with closePosition:true (unchanged from before — closePosition
+// means "close whatever's currently open", so it stays correct on its
+// own as TP1/TP2 shrink the position, no resubmission needed until the
+// breakeven move after TP2 — see moveBinanceStopToBreakeven). Each TP
+// leg is now its OWN TAKE_PROFIT_MARKET conditional order: the first
+// two carry a fixed reduceOnly quantity (30% each), and the last uses
+// closePosition:true instead of a qty so it sweeps whatever's actually
+// left (funding/rounding drift) rather than a qty that could drift a
+// dust amount short of the true remaining size. If tpLevels isn't
+// supplied, falls back to the original single-TP behavior
+// (rawTakeProfitPrice, one closePosition TP) for callers that haven't
+// migrated yet. NOTE: conditional trigger orders (STOP_MARKET /
+// TAKE_PROFIT_MARKET) go through /fapi/v1/algoOrder here, not the plain
+// /fapi/v1/order endpoint — see the file-level comment above this
+// section for why (a Binance API change on 2025-12-09 broke the old
+// path). The fixed-qty + reduceOnly combination on that same endpoint
+// for TP1/TP2 hasn't been exercised in this codebase before (only
+// closePosition-style single-TP orders had been) — verify on Binance
+// Futures Testnet before trusting it with real size.
+async function placeBinanceFuturesOrder(mode, apiKey, secretKey, { symbol, side, rawQty, leverage, rawStopLossPrice, rawTakeProfitPrice, tpLevels }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+
+  const qty = floorToStep(rawQty, filters.qtyStep);
+  if(qty <= 0 || qty < filters.minQty){
+    throw new VerifyRejected(`Size ${rawQty} ${symbol} rounds down to ${qty}, below the exchange minimum (${filters.minQty}) — nothing was sent.`);
+  }
+  const roundPrice = p => filters.roundPrice(p);
+  const roundQty = q => floorToStep(q, filters.qtyStep);
+  const stopLossPrice = roundPrice(rawStopLossPrice);
+  const exitSide = side === 'BUY' ? 'SELL' : 'BUY'; // TP/SL close the position, so they trade the opposite direction from entry
+  const hedgeOn = await getCachedBinanceHedgeMode(mode, apiKey, secretKey);
+  const positionSide = side === 'BUY' ? 'LONG' : 'SHORT'; // only meaningful/sent when hedgeOn
+
+  await binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage);
+
+  let order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+    symbol, side, type: 'MARKET', quantity: qty.toString(), newOrderRespType: 'RESULT',
+    ...(hedgeOn ? { positionSide } : {}),
+  }, apiKey, secretKey, mode);
+  // MARKET orders should return the filled result synchronously with
+  // newOrderRespType:RESULT — but if avgPrice ever comes back empty/zero
+  // (edge case under heavy load), fall back to polling the order once,
+  // same defensive pattern used for the exchanges that never return fill
+  // data synchronously at all.
+  if(!order || !(parseFloat(order.avgPrice) > 0)){
+    await new Promise(r => setTimeout(r, 500));
+    order = await binanceFuturesSignedRequest('GET', '/fapi/v1/order', { symbol, orderId: order.orderId }, apiKey, secretKey, mode);
+  }
+  if(!order || order.status !== 'FILLED'){
+    throw new VerifyRejected(`Order did not fully fill (status: ${order ? order.status : 'unknown'}). No further legs will be attempted automatically.`);
+  }
+  const filledQty = parseFloat(order.executedQty);
+  const avgPrice = parseFloat(order.avgPrice);
+
+  // Entry is live — now attach the exit orders. If any of these fail,
+  // the position may be open with NO (or only partial) protection,
+  // which is worse than the order never having been placed at all, so
+  // this surfaces as a clearly-labeled partial-failure rather than a
+  // generic order error.
+  let slAlgoId = null;
+  const tpOrderIds = [];
+  const placedLevels = [];
+  try{
+    const slResp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+      algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'STOP_MARKET',
+      triggerPrice: stopLossPrice.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+      ...(hedgeOn ? { positionSide } : {}),
+    }, apiKey, secretKey, mode);
+    slAlgoId = slResp.algoId ?? slResp.orderId ?? null;
+
+    const legs = Array.isArray(tpLevels) && tpLevels.length > 0 ? tpLevels : [{ price: rawTakeProfitPrice, fraction: 1 }];
+    let allocatedQty = 0;
+    for(let i = 0; i < legs.length; i++){
+      const isLast = i === legs.length - 1;
+      const legPrice = roundPrice(legs[i].price);
+      const body = {
+        algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'TAKE_PROFIT_MARKET',
+        triggerPrice: legPrice.toString(), workingType: 'MARK_PRICE',
+        ...(hedgeOn ? { positionSide } : {}),
+      };
+      if(isLast){
+        body.closePosition = 'true';
+      } else {
+        const legQty = roundQty(qty * legs[i].fraction);
+        allocatedQty += legQty;
+        body.quantity = legQty.toString();
+        // reduceOnly is REJECTED outright by Binance once the account is
+        // in hedge mode (side+positionSide alone conveys "this reduces
+        // the position" there) — only send it in one-way mode.
+        if(!hedgeOn) body.reduceOnly = 'true';
+      }
+      const tpResp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', body, apiKey, secretKey, mode);
+      tpOrderIds.push(tpResp.algoId ?? tpResp.orderId ?? null);
+      placedLevels.push({ ...legs[i], price: legPrice });
+    }
+  }catch(err){
+    throw new VerifyRejected(`Position OPENED (${symbol} ${side} ${filledQty} @ ${avgPrice}, order ${order.orderId}) but attaching stop-loss/take-profit FAILED partway through: ${err.message}. This position may have NO (or only partial) protective orders on it — check Binance directly and close or protect it manually.`);
+  }
+
+  return { orderId: order.orderId, filledQty, avgPrice, leverage, stopLossPrice, slAlgoId, tpOrderIds, tpLevels: placedLevels };
+}
+
+// Cancels the current SL algo order (if we have its id — best-effort;
+// if the cancel fails because it's already gone, or for any other
+// reason, we proceed to place the new one anyway rather than leaving
+// the position without a fresh stop, since a brief window with two
+// live stops is safe — whichever triggers first just closes the
+// position — while leaving it with NONE is not) and places a new
+// STOP_MARKET at the fee-adjusted breakeven price, still closePosition:
+// true so it covers exactly whatever's left after TP2. Used only for
+// the requirement #6/#7 move — never called for the TP1 leg.
+async function moveBinanceStopToBreakeven(mode, apiKey, secretKey, { symbol, side, newStopPrice, slOrderId }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const roundPrice = p => filters.roundPrice(p);
+  const exitSide = side === 'BUY' ? 'SELL' : 'BUY';
+  const hedgeOn = await getCachedBinanceHedgeMode(mode, apiKey, secretKey);
+  const positionSide = side === 'BUY' ? 'LONG' : 'SHORT';
+
+  if(slOrderId){
+    await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: slOrderId }, apiKey, secretKey, mode).catch(() => {});
+  }
+  const stopLossPrice = roundPrice(newStopPrice);
+  const newStop = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+    algoType: 'CONDITIONAL', symbol, side: exitSide, type: 'STOP_MARKET',
+    triggerPrice: stopLossPrice.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+    ...(hedgeOn ? { positionSide } : {}),
+  }, apiKey, secretKey, mode);
+  return { newStopPrice: stopLossPrice, slOrderId: newStop.algoId ?? newStop.orderId ?? null };
+}
+
+async function getBinanceFuturesPosition(mode, apiKey, secretKey, symbol){
+  const list = await binanceFuturesSignedRequest('GET', '/fapi/v3/positionRisk', { symbol }, apiKey, secretKey, mode);
+  // In hedge mode Binance returns one row per positionSide (LONG/SHORT)
+  // for this symbol, most with positionAmt 0 — pick whichever row is
+  // actually non-zero rather than always the first, so this still works
+  // correctly for the six strategies (which only ever hold one direction
+  // at a time themselves) on an account that has hedge mode on for
+  // NxTGen Grid's sake. In one-way mode there's just the single BOTH row.
+  const rows = Array.isArray(list) ? list.filter(p => p.symbol === symbol) : [];
+  const pos = rows.find(p => Math.abs(parseFloat(p.positionAmt)) > 0) || rows[0];
+  const amt = pos ? parseFloat(pos.positionAmt) : 0;
+  if(!pos || amt === 0) return null;
+  return {
+    size: Math.abs(amt), side: amt > 0 ? 'Buy' : 'Sell', avgPrice: parseFloat(pos.entryPrice),
+    markPrice: parseFloat(pos.markPrice), unrealisedPnl: parseFloat(pos.unRealizedProfit),
+    leverage: parseFloat(pos.leverage), liqPrice: pos.liquidationPrice ? parseFloat(pos.liquidationPrice) : null,
+  };
+}
+
+// Manually flattens an open Binance position with a reduce-only market
+// order sized to whatever's actually open right now. NOTE: this
+// deliberately does NOT try to bulk-cancel the resting SL/TP conditional
+// orders placed alongside entry (see placeBinanceFuturesOrder) —
+// Binance's algo-order cancel-all endpoint wasn't confirmed here with
+// the same certainty as the rest of this integration, so rather than
+// guess at an endpoint that might silently no-op or error, those are
+// left resting; being closePosition:true orders, they simply have
+// nothing left to close and are harmless sitting there. Cancel them on
+// Binance directly if you'd rather they not show up as open orders.
+async function closeBinanceFuturesPosition(mode, apiKey, secretKey, symbol){
+  const pos = await getBinanceFuturesPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) throw new VerifyRejected(`No open ${symbol} position found on Binance — nothing to close.`);
+  const exitSide = pos.side === 'Buy' ? 'SELL' : 'BUY';
+  const hedgeOn = await getCachedBinanceHedgeMode(mode, apiKey, secretKey);
+  const positionSide = pos.side === 'Buy' ? 'LONG' : 'SHORT';
+  const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+    symbol, side: exitSide, type: 'MARKET', quantity: pos.size.toString(), newOrderRespType: 'RESULT',
+    ...(hedgeOn ? { positionSide } : { reduceOnly: 'true' }), // reduceOnly is rejected outright once hedgeOn — positionSide alone conveys the close there
+  }, apiKey, secretKey, mode);
+  return { orderId: order && order.orderId };
+}
+
+// No single "closed PnL" endpoint like Bybit's — sums the income ledger
+// (realized PnL from price movement, trading fees, and any funding paid)
+// for this symbol since the position was opened, which nets out to the
+// same real economic result Bybit's closedPnl reports as one number.
+// Signature matches the shared closed-pnl-getter shape (mode, apiKey,
+// secretKey, symbol, passphrase, openedAtMs) even though Binance doesn't
+// use a passphrase — openedAtMs is what this one actually needs, and
+// keeping the positional shape uniform across exchanges is what lets
+// the /api/futures/position route call any of them the same way.
+async function getBinanceFuturesRealizedResult(mode, apiKey, secretKey, symbol, passphrase, openedAtMs){
+  const sinceMs = openedAtMs || (Date.now() - 24 * 60 * 60 * 1000); // fallback: last 24h, if the caller somehow didn't send it
+  const income = await binanceFuturesSignedRequest('GET', '/fapi/v1/income', { symbol, startTime: String(sinceMs), limit: '200' }, apiKey, secretKey, mode);
+  if(!Array.isArray(income) || income.length === 0) return null;
+  const relevant = income.filter(e => ['REALIZED_PNL', 'COMMISSION', 'FUNDING_FEE'].includes(e.incomeType));
+  if(relevant.length === 0) return null;
+  const grossPnl = relevant.filter(e => e.incomeType === 'REALIZED_PNL').reduce((a, e) => a + parseFloat(e.income), 0);
+  const feesUsd = relevant.filter(e => e.incomeType === 'COMMISSION').reduce((a, e) => a + parseFloat(e.income), 0); // negative
+  const fundingUsd = relevant.filter(e => e.incomeType === 'FUNDING_FEE').reduce((a, e) => a + parseFloat(e.income), 0);
+  const closedPnl = grossPnl + feesUsd + fundingUsd;
+  return { closedPnl, grossPnl, feesUsd, fundingUsd, entries: relevant.length };
+}
+
+// =============================================================
+// Binance hedge-mode grid order placement — NxTGen Grid's Live/Demo
+// path on Binance. Unlike the Bybit section above, Binance's
+// dualSidePosition (hedge mode) flag is ACCOUNT-WIDE, not per-symbol —
+// switching it affects every symbol, including whatever the other six
+// strategies might be trading on the SAME Binance account. So this
+// section deliberately does NOT flip that setting itself. Instead:
+// binanceGridCheckHedgeMode only READS the current flag and returns a
+// clear yes/no + instructions; the person switches it themselves, once,
+// knowingly, in Binance's own UI or via their own API call — an
+// explicit action on their account, not something this app decides for
+// them. Once it's confirmed on, every function below correctly adds
+// the required `positionSide` (LONG/SHORT) to each order — which is
+// also exactly what the SIX-STRATEGY functions above (placeBinance-
+// FuturesOrder, closeBinanceFuturesPosition, moveBinanceStopToBreakeven)
+// still need once hedge mode is on for the account, since Binance
+// requires positionSide on every order once dualSidePosition:true,
+// full stop otherwise — see the trailing patch to those three
+// functions further down this section.
+// =============================================================
+async function binanceGridCheckHedgeMode(mode, apiKey, secretKey){
+  const data = await binanceFuturesSignedRequest('GET', '/fapi/v1/positionSide/dual', {}, apiKey, secretKey, mode);
+  return !!data.dualSidePosition;
+}
+
+// In hedge mode: `side` (BUY/SELL) is the trade direction, `positionSide`
+// (LONG/SHORT) says which position slot it affects — they're
+// independent. Opening/adding to LONG: BUY+LONG. Closing/reducing LONG:
+// SELL+LONG. Opening/adding to SHORT: SELL+SHORT. Closing/reducing
+// SHORT: BUY+SHORT. reduceOnly is NOT sent in hedge mode — Binance
+// rejects it outright ("Parameter 'reduceonly' sent when not required");
+// the side+positionSide combination alone tells Binance whether an
+// order opens or reduces a position.
+function binanceHedgeOrderParams(direction, isClosing){
+  const positionSide = direction === 'LONG' ? 'LONG' : 'SHORT';
+  let side;
+  if(direction === 'LONG') side = isClosing ? 'SELL' : 'BUY';
+  else side = isClosing ? 'BUY' : 'SELL';
+  return { side, positionSide };
+}
+
+async function placeBinanceGridLevelOrder(mode, apiKey, secretKey, { symbol, direction, price, qty, leverage, orderLinkTag }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  if(roundedQty <= 0 || roundedQty < filters.minQty){
+    throw new VerifyRejected(`Grid level size ${qty} ${symbol} rounds down to ${roundedQty}, below the exchange minimum (${filters.minQty}) — level skipped, not sent.`);
+  }
+  const roundedPrice = filters.roundPrice(price);
+  await binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage);
+  const { side, positionSide } = binanceHedgeOrderParams(direction, false);
+  const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+    symbol, side, positionSide, type: 'LIMIT', timeInForce: 'GTC',
+    quantity: roundedQty.toString(), price: roundedPrice.toString(),
+    newClientOrderId: `nxgrid-lvl-${orderLinkTag || Date.now()}-${Math.random().toString(36).slice(2, 6)}`.slice(0, 36),
+  }, apiKey, secretKey, mode);
+  return { orderId: order.orderId, price: roundedPrice, qty: roundedQty, leverage };
+}
+
+async function placeBinanceGridCloseOrder(mode, apiKey, secretKey, { symbol, direction, price, qty, orderLinkTag }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  const roundedPrice = filters.roundPrice(price);
+  const { side, positionSide } = binanceHedgeOrderParams(direction, true);
+  const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+    symbol, side, positionSide, type: 'LIMIT', timeInForce: 'GTC',
+    quantity: roundedQty.toString(), price: roundedPrice.toString(),
+    newClientOrderId: `nxgrid-cls-${orderLinkTag || Date.now()}-${Math.random().toString(36).slice(2, 6)}`.slice(0, 36),
+  }, apiKey, secretKey, mode);
+  return { orderId: order.orderId, price: roundedPrice, qty: roundedQty };
+}
+
+// Protective stop on one hedge-mode side, at the grid's outer boundary —
+// same rationale as setBybitGridSideStop above (a real position must
+// stay protected even if the browser tab closes). Uses the same
+// /fapi/v1/algoOrder STOP_MARKET path the six-strategy code already
+// uses (see the file-level comment on placeBinanceFuturesOrder for why
+// the plain order endpoint can't take conditional orders anymore).
+// closePosition:true + positionSide targets exactly that side's current
+// size, whatever it is — no qty needed, safe to re-call after every
+// level fill/close on that side.
+async function setBinanceGridSideStop(mode, apiKey, secretKey, { symbol, direction, stopPrice, existingAlgoId }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const roundedStop = filters.roundPrice(stopPrice);
+  if(existingAlgoId){
+    await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: existingAlgoId }, apiKey, secretKey, mode).catch(() => {});
+  }
+  const { side } = binanceHedgeOrderParams(direction, true); // the CLOSING side, since a stop always trades opposite the held position
+  const resp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+    algoType: 'CONDITIONAL', symbol, side, positionSide: direction, type: 'STOP_MARKET',
+    triggerPrice: roundedStop.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+  }, apiKey, secretKey, mode);
+  return { stopPrice: roundedStop, algoId: resp.algoId ?? resp.orderId ?? null };
+}
+
+async function cancelBinanceOrder(mode, apiKey, secretKey, { symbol, orderId }){
+  await binanceFuturesSignedRequest('DELETE', '/fapi/v1/order', { symbol, orderId }, apiKey, secretKey, mode).catch(err => {
+    if(!/unknown order|order does not exist/i.test(err.message)) throw err;
+  });
+}
+
+async function getBinanceGridOpenOrders(mode, apiKey, secretKey, symbol){
+  const list = await binanceFuturesSignedRequest('GET', '/fapi/v1/openOrders', { symbol }, apiKey, secretKey, mode);
+  return (Array.isArray(list) ? list : []).map(o => ({ orderId: o.orderId, side: o.side, positionSide: o.positionSide, price: parseFloat(o.price), qty: parseFloat(o.origQty), status: o.status }));
+}
+
+// Reads both hedge-mode position slots. /fapi/v3/positionRisk returns
+// one row per positionSide (LONG/SHORT) in hedge mode, vs one BOTH row
+// in one-way mode — filtering on positionSide here is what makes this
+// safe to call regardless of which mode the account is actually in
+// (returns both null if one-way, since neither LONG nor SHORT rows
+// would exist that way — a genuinely one-way account has no business
+// calling this in the first place, per binanceGridCheckHedgeMode above).
+async function getBinanceGridPositions(mode, apiKey, secretKey, symbol){
+  const list = await binanceFuturesSignedRequest('GET', '/fapi/v3/positionRisk', { symbol }, apiKey, secretKey, mode);
+  const rows = Array.isArray(list) ? list.filter(p => p.symbol === symbol) : [];
+  const long = rows.find(p => p.positionSide === 'LONG' && Math.abs(parseFloat(p.positionAmt)) > 0);
+  const short = rows.find(p => p.positionSide === 'SHORT' && Math.abs(parseFloat(p.positionAmt)) > 0);
+  return {
+    long: long ? { size: Math.abs(parseFloat(long.positionAmt)), avgPrice: parseFloat(long.entryPrice), liqPrice: long.liquidationPrice ? parseFloat(long.liquidationPrice) : null, unrealisedPnl: parseFloat(long.unRealizedProfit) } : null,
+    short: short ? { size: Math.abs(parseFloat(short.positionAmt)), avgPrice: parseFloat(short.entryPrice), liqPrice: short.liquidationPrice ? parseFloat(short.liquidationPrice) : null, unrealisedPnl: parseFloat(short.unRealizedProfit) } : null,
+  };
+}
+
+async function flattenBinanceGrid(mode, apiKey, secretKey, symbol){
+  const openOrders = await getBinanceGridOpenOrders(mode, apiKey, secretKey, symbol);
+  for(const o of openOrders){
+    await cancelBinanceOrder(mode, apiKey, secretKey, { symbol, orderId: o.orderId });
+  }
+  const positions = await getBinanceGridPositions(mode, apiKey, secretKey, symbol);
+  const closed = [];
+  for(const [direction, pos] of [['LONG', positions.long], ['SHORT', positions.short]]){
+    if(!pos || pos.size <= 0) continue;
+    const { side, positionSide } = binanceHedgeOrderParams(direction, true);
+    const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+      symbol, side, positionSide, type: 'MARKET', quantity: pos.size.toString(), newOrderRespType: 'RESULT',
+    }, apiKey, secretKey, mode).catch(err => { throw new VerifyRejected(`Cancelled resting grid orders but FAILED to flatten the ${direction} side (size ${pos.size}) on Binance: ${err.message}. Check ${symbol} on Binance directly.`); });
+    closed.push({ direction, qty: pos.size, orderId: order.orderId });
+  }
+  return { closed };
+}
+
+// =============================================================
+// Trading Bots — DCA on Binance. One-way mode (no positionSide sent —
+// Binance treats a one-way account's orders as BOTH implicitly), same
+// rationale as the Bybit DCA section above: same-side fills just
+// accumulate into one bigger position at a blended entry, no special
+// "add" semantics needed for safety orders beyond an ordinary order.
+// =============================================================
+async function placeBinanceDcaOrder(mode, apiKey, secretKey, { symbol, direction, orderType, price, qty, leverage }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const roundedQty = floorToStep(qty, filters.qtyStep);
+  if(roundedQty <= 0 || roundedQty < filters.minQty){
+    throw new VerifyRejected(`DCA order size ${qty} ${symbol} rounds down to ${roundedQty}, below the exchange minimum (${filters.minQty}) — order skipped, not sent.`);
+  }
+  if(leverage != null) await binanceFuturesSetLeverage(mode, apiKey, secretKey, symbol, leverage);
+  const side = direction === 'LONG' ? 'BUY' : 'SELL';
+  const params = {
+    symbol, side, type: orderType === 'MARKET' ? 'MARKET' : 'LIMIT',
+    quantity: roundedQty.toString(),
+    newClientOrderId: `nxdca-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`.slice(0, 36),
+  };
+  let roundedPrice = null;
+  if(orderType !== 'MARKET'){
+    roundedPrice = filters.roundPrice(price);
+    params.price = roundedPrice.toString();
+    params.timeInForce = 'GTC';
+  }
+  const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', params, apiKey, secretKey, mode).catch(err => {
+    // Same cross-feature note as the Bybit side: if NxTGen Grid ran Live
+    // on this symbol on Binance, it's in Hedge mode account-wide (Binance
+    // hedge mode is account-wide, not per-symbol, unlike Bybit) — a plain
+    // one-way order like this needs positionSide, which hedge mode requires
+    // explicitly. Surface that plainly.
+    if(/position side does not match|positionside/i.test(err.message)){
+      throw new VerifyRejected(`This Binance account is currently in Hedge position mode (likely from running NxTGen Grid Live/Demo earlier — Binance's hedge mode is account-wide, not per-symbol). DCA needs one-way mode. Switch it back yourself in Binance's app under Futures settings > Position Mode once nothing is open, before creating a DCA bot.`);
+    }
+    throw err;
+  });
+  return { orderId: order.orderId, price: roundedPrice, qty: roundedQty };
+}
+
+// Binance has no single "set TP for whole position" call the way Bybit's
+// trading-stop does — a TP here is its own STOP_MARKET-style order
+// (TAKE_PROFIT_MARKET, closePosition:true) via the same /fapi/v1/algoOrder
+// path setBinanceGridSideStop already uses for stops. Re-calling this
+// cancels whatever TP algo order existed before (existingAlgoId) and
+// places a fresh one at the new price — needed every time a safety order
+// fills and the average moves, since closePosition:true always targets
+// the position's CURRENT size, but the trigger PRICE itself doesn't
+// update on its own.
+async function setBinanceDcaTakeProfit(mode, apiKey, secretKey, { symbol, direction, takeProfitPrice, stopLossPrice, existingTpAlgoId, existingSlAlgoId }){
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const closeSide = direction === 'LONG' ? 'SELL' : 'BUY';
+  const result = {};
+  if(existingTpAlgoId) await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: existingTpAlgoId }, apiKey, secretKey, mode).catch(() => {});
+  if(existingSlAlgoId) await binanceFuturesSignedRequest('DELETE', '/fapi/v1/algoOrder', { algoId: existingSlAlgoId }, apiKey, secretKey, mode).catch(() => {});
+  if(takeProfitPrice != null){
+    const roundedTp = filters.roundPrice(takeProfitPrice);
+    const resp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+      algoType: 'CONDITIONAL', symbol, side: closeSide, type: 'TAKE_PROFIT_MARKET',
+      triggerPrice: roundedTp.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+    }, apiKey, secretKey, mode);
+    result.takeProfitPrice = roundedTp; result.tpAlgoId = resp.algoId ?? resp.orderId ?? null;
+  }
+  if(stopLossPrice != null){
+    const roundedSl = filters.roundPrice(stopLossPrice);
+    const resp = await binanceFuturesSignedRequest('POST', '/fapi/v1/algoOrder', {
+      algoType: 'CONDITIONAL', symbol, side: closeSide, type: 'STOP_MARKET',
+      triggerPrice: roundedSl.toString(), closePosition: 'true', workingType: 'MARK_PRICE',
+    }, apiKey, secretKey, mode);
+    result.stopLossPrice = roundedSl; result.slAlgoId = resp.algoId ?? resp.orderId ?? null;
+  }
+  return result;
+}
+
+async function cancelAllBinanceOrders(mode, apiKey, secretKey, symbol){
+  await binanceFuturesSignedRequest('DELETE', '/fapi/v1/allOpenOrders', { symbol }, apiKey, secretKey, mode).catch(() => {});
+}
+
+async function getBinanceDcaOpenOrders(mode, apiKey, secretKey, symbol){
+  const list = await binanceFuturesSignedRequest('GET', '/fapi/v1/openOrders', { symbol }, apiKey, secretKey, mode);
+  return (Array.isArray(list) ? list : []).map(o => ({ orderId: o.orderId, side: o.side, price: parseFloat(o.price), qty: parseFloat(o.origQty), status: o.status }));
+}
+
+async function getBinanceDcaPosition(mode, apiKey, secretKey, symbol){
+  const list = await binanceFuturesSignedRequest('GET', '/fapi/v3/positionRisk', { symbol }, apiKey, secretKey, mode);
+  const rows = Array.isArray(list) ? list.filter(p => p.symbol === symbol) : [];
+  // One-way mode: positionSide is 'BOTH'; Math.abs since a short shows negative positionAmt.
+  const pos = rows.find(p => Math.abs(parseFloat(p.positionAmt || '0')) > 0);
+  return pos ? { size: Math.abs(parseFloat(pos.positionAmt)), avgPrice: parseFloat(pos.entryPrice), side: parseFloat(pos.positionAmt) > 0 ? 'BUY' : 'SELL', liqPrice: pos.liquidationPrice ? parseFloat(pos.liquidationPrice) : null, unrealisedPnl: parseFloat(pos.unRealizedProfit) } : null;
+}
+
+async function flattenBinanceDca(mode, apiKey, secretKey, symbol){
+  await cancelAllBinanceOrders(mode, apiKey, secretKey, symbol);
+  const pos = await getBinanceDcaPosition(mode, apiKey, secretKey, symbol);
+  if(!pos) return { closed: null };
+  const base = BINANCE_FAPI_BASE[mode] || BINANCE_FAPI_BASE.live;
+  const filters = await binanceFuturesSymbolFilters(base, symbol);
+  const qty = floorToStep(pos.size, filters.qtyStep);
+  if(qty <= 0) return { closed: null };
+  const closeSide = pos.side === 'BUY' ? 'SELL' : 'BUY';
+  const order = await binanceFuturesSignedRequest('POST', '/fapi/v1/order', {
+    symbol, side: closeSide, type: 'MARKET', quantity: qty.toString(), newOrderRespType: 'RESULT',
+  }, apiKey, secretKey, mode).catch(err => { throw new VerifyRejected(`Cancelled resting DCA orders but FAILED to close the position (size ${qty}) on Binance: ${err.message}. Check ${symbol} on Binance directly.`); });
+  return { closed: { qty, orderId: order.orderId } };
+}
+
+
+
+app.post('/api/order', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, symbol, side, amountKind, amount, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !symbol || !side || !amountKind || !amount){
+    return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, symbol, side, amountKind and amount are all required.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const placer = ORDER_PLACERS[exchange];
+  if(!placer){
+    return res.status(400).json({ ok:false, message:`No order placer for "${exchange}" — only binance, bybit, mexc, gateio, and bitget are supported.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  // Binance and MEXC both want 'BUY'/'SELL'; Bybit wants 'Buy'/'Sell';
+  // Gate.io and Bitget want lowercase 'buy'/'sell' (both re-lowercase
+  // regardless, but keep this table honest for the exchanges that DO care).
+  const normalizedSide = (exchange === 'binance' || exchange === 'mexc')
+    ? String(side).toUpperCase()
+    : (exchange === 'gateio' || exchange === 'bitget')
+      ? String(side).toLowerCase()
+      : (String(side)[0].toUpperCase() + String(side).slice(1).toLowerCase());
+
+  try{
+    const result = await placer(netMode, apiKey, secretKey, { symbol, side: normalizedSide, amountKind, amount: parseFloat(amount) }, passphrase);
+    return res.json({ ok:true, ...result });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not complete order on ${exchange}: ${err.message}` });
+  }
+});
+
+// ---- Futures (leveraged) order execution — separate route family from
+// spot's /api/order above, since a futures order needs leverage, native
+// TP/SL prices, and a directional Buy/Sell rather than a base/quote
+// amount split. Only Bybit is wired up right now (the AI Futures Engine's
+// first live/demo integration); the exchange-keyed maps below are set up
+// so extending to the others later is additive, not a rewrite. ----
+const FUTURES_ORDER_PLACERS = { bybit: placeBybitFuturesOrder, binance: placeBinanceFuturesOrder, gateio: placeGateioFuturesOrder, mexc: placeMexcFuturesOrder, bitget: placeBitgetFuturesOrder };
+const FUTURES_POSITION_GETTERS = { bybit: getBybitPosition, binance: getBinanceFuturesPosition, gateio: getGateioFuturesPosition, mexc: getMexcFuturesPosition, bitget: getBitgetFuturesPosition };
+// Account-wide "list everything open" getters, for the broad reconciliation
+// route below — bybit only for now (getAllBybitPositions above); other
+// exchanges keep working exactly as before (per-symbol preflight/monitoring
+// only) until each gets its own all-positions getter added here.
+const FUTURES_ALL_POSITIONS_GETTERS = { bybit: getAllBybitPositions };
+
+// Broad reconciliation: "what's actually open on this account right now,
+// for ANY symbol" — not scoped to one symbol like /api/futures/position.
+// Called once per live cycle (see js/futures-ui.js's runLiveCycleInner) so
+// a real position this app isn't currently tracking (never placed by it,
+// or lost track of after a reload/localStorage clear/different browser)
+// gets surfaced and can be adopted into tracking, instead of silently
+// running unmonitored and invisible in this app's own UI until something
+// happens to target that exact symbol again.
+app.post('/api/futures/positions', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey, and secretKey are required.' });
+  }
+  const getter = FUTURES_ALL_POSITIONS_GETTERS[exchange];
+  if(!getter){
+    return res.json({ ok:true, supported:false, positions: [] }); // exchange not yet migrated to broad reconciliation — not an error
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const positions = await getter(netMode, apiKey, secretKey, passphrase);
+    return res.json({ ok:true, supported:true, positions });
+  }catch(err){
+    return res.json({ ok:false, message: `Could not list open ${exchange} positions: ${err.message}` });
+  }
+});
+const FUTURES_CLOSED_PNL_GETTERS = { bybit: getBybitClosedPnl, binance: getBinanceFuturesRealizedResult, gateio: getGateioFuturesRealizedResult, mexc: getMexcFuturesRealizedResult, bitget: getBitgetFuturesRealizedResult };
+// Manual "Close Position" button (js/futures-ui.js's closeLivePosition) —
+// all five exchanges supported, same set as FUTURES_ORDER_PLACERS/
+// FUTURES_POSITION_GETTERS above. Each closer reads the position fresh
+// itself rather than trusting a client-supplied size/side.
+const FUTURES_CLOSE_POSITION = { bybit: closeBybitFuturesPosition, binance: closeBinanceFuturesPosition, gateio: closeGateioFuturesPosition, mexc: closeMexcFuturesPosition, bitget: closeBitgetFuturesPosition };
+// Moving the SL to a fee-adjusted breakeven once TP2 fully closes
+// (requirements #6/#7) is only wired up for Binance and Bybit so far,
+// matching the partial-TP order-placement work above — Gate.io, MEXC,
+// and Bitget still use their original single-TP/SL behavior via
+// FUTURES_ORDER_PLACERS until they're migrated too.
+const FUTURES_MOVE_STOP = { binance: moveBinanceStopToBreakeven, bybit: moveBybitStopToBreakeven };
+// Bybit's account is unified (spot + derivatives share one USDT
+// balance), so its futures balance is just its regular asset-balance
+// getter. Binance, Gate.io, MEXC, and Bitget all keep futures in a
+// completely separate wallet from spot — reusing a spot balance getter
+// would silently read the wrong number, so each needs its own entry
+// here rather than falling back to ASSET_BALANCE_GETTERS.
+const FUTURES_BALANCE_GETTERS = {
+  bybit: (mode, apiKey, secretKey) => bybitAssetBalance(mode, apiKey, secretKey, 'USDT'),
+  binance: binanceFuturesBalance,
+  gateio: gateioFuturesBalance,
+  mexc: mexcFuturesBalance,
+  bitget: bitgetFuturesBalance,
+};
+// Bybit wants 'Buy'/'Sell'; Binance wants 'BUY'/'SELL'; Gate.io and MEXC
+// both want lowercase 'buy'/'sell' (neither uses the word as a literal
+// API field — Gate.io encodes direction in the sign of the order size,
+// MEXC encodes it in a numeric side enum — but both placers still need
+// the word itself to know which one to apply); Bitget also wants
+// lowercase 'buy'/'sell', used directly as its order side field.
+const FUTURES_SIDE_CASING = {
+  bybit: side => side[0].toUpperCase() + side.slice(1).toLowerCase(),
+  binance: side => side.toUpperCase(),
+  gateio: side => side.toLowerCase(),
+  mexc: side => side.toLowerCase(),
+  bitget: side => side.toLowerCase(),
+};
+
+// =============================================================
+// FUTURES UNIVERSE — each exchange's REAL, FULL current list of USDT-M
+// perpetual symbols (not a hardcoded watchlist), each paired with its
+// own 24h quote volume for ranking. Two public calls per exchange
+// (list-all-symbols + all-tickers), regardless of how many hundreds of
+// pairs that exchange lists — the actual per-symbol detailed indicator
+// data (klines etc, in each exchange's ...BuildFuturesSnapshot function
+// above) is what costs real weight per symbol, so this intentionally
+// stays a cheap, separate, infrequent call: see LIVE_UNIVERSE_CACHE_MS
+// below and js/futures-ui.js's own client-side cache on top of that.
+//
+// This is what makes "scan everything, not a fixed small list" actually
+// work: the excluded set (EXCLUDED_FUTURES_SYMBOLS, js/futures/engine.js)
+// is the only hardcoded part left. Everything else — which symbols exist,
+// which are actually tradeable right now, how liquid each one is — comes
+// from the exchange itself, live, every refresh. What still can't scale
+// to "every symbol, every 8-second cycle" is the DETAILED per-symbol
+// scan (klines/book/funding) that actually finds a signal — an exchange
+// with 300+ USDT perpetuals would need 300 x 4-6 calls every cycle for
+// that, which no exchange's rate limit survives (all five of these have
+// public-endpoint IP caps in the same rough order of magnitude as
+// Binance's 2400/min, which the Binance ban earlier in this file already
+// showed doesn't have that kind of room to spare). The universe below
+// feeds a ranked top-N selection instead (see js/futures-ui.js) — the
+// full real symbol list, minus your exclusions, with the most
+// liquid/active names actually getting scanned each cycle rather than a
+// fixed roster that ignores what's actually moving.
+async function binanceFuturesUniverse(){
+  checkBinanceBan('live');
+  const base = BINANCE_FAPI_BASE.live;
+  let info, tickers;
+  try{
+    [info, tickers] = await Promise.all([
+      fetchJSON(`${base}/fapi/v1/exchangeInfo`, 10_000, h => recordBinanceWeight('live', h)),
+      fetchJSON(`${base}/fapi/v1/ticker/24hr`, 10_000, h => recordBinanceWeight('live', h)),
+    ]);
+  }catch(err){
+    recordBinanceBanIfPresent('live', err.message);
+    throw err;
+  }
+  const tradeable = new Set((info?.symbols || [])
+    // contractType === 'PERPETUAL' already excludes Binance's own TradFi
+    // listings on its own: Binance tags those with a distinct
+    // TRADIFI_PERPETUAL contractType (confirmed via Binance's own
+    // TSLAUSDT listing announcement, which calls out its dedicated
+    // "[TradFi] tab" for exactly this), so this filter was never
+    // ambiguous here the way Bybit's needed fixing above.
+    .filter(s => s.status === 'TRADING' && s.contractType === 'PERPETUAL' && s.quoteAsset === 'USDT')
+    .map(s => s.symbol));
+  return (tickers || [])
+    .filter(t => tradeable.has(t.symbol))
+    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.quoteVolume || '0'), lastPrice: parseFloat(t.lastPrice || '0') }));
+}
+
+async function bybitFuturesUniverse(){
+  const base = BYBIT_BASE.live;
+  // TradFi perpetuals (AAPLUSDT, TSLAUSDT, XAUUSDT, forex pairs, etc.)
+  // sit in the SAME category=linear list as normal crypto perpetuals and
+  // pass every filter above (Trading status, USDT quote, "Perpetual"
+  // contractType) — nothing here tells them apart from BTCUSDT by
+  // shape alone. Bybit's own instruments-info endpoint supports a
+  // symbolType filter for exactly this (confirmed in Bybit's official
+  // API changelog and skill docs): symbolType=stock / commodity / forex
+  // for category=linear. Bybit adds new TradFi tickers most weeks — was
+  // 20 stocks + 3 commodities + 3 ETFs in May 2026, over 200 markets
+  // total by August — so a fixed ticker list (the CLUSDT fix in
+  // EXCLUDED_FUTURES_SYMBOLS, engine.js) goes stale almost immediately;
+  // querying Bybit's own classification stays correct as that list grows
+  // without needing another manual update here.
+  const [info, tickers, stockInfo, commodityInfo, forexInfo] = await Promise.all([
+    fetchJSON(`${base}/v5/market/instruments-info?category=linear`),
+    fetchJSON(`${base}/v5/market/tickers?category=linear`),
+    // Each wrapped separately: if Bybit ever rejects one of these three
+    // symbolType values (a param change, a transient error), that alone
+    // shouldn't take down symbol discovery entirely — worst case, that
+    // one TradFi category silently isn't filtered this cycle rather than
+    // the whole live scan failing.
+    fetchJSON(`${base}/v5/market/instruments-info?category=linear&symbolType=stock`).catch(() => null),
+    fetchJSON(`${base}/v5/market/instruments-info?category=linear&symbolType=commodity`).catch(() => null),
+    fetchJSON(`${base}/v5/market/instruments-info?category=linear&symbolType=forex`).catch(() => null),
+  ]);
+  const tradfiSymbols = new Set([
+    ...(stockInfo?.result?.list || []),
+    ...(commodityInfo?.result?.list || []),
+    ...(forexInfo?.result?.list || []),
+  ].map(s => s.symbol));
+  const tradeable = new Set((info?.result?.list || [])
+    .filter(s => s.status === 'Trading' && s.quoteCoin === 'USDT' && String(s.contractType || '').includes('Perpetual') && !tradfiSymbols.has(s.symbol))
+    .map(s => s.symbol));
+  return (tickers?.result?.list || [])
+    .filter(t => tradeable.has(t.symbol))
+    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.turnover24h || '0'), lastPrice: parseFloat(t.lastPrice || '0') }));
+}
+
+async function gateioFuturesUniverse(){
+  const base = GATEIO_FAPI_BASE.live;
+  const [contracts, tickers] = await Promise.all([
+    fetchJSON(`${base}/api/v4/futures/usdt/contracts`),
+    fetchJSON(`${base}/api/v4/futures/usdt/tickers`),
+  ]);
+  const tradeable = new Set((Array.isArray(contracts) ? contracts : [])
+    .filter(c => !c.in_delisting)
+    .map(c => c.name));
+  return (Array.isArray(tickers) ? tickers : [])
+    .filter(t => tradeable.has(t.contract))
+    .map(t => ({ symbol: fromGateioContract(t.contract), volume24hUsd: parseFloat(t.volume_24h_quote || t.volume_24h_settle || '0'), lastPrice: parseFloat(t.last || t.mark_price || '0') }));
+}
+
+async function mexcFuturesUniverse(){
+  const [detail, tickers] = await Promise.all([
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/detail`),
+    fetchJSON(`${MEXC_FAPI_BASE}/api/v1/contract/ticker`),
+  ]);
+  const tradeable = new Set((detail?.data || [])
+    .filter(c => c.state === 0 && c.quoteCoin === 'USDT')
+    .map(c => c.symbol));
+  return (tickers?.data || [])
+    .filter(t => tradeable.has(t.symbol))
+    .map(t => ({ symbol: fromMexcContract(t.symbol), volume24hUsd: parseFloat(t.amount24 || t.volume24 || '0'), lastPrice: parseFloat(t.lastPrice || '0') }));
+}
+
+async function bitgetFuturesUniverse(){
+  const [contracts, tickers] = await Promise.all([
+    fetchJSON(`${BITGET_BASE}/api/v2/mix/market/contracts?productType=USDT-FUTURES`),
+    fetchJSON(`${BITGET_BASE}/api/v2/mix/market/tickers?productType=USDT-FUTURES`),
+  ]);
+  // isRwa flags Bitget's real-world-asset contracts (tokenized
+  // stocks/commodities, same idea as Bybit's TradFi perpetuals) — Bitget
+  // reportedly carries more of these than any other exchange (roughly
+  // 40% of its whole USDT-margined contract list per third-party
+  // research), so this matters more here than most. Defensive `!c.isRwa`
+  // rather than `c.isRwa === false`: if this field is ever renamed or
+  // absent, every contract's isRwa reads undefined and the filter is a
+  // silent no-op (nothing wrongly excluded) rather than excluding
+  // everything.
+  const tradeable = new Set((contracts?.data || [])
+    .filter(c => c.symbolStatus === 'normal' && c.quoteCoin === 'USDT' && !c.isRwa)
+    .map(c => c.symbol));
+  return (tickers?.data || [])
+    .filter(t => tradeable.has(t.symbol))
+    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.usdtVolume || t.quoteVolume || '0'), lastPrice: parseFloat(t.lastPr || t.markPrice || '0') }));
+}
+
+const FUTURES_UNIVERSE_GETTERS = {
+  binance: binanceFuturesUniverse,
+  bybit: bybitFuturesUniverse,
+  gateio: gateioFuturesUniverse,
+  mexc: mexcFuturesUniverse,
+  bitget: bitgetFuturesUniverse,
+};
+
+// Short server-side cache on top of js/futures-ui.js's own client-side
+// one — the symbol list and 24h volume ranking don't meaningfully change
+// inside a 45-second window, so there's no reason for every browser tab
+// polling this app to re-hit an exchange's listing endpoints on its own
+// schedule.
+const FUTURES_UNIVERSE_CACHE_MS = 45_000;
+const FUTURES_UNIVERSE_CACHE = {};
+
+app.post('/api/futures/universe', async (req, res) => {
+  const { exchange } = req.body || {};
+  const getter = FUTURES_UNIVERSE_GETTERS[exchange];
+  if(!getter){
+    return res.status(400).json({ ok:false, message:`No futures universe getter for "${exchange}" — only binance, bybit, gateio, mexc, and bitget are supported.` });
+  }
+  const cached = FUTURES_UNIVERSE_CACHE[exchange];
+  if(cached && Date.now() - cached.atMs < FUTURES_UNIVERSE_CACHE_MS){
+    return res.json({ ok:true, symbols: cached.symbols, cached: true });
+  }
+  try{
+    const symbols = await getter();
+    FUTURES_UNIVERSE_CACHE[exchange] = { symbols, atMs: Date.now() };
+    return res.json({ ok:true, symbols });
+  }catch(err){
+    // Serve a stale cache rather than nothing if the listing call itself
+    // fails but we have an earlier successful one — the symbol universe
+    // changes slowly (exchanges list/delist pairs on the order of days,
+    // not seconds), so a few-minutes-old list is still far better than
+    // stalling Live/Demo trading entirely over one failed refresh.
+    if(cached) return res.json({ ok:true, symbols: cached.symbols, cached: true, stale: true });
+    return res.json({ ok:false, message: `Could not fetch the futures symbol list for ${exchange}: ${err.message}` });
+  }
+});
+
+app.post('/api/futures/balance', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey and secretKey are all required.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const getter = FUTURES_BALANCE_GETTERS[exchange];
+  if(!getter){
+    return res.status(400).json({ ok:false, message:`No futures balance getter for "${exchange}" yet — only bybit, binance, gateio, mexc, and bitget are supported so far.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const balance = await getter(netMode, apiKey, secretKey, passphrase);
+    return res.json({ ok:true, balance });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not read futures balance on ${exchange}: ${err.message}` });
+  }
+});
+
+// Separate from /api/futures/balance on purpose: that endpoint feeds
+// equity/day-anchor tracking and before/after PnL diffing, which legitimately
+// want total wallet balance (Bybit) or the exchange's own available-balance
+// field (the other four, which already report free margin there). This one
+// exists specifically to answer "is there enough free margin to open a NEW
+// position right now" — for Bybit that's a genuinely different number
+// (totalAvailableBalance, not walletBalance) once any other bot has margin
+// locked up; for the other four exchanges it's the same underlying value
+// their balance getter already returns, so they're simply reused here.
+const FUTURES_AVAILABLE_MARGIN_GETTERS = {
+  bybit: bybitAvailableBalance,
+  binance: binanceFuturesBalance,
+  gateio: gateioFuturesBalance,
+  mexc: mexcFuturesBalance,
+  bitget: bitgetFuturesBalance,
+};
+app.post('/api/futures/available-margin', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey and secretKey are all required.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const getter = FUTURES_AVAILABLE_MARGIN_GETTERS[exchange];
+  if(!getter){
+    return res.status(400).json({ ok:false, message:`No available-margin getter for "${exchange}" yet — only bybit, binance, gateio, mexc, and bitget are supported so far.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const available = await getter(netMode, apiKey, secretKey, passphrase);
+    return res.json({ ok:true, available });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not read available margin on ${exchange}: ${err.message}` });
+  }
+});
+
+app.post('/api/futures/order', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, entryPrice, stopLossPrice, takeProfitPrice, tpLevels, passphrase } = req.body || {};
+  const hasTakeProfit = takeProfitPrice != null || (Array.isArray(tpLevels) && tpLevels.length > 0);
+  if(!exchange || !apiKey || !secretKey || !symbol || !side || !qty || !leverage || !stopLossPrice || !hasTakeProfit){
+    return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, symbol, side, qty, leverage, stopLossPrice, and a take-profit (takeProfitPrice, or tpLevels for the partial 30/30/40 structure) are all required — every futures order this app places carries a stop-loss and take-profit from the moment it opens, no exceptions.' });
+  }
+  if(Array.isArray(tpLevels) && tpLevels.some(l => !(l && l.price > 0 && l.fraction > 0))){
+    return res.status(400).json({ ok:false, message:'Every tpLevels entry needs a positive price and fraction.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const placer = FUTURES_ORDER_PLACERS[exchange];
+  if(!placer){
+    return res.status(400).json({ ok:false, message:`No futures order placer for "${exchange}" yet — only bybit, binance, gateio, mexc, and bitget are supported so far.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  const casingFn = FUTURES_SIDE_CASING[exchange] || (s => s[0].toUpperCase() + s.slice(1).toLowerCase());
+  const normalizedSide = casingFn(String(side));
+
+  // Authoritative pre-flight check, against the exchange itself rather
+  // than trusting the client's own in-memory bookkeeping: this app is
+  // meant to hold at most one real position per symbol at a time (see
+  // js/futures-ui.js's runLiveCycle), but real Live trading exposed a
+  // race that could break that — if a just-placed order's fill
+  // confirmation is ambiguous (times out, or a network hiccup drops the
+  // response after the exchange already filled it), the client shows
+  // "Order failed" and never records the position, while the order may
+  // have genuinely gone through. The NEXT cycle then had nothing in its
+  // own memory telling it a position was already open, and could place a
+  // second real entry on the same symbol — which the exchange nets into
+  // one bigger position (same-side fills accumulate), silently doubling
+  // the real risk taken while the client only ever tracked the second
+  // order's own size. Checking the exchange's own live position for this
+  // exact symbol before ever placing a new entry closes that gap
+  // regardless of why the client's memory might be wrong — a stale page,
+  // a lost response, a reload mid-session, or anything else.
+  const positionGetterPreflight = FUTURES_POSITION_GETTERS[exchange];
+  if(positionGetterPreflight){
+    try{
+      const existing = await positionGetterPreflight(netMode, apiKey, secretKey, symbol, passphrase);
+      if(existing){
+        // existingPosition is returned (not just the message string) so the
+        // client can ADOPT this real position into its own tracking right
+        // here, instead of just showing an error and continuing to display
+        // "None" every cycle after — see js/futures-ui.js's
+        // placeLiveEntryOrder handling of result.existingPosition.
+        return res.json({ ok:false, rejected:true, message: `${exchange} already has an open ${symbol} position (size ${existing.size}) — refusing to place a second entry on top of it. If this app's own display shows no open position, its memory of this session is out of sync with the real account; check ${symbol} directly on ${exchange} before doing anything else.`, existingPosition: existing });
+      }
+    }catch(err){
+      // Couldn't confirm either way (rate limit, transient error) — do
+      // NOT silently proceed to place a real order on unconfirmed
+      // information; fail closed instead of risking exactly the
+      // double-entry this check exists to prevent.
+      return res.json({ ok:false, rejected:false, message: `Could not confirm ${exchange} has no existing ${symbol} position before placing this order (${err.message}) — refusing to place it rather than risk stacking on an unconfirmed one.` });
+    }
+  }
+
+  try{
+    const result = await placer(netMode, apiKey, secretKey, {
+      symbol, side: normalizedSide, rawQty: parseFloat(qty), leverage: parseFloat(leverage),
+      rawEntryPrice: entryPrice != null ? parseFloat(entryPrice) : undefined, // only MEXC's placer actually needs this — others ignore it
+      rawStopLossPrice: parseFloat(stopLossPrice),
+      rawTakeProfitPrice: takeProfitPrice != null ? parseFloat(takeProfitPrice) : undefined,
+      // Partial 30/30/40 TP structure — only binance/bybit's placers
+      // currently read this (see FUTURES_MOVE_STOP above); the other
+      // three placers ignore it and fall back to their existing
+      // single-TP behavior via rawTakeProfitPrice.
+      tpLevels: Array.isArray(tpLevels) ? tpLevels.map(l => ({ price: parseFloat(l.price), fraction: parseFloat(l.fraction) })) : undefined,
+    }, passphrase);
+    return res.json({ ok:true, ...result });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not open futures position on ${exchange}: ${err.message}` });
+  }
+});
+
+// Moves the SL on the remaining position to a (fee-adjusted) new price
+// without touching whatever TP orders are still resting — used
+// specifically for requirement #6/#7: once TP2 fully closes, the stop
+// on the remaining 40% moves to breakeven, adjusted for round-trip fees
+// so it's a genuine non-loss rather than the raw entry price. Only
+// wired up for Binance and Bybit so far (FUTURES_MOVE_STOP above);
+// calling this for any other exchange returns a clear "not supported
+// yet" response rather than silently doing nothing.
+app.post('/api/futures/move-stop', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, symbol, side, newStopPrice, slOrderId, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !symbol || !side || !newStopPrice){
+    return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, symbol, side, and newStopPrice are all required.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const mover = FUTURES_MOVE_STOP[exchange];
+  if(!mover){
+    return res.status(400).json({ ok:false, message: `Moving the stop to breakeven after TP2 is only wired up for Binance and Bybit so far — "${exchange}" still runs its original single take-profit/stop-loss behavior end-to-end and doesn't need this call.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  const casingFn = FUTURES_SIDE_CASING[exchange] || (s => s[0].toUpperCase() + s.slice(1).toLowerCase());
+  const normalizedSide = casingFn(String(side));
+  try{
+    const result = await mover(netMode, apiKey, secretKey, {
+      symbol, side: normalizedSide, newStopPrice: parseFloat(newStopPrice), slOrderId,
+    }, passphrase);
+    return res.json({ ok:true, ...result });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    // Deliberately NOT swallowed as a soft failure the client could
+    // mistake for "nothing needed to change" — a failed breakeven move
+    // means the remaining position is still sitting behind its ORIGINAL
+    // stop, not an unprotected one, so this isn't unsafe the way a
+    // failed initial SL attach would be; but the client still needs to
+    // know it didn't take effect so it can retry rather than assuming
+    // the remaining 40% is breakeven-protected when it isn't.
+    return res.json({ ok:false, rejected:false, message: `Could not move ${symbol}'s stop to breakeven on ${exchange}: ${err.message}. The remaining position is still protected by its ORIGINAL stop-loss (unchanged) — this just means the breakeven move didn't take effect yet.` });
+  }
+});
+
+app.post('/api/futures/position', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, symbol, passphrase, openedAtMs, balanceBeforeUsd } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !symbol){
+    return res.status(400).json({ ok:false, message:'exchange, mode, apiKey, secretKey, and symbol are all required.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const positionGetter = FUTURES_POSITION_GETTERS[exchange];
+  const closedPnlGetter = FUTURES_CLOSED_PNL_GETTERS[exchange];
+  if(!positionGetter){
+    return res.status(400).json({ ok:false, message:`No futures position getter for "${exchange}" yet — only bybit, binance, gateio, mexc, and bitget are supported so far.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const open = await positionGetter(netMode, apiKey, secretKey, symbol, passphrase);
+    if(open){
+      return res.json({ ok:true, open: true, position: open });
+    }
+    // Not open anymore — pull the realized result, if we can, so the
+    // caller can record what actually happened rather than just "it's gone".
+    const closed = closedPnlGetter ? await closedPnlGetter(netMode, apiKey, secretKey, symbol, passphrase, openedAtMs, balanceBeforeUsd).catch(() => null) : null;
+    return res.json({ ok:true, open: false, closed });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not read ${symbol} position on ${exchange}: ${err.message}` });
+  }
+});
+
+// Manually closes an open real position on demand — the server side of
+// the app's own "Close Position" button, as distinct from the exchange-
+// side TP/SL this app always attaches at entry (see /api/futures/order):
+// this is for closing out early, before either has triggered. Each
+// closer function re-reads the position itself before acting, so this
+// closes exactly what's actually open on the exchange right now — not
+// whatever size/side the client's own (possibly stale) tracking believes
+// is open. Deliberately returns as soon as the close order is accepted;
+// it does not itself compute realized P&L — the client re-polls
+// /api/futures/position just above right after this to pick that up,
+// same route the automatic monitoring loop already uses for every other
+// kind of closure (TP, SL, or manual-on-the-exchange).
+app.post('/api/futures/close-position', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, symbol, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !symbol){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey, secretKey, and symbol are all required.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const closer = FUTURES_CLOSE_POSITION[exchange];
+  if(!closer){
+    return res.status(400).json({ ok:false, message:`No close-position support for "${exchange}" yet — only bybit, binance, gateio, mexc, and bitget are supported so far.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const result = await closer(netMode, apiKey, secretKey, symbol, passphrase);
+    return res.json({ ok:true, ...result });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not close ${symbol} position on ${exchange}: ${err.message}` });
+  }
+});
+
+// =============================================================
+// NxTGen Grid — Live/Demo order endpoints (Bybit + Binance only; see
+// grid.js's GRID_SYMBOLS and the header comments on the bybit*Grid*/
+// binance*Grid* functions above for why only these two, and why Bybit
+// auto-switches hedge mode per-symbol while Binance only checks and
+// asks the person to switch it themselves). Every route below mirrors
+// the shape/safety conventions of the six-strategy routes above
+// (VerifyRejected -> rejected:true, otherwise a plain ok:false message)
+// so the client's existing error-handling patterns apply unchanged.
+// =============================================================
+const GRID_HEDGE_MODE_ENSURE = {
+  bybit: async (mode, apiKey, secretKey, symbol) => { await bybitGridEnsureHedgeMode(mode, apiKey, secretKey, symbol); return { hedgeModeReady: true }; },
+  binance: async (mode, apiKey, secretKey) => {
+    const on = await binanceGridCheckHedgeMode(mode, apiKey, secretKey);
+    if(!on){
+      return { hedgeModeReady: false, message: 'This Binance account is in one-way position mode. NxTGen Grid needs Hedge Mode (holds a long AND short position on the same symbol at once) — switch it on once, yourself, in Binance\'s app under Futures settings > Position Mode, or via POST /fapi/v1/positionSide/dual. This app will not switch it for you since it is an account-wide setting affecting every symbol you trade on Binance, not just Grid\'s.' };
+    }
+    return { hedgeModeReady: true };
+  },
+};
+app.post('/api/futures/grid/ensure-mode', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, symbol, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !symbol){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey, secretKey, and symbol are all required.' });
+  }
+  const ensure = GRID_HEDGE_MODE_ENSURE[exchange];
+  if(!ensure) return res.status(400).json({ ok:false, message:`NxTGen Grid Live/Demo only supports bybit and binance right now — "${exchange}" isn't wired up.` });
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const result = await ensure(netMode, apiKey, secretKey, symbol, passphrase);
+    return res.json({ ok:true, ...result });
+  }catch(err){
+    if(err instanceof VerifyRejected) return res.json({ ok:false, rejected:true, message: err.message });
+    return res.json({ ok:false, rejected:false, message: `Could not confirm hedge mode for ${symbol} on ${exchange}: ${err.message}` });
+  }
+});
+
+const GRID_PLACE_LEVEL = { bybit: placeBybitGridLevelOrder, binance: placeBinanceGridLevelOrder };
+const GRID_PLACE_CLOSE = { bybit: placeBybitGridCloseOrder, binance: placeBinanceGridCloseOrder };
+const GRID_SET_SIDE_STOP = { bybit: setBybitGridSideStop, binance: setBinanceGridSideStop };
+const GRID_CANCEL_ORDER = { bybit: cancelBybitOrder, binance: cancelBinanceOrder };
+const GRID_OPEN_ORDERS = { bybit: getBybitGridOpenOrders, binance: getBinanceGridOpenOrders };
+const GRID_POSITIONS = { bybit: getBybitGridPositions, binance: getBinanceGridPositions };
+const GRID_FLATTEN = { bybit: flattenBybitGrid, binance: flattenBinanceGrid };
+
+function gridRoute(path, table, argsFromBody){
+  app.post(path, async (req, res) => {
+    const { exchange, mode, apiKey, secretKey } = req.body || {};
+    if(!exchange || !apiKey || !secretKey){
+      return res.status(400).json({ ok:false, message:'exchange, apiKey, and secretKey are all required.' });
+    }
+    const fn = table[exchange];
+    if(!fn) return res.status(400).json({ ok:false, message:`NxTGen Grid Live/Demo only supports bybit and binance right now — "${exchange}" isn't wired up.` });
+    const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+    try{
+      const result = await fn(netMode, apiKey, secretKey, argsFromBody(req.body));
+      return res.json({ ok:true, ...result });
+    }catch(err){
+      if(err instanceof VerifyRejected) return res.json({ ok:false, rejected:true, message: err.message });
+      return res.json({ ok:false, rejected:false, message: `Grid order call to ${exchange} failed: ${err.message}` });
+    }
+  });
+}
+gridRoute('/api/futures/grid/place-level', GRID_PLACE_LEVEL, b => ({ symbol: b.symbol, direction: b.direction, price: parseFloat(b.price), qty: parseFloat(b.qty), leverage: parseFloat(b.leverage), orderLinkTag: b.orderLinkTag }));
+gridRoute('/api/futures/grid/place-close', GRID_PLACE_CLOSE, b => ({ symbol: b.symbol, direction: b.direction, price: parseFloat(b.price), qty: parseFloat(b.qty), orderLinkTag: b.orderLinkTag }));
+gridRoute('/api/futures/grid/set-side-stop', GRID_SET_SIDE_STOP, b => ({ symbol: b.symbol, direction: b.direction, stopPrice: parseFloat(b.stopPrice), existingAlgoId: b.existingAlgoId }));
+gridRoute('/api/futures/grid/cancel', GRID_CANCEL_ORDER, b => ({ symbol: b.symbol, orderId: b.orderId }));
+
+// These three take just (mode, apiKey, secretKey, symbol) — a plain
+// string, not an options object — so they're wired directly rather
+// than through gridRoute's argsFromBody(...) object shape above.
+function gridSimpleRoute(path, table){
+  app.post(path, async (req, res) => {
+    const { exchange, mode, apiKey, secretKey, symbol } = req.body || {};
+    if(!exchange || !apiKey || !secretKey || !symbol){
+      return res.status(400).json({ ok:false, message:'exchange, apiKey, secretKey, and symbol are all required.' });
+    }
+    const fn = table[exchange];
+    if(!fn) return res.status(400).json({ ok:false, message:`NxTGen Grid Live/Demo only supports bybit and binance right now — "${exchange}" isn't wired up.` });
+    const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+    try{
+      const result = await fn(netMode, apiKey, secretKey, symbol);
+      // getBybitGridOpenOrders/getBinanceGridOpenOrders return a plain
+      // array (not {orders:[...]}) — spreading an array into a JSON
+      // object gives numeric-key garbage, so wrap arrays under `list`
+      // instead; getBybitGridPositions/getBinanceGridPositions/
+      // flattenBybitGrid/flattenBinanceGrid already return plain
+      // objects and spread correctly as before.
+      return res.json(Array.isArray(result) ? { ok:true, list: result } : { ok:true, ...result });
+    }catch(err){
+      if(err instanceof VerifyRejected) return res.json({ ok:false, rejected:true, message: err.message });
+      return res.json({ ok:false, rejected:false, message: `Grid call to ${exchange} failed: ${err.message}` });
+    }
+  });
+}
+gridSimpleRoute('/api/futures/grid/orders', GRID_OPEN_ORDERS);
+gridSimpleRoute('/api/futures/grid/positions', GRID_POSITIONS);
+gridSimpleRoute('/api/futures/grid/flatten', GRID_FLATTEN);
+
+// =============================================================
+// Trading Bots — DCA routes. Same generic gridRoute/gridSimpleRoute
+// helpers as Grid above (they're not actually Grid-specific — just
+// named for where they were first used), just pointed at the one-way
+// DCA functions instead of Grid's hedge-mode ones.
+// =============================================================
+const DCA_PLACE = { bybit: placeBybitDcaOrder, binance: placeBinanceDcaOrder };
+const DCA_SET_TP = { bybit: setBybitDcaTakeProfit, binance: setBinanceDcaTakeProfit };
+const DCA_CANCEL = { bybit: cancelBybitOrder, binance: cancelBinanceOrder };
+const DCA_OPEN_ORDERS = { bybit: getBybitDcaOpenOrders, binance: getBinanceDcaOpenOrders };
+const DCA_POSITION = { bybit: getBybitDcaPosition, binance: getBinanceDcaPosition };
+const DCA_FLATTEN = { bybit: flattenBybitDca, binance: flattenBinanceDca };
+
+function dcaRoute(path, table, argsFromBody){
+  app.post(path, async (req, res) => {
+    const { exchange, mode, apiKey, secretKey } = req.body || {};
+    if(!exchange || !apiKey || !secretKey){
+      return res.status(400).json({ ok:false, message:'exchange, apiKey, and secretKey are all required.' });
+    }
+    const fn = table[exchange];
+    if(!fn) return res.status(400).json({ ok:false, message:`DCA Live/Demo only supports bybit and binance right now — "${exchange}" isn't wired up.` });
+    const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+    try{
+      const result = await fn(netMode, apiKey, secretKey, argsFromBody(req.body));
+      return res.json({ ok:true, ...result });
+    }catch(err){
+      if(err instanceof VerifyRejected) return res.json({ ok:false, rejected:true, message: err.message });
+      return res.json({ ok:false, rejected:false, message: `DCA order call to ${exchange} failed: ${err.message}` });
+    }
+  });
+}
+dcaRoute('/api/futures/dca/place', DCA_PLACE, b => ({ symbol: b.symbol, direction: b.direction, orderType: b.orderType, price: b.price != null ? parseFloat(b.price) : null, qty: parseFloat(b.qty), leverage: b.leverage != null ? parseFloat(b.leverage) : null }));
+dcaRoute('/api/futures/dca/set-tp', DCA_SET_TP, b => ({ symbol: b.symbol, direction: b.direction, takeProfitPrice: b.takeProfitPrice != null ? parseFloat(b.takeProfitPrice) : null, stopLossPrice: b.stopLossPrice != null ? parseFloat(b.stopLossPrice) : null, existingTpAlgoId: b.existingTpAlgoId, existingSlAlgoId: b.existingSlAlgoId }));
+dcaRoute('/api/futures/dca/cancel', DCA_CANCEL, b => ({ symbol: b.symbol, orderId: b.orderId }));
+
+function dcaSimpleRoute(path, table){
+  app.post(path, async (req, res) => {
+    const { exchange, mode, apiKey, secretKey, symbol } = req.body || {};
+    if(!exchange || !apiKey || !secretKey || !symbol){
+      return res.status(400).json({ ok:false, message:'exchange, apiKey, secretKey, and symbol are all required.' });
+    }
+    const fn = table[exchange];
+    if(!fn) return res.status(400).json({ ok:false, message:`DCA Live/Demo only supports bybit and binance right now — "${exchange}" isn't wired up.` });
+    const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+    try{
+      const result = await fn(netMode, apiKey, secretKey, symbol);
+      return res.json(Array.isArray(result) ? { ok:true, list: result } : { ok:true, ...result });
+    }catch(err){
+      if(err instanceof VerifyRejected) return res.json({ ok:false, rejected:true, message: err.message });
+      return res.json({ ok:false, rejected:false, message: `DCA call to ${exchange} failed: ${err.message}` });
+    }
+  });
+}
+dcaSimpleRoute('/api/futures/dca/orders', DCA_OPEN_ORDERS);
+dcaSimpleRoute('/api/futures/dca/position', DCA_POSITION);
+dcaSimpleRoute('/api/futures/dca/flatten', DCA_FLATTEN);
+
+
+
+//
+// Why this exists: the front-end used to call each exchange's public
+// REST API directly from the browser, one after another. Two problems
+// came from that: (1) sequential requests meant one slow exchange
+// stalled every exchange queued behind it, and (2) Binance/MEXC's
+// public endpoints are reachable inconsistently depending on the
+// caller's network/ISP/VPN/region — so "connected" behaved differently
+// on every device. Doing the fetch here instead means it always runs
+// from the same server, in parallel, regardless of which device or
+// network the person is on — the front-end just asks this one endpoint
+// and gets a consistent answer every time.
+// =============================================================
+async function fetchJSON(url, timeoutMs = 10_000, onHeaders){
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try{
+    const res = await fetch(url, { signal: ctrl.signal });
+    if(onHeaders) onHeaders(res.headers); // optional — only Binance calls use this today, see recordBinanceWeight below
+    const bodyText = await res.text();
+    if(!res.ok){
+      // Surfacing the real status + body is what makes a *recurring*
+      // "could not fetch market data" error diagnosable instead of a
+      // mystery. In particular: HTTP 451 means the exchange is geo-
+      // blocking this server's own IP (Binance in particular is known
+      // to aggressively block certain regions even for public,
+      // unauthenticated market data — not just trading); HTTP 429/418
+      // means rate-limited or IP-banned; anything else is exchange-
+      // specific. Previously this only said "HTTP <code>", which looks
+      // identical whether the cause is a geo-block, a rate limit, or
+      // something else entirely — not useful for someone trying to
+      // figure out why it keeps happening.
+      let detail = bodyText.slice(0, 200);
+      try{ const j = JSON.parse(bodyText); detail = j.msg || j.message || j.error || detail; }catch(e){ /* body wasn't JSON — keep the raw text above */ }
+      const hint = res.status === 451 ? ' (this usually means the exchange is geo-blocking this server\'s IP)'
+        : (res.status === 429 || res.status === 418) ? ' (rate limited)' : '';
+      throw new Error(`HTTP ${res.status}${hint} — ${detail}`);
+    }
+    try{
+      return JSON.parse(bodyText);
+    }catch(e){
+      throw new Error(`Non-JSON response: ${bodyText.slice(0, 200)}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchBitgetMarkets(){
+  const [symbolsRes, tickersRes] = await Promise.all([
+    fetchJSON('https://api.bitget.com/api/v2/spot/public/symbols'),
+    fetchJSON('https://api.bitget.com/api/v2/spot/market/tickers'),
+  ]);
+  if(symbolsRes.code !== '00000') throw new Error('symbols: ' + symbolsRes.msg);
+  if(tickersRes.code !== '00000') throw new Error('tickers: ' + tickersRes.msg);
+  const tickerMap = new Map();
+  for(const t of tickersRes.data) tickerMap.set(t.symbol, t);
+  const pairs = [];
+  for(const s of symbolsRes.data){
+    if(s.status !== 'online') continue;
+    const t = tickerMap.get(s.symbol);
+    if(!t || !t.bidPr || !t.askPr) continue;
+    const bid = parseFloat(t.bidPr), ask = parseFloat(t.askPr);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.symbol, base:s.baseCoin, quote:s.quoteCoin, bid, ask,
+      last: parseFloat(t.close) || (bid + ask) / 2,
+      bidQty: parseFloat(t.bidSz) || 0, askQty: parseFloat(t.askSz) || 0,
+      quoteVolume24h: parseFloat(t.quoteVolume) || 0,
+    });
+  }
+  return pairs;
+}
+
+async function fetchBinanceMarkets(){
+  const base = 'https://api.binance.com';
+  const [infoRes, tickerRes] = await Promise.all([
+    fetchJSON(base + '/api/v3/exchangeInfo'),
+    fetchJSON(base + '/api/v3/ticker/24hr'),
+  ]);
+  const tickerMap = new Map();
+  for(const t of tickerRes) tickerMap.set(t.symbol, t);
+  const pairs = [];
+  for(const s of infoRes.symbols){
+    if(s.status !== 'TRADING') continue;
+    const t = tickerMap.get(s.symbol);
+    if(!t || !t.bidPrice || !t.askPrice) continue;
+    const bid = parseFloat(t.bidPrice), ask = parseFloat(t.askPrice);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.symbol, base:s.baseAsset, quote:s.quoteAsset, bid, ask,
+      last: parseFloat(t.lastPrice) || (bid + ask) / 2,
+      bidQty: parseFloat(t.bidQty) || 0, askQty: parseFloat(t.askQty) || 0,
+      quoteVolume24h: parseFloat(t.quoteVolume) || 0,
+    });
+  }
+  return pairs;
+}
+
+async function fetchBybitMarkets(){
+  const base = 'https://api.bybit.com';
+  const [infoRes, tickerRes] = await Promise.all([
+    fetchJSON(base + '/v5/market/instruments-info?category=spot'),
+    fetchJSON(base + '/v5/market/tickers?category=spot'),
+  ]);
+  if(infoRes.retCode !== 0) throw new Error('instruments: ' + infoRes.retMsg);
+  if(tickerRes.retCode !== 0) throw new Error('tickers: ' + tickerRes.retMsg);
+  const tickerMap = new Map();
+  for(const t of tickerRes.result.list) tickerMap.set(t.symbol, t);
+  const pairs = [];
+  for(const s of infoRes.result.list){
+    if(s.status !== 'Trading') continue;
+    const t = tickerMap.get(s.symbol);
+    if(!t || !t.bid1Price || !t.ask1Price) continue;
+    const bid = parseFloat(t.bid1Price), ask = parseFloat(t.ask1Price);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.symbol, base:s.baseCoin, quote:s.quoteCoin, bid, ask,
+      last: parseFloat(t.lastPrice) || (bid + ask) / 2,
+      bidQty: parseFloat(t.bid1Size) || 0, askQty: parseFloat(t.ask1Size) || 0,
+      quoteVolume24h: parseFloat(t.turnover24h) || 0,
+    });
+  }
+  return pairs;
+}
+
+async function fetchMexcMarkets(){
+  const base = 'https://api.mexc.com';
+  const [infoRes, tickerRes] = await Promise.all([
+    fetchJSON(base + '/api/v3/exchangeInfo'),
+    fetchJSON(base + '/api/v3/ticker/24hr'),
+  ]);
+  const tickerMap = new Map();
+  for(const t of tickerRes) tickerMap.set(t.symbol, t);
+  const pairs = [];
+  for(const s of infoRes.symbols){
+    if(s.status !== 'ENABLED' && s.status !== '1') continue;
+    const t = tickerMap.get(s.symbol);
+    if(!t || !t.bidPrice || !t.askPrice) continue;
+    const bid = parseFloat(t.bidPrice), ask = parseFloat(t.askPrice);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.symbol, base:s.baseAsset, quote:s.quoteAsset, bid, ask,
+      last: parseFloat(t.lastPrice) || (bid + ask) / 2,
+      bidQty: parseFloat(t.bidQty) || 0, askQty: parseFloat(t.askQty) || 0,
+      quoteVolume24h: parseFloat(t.quoteVolume) || 0,
+    });
+  }
+  return pairs;
+}
+
+async function fetchGateioMarkets(){
+  const base = 'https://api.gateio.ws';
+  const [pairsRes, tickerRes] = await Promise.all([
+    fetchJSON(base + '/api/v4/spot/currency_pairs'),
+    fetchJSON(base + '/api/v4/spot/tickers'),
+  ]);
+  const tickerMap = new Map();
+  for(const t of tickerRes) tickerMap.set(t.currency_pair, t);
+  const pairs = [];
+  for(const s of pairsRes){
+    if(s.trade_status !== 'tradable') continue;
+    const t = tickerMap.get(s.id);
+    if(!t || !t.highest_bid || !t.lowest_ask) continue;
+    const bid = parseFloat(t.highest_bid), ask = parseFloat(t.lowest_ask);
+    if(!bid || !ask) continue;
+    pairs.push({
+      symbol:s.id, base:s.base, quote:s.quote, bid, ask,
+      last: parseFloat(t.last) || (bid + ask) / 2,
+      bidQty: 0, askQty: 0,
+      quoteVolume24h: parseFloat(t.quote_volume) || 0,
+    });
+  }
+  return pairs;
+}
+
+const MARKET_LOADERS = {
+  bitget: fetchBitgetMarkets, binance: fetchBinanceMarkets, bybit: fetchBybitMarkets,
+  mexc: fetchMexcMarkets, gateio: fetchGateioMarkets,
+};
+
+// Shared, in-memory, short-lived cache — every device hitting this server
+// within the TTL gets the same already-fetched data instead of triggering
+// its own round trip to five exchanges. inFlight coalesces concurrent
+// requests that land while a fetch is already running, so a burst of
+// simultaneous callers still only ever causes one upstream fetch per exchange.
+const MARKET_CACHE_TTL_MS = 3000;
+let marketCache = { data: null, at: 0 };
+let marketInFlight = null;
+
+async function getMarketsCached(){
+  const now = Date.now();
+  if(marketCache.data && (now - marketCache.at) < MARKET_CACHE_TTL_MS) return marketCache.data;
+  if(marketInFlight) return marketInFlight;
+  marketInFlight = (async () => {
+    const keys = Object.keys(MARKET_LOADERS);
+    const settled = await Promise.allSettled(keys.map(k => MARKET_LOADERS[k]()));
+    const out = { fetchedAt: Date.now() };
+    keys.forEach((k, i) => {
+      const r = settled[i];
+      out[k] = r.status === 'fulfilled'
+        ? { ok: true, pairs: r.value }
+        : { ok: false, error: String((r.reason && r.reason.message) || r.reason) };
+    });
+    marketCache = { data: out, at: Date.now() };
+    return out;
+  })();
+  try{
+    return await marketInFlight;
+  } finally {
+    marketInFlight = null;
+  }
+}
+
+app.use('/api/markets', rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
+app.get('/api/markets', async (req, res) => {
+  try{
+    const data = await getMarketsCached();
+    res.set('Cache-Control', 'public, max-age=2');
+    res.json(data);
+  }catch(err){
+    res.status(502).json({ error: 'Could not fetch market data: ' + err.message });
+  }
+});
+
+// Bitget's coin/network directory (withdraw/deposit flags for D/W badges).
+// Changes rarely, so this gets a much longer cache TTL than tickers.
+const COININFO_CACHE_TTL_MS = 10 * 60 * 1000;
+let coinInfoCache = { data: null, at: 0 };
+async function getBitgetCoinInfoCached(){
+  const now = Date.now();
+  if(coinInfoCache.data && (now - coinInfoCache.at) < COININFO_CACHE_TTL_MS) return coinInfoCache.data;
+  const res = await fetchJSON('https://api.bitget.com/api/v2/spot/public/coins');
+  if(res.code !== '00000') throw new Error('coins: ' + res.msg);
+  const list = res.data.map(c => {
+    let withdrawable = false, rechargeable = false;
+    for(const ch of (c.chains || [])){
+      if(ch.withdrawable === 'true') withdrawable = true;
+      if(ch.rechargeable === 'true') rechargeable = true;
+    }
+    return { coin: c.coin, withdrawable, rechargeable };
+  });
+  coinInfoCache = { data: list, at: Date.now() };
+  return list;
+}
+app.get('/api/markets/bitget-coins', async (req, res) => {
+  try{
+    const list = await getBitgetCoinInfoCached();
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json({ ok: true, coins: list });
+  }catch(err){
+    res.status(502).json({ ok: false, error: 'Could not fetch coin info: ' + err.message });
+  }
+});
+
+app.get('/api/health', (req, res) => res.json({ ok:true }));
+
+// ---- Actual current balance of ONE asset — ground truth for sizing any
+// leg after the first, and any unwind step. Never re-derive from a prior
+// order's reported fill; fees come out of the asset you just received and
+// the previous leg's response doesn't tell you that. ----
+app.use('/api/balance', rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
+app.post('/api/balance', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, asset, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey || !asset){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey, secretKey and asset are all required.' });
+  }
+  const getter = ASSET_BALANCE_GETTERS[exchange];
+  if(!getter){
+    return res.status(400).json({ ok:false, message:`No balance getter for "${exchange}" — only binance, bybit, mexc, gateio, and bitget are supported.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const balance = await getter(netMode, apiKey, secretKey, asset, passphrase);
+    return res.json({ ok:true, balance });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not fetch ${asset} balance on ${exchange}: ${err.message}` });
+  }
+});
+
+// =============================================================
+// AI SIGNAL CONFIRMATION (optional, experimental) — an optional second
+// opinion from a user-supplied LLM provider key (OpenAI/ChatGPT,
+// Anthropic/Claude, Google/Gemini, or xAI/Grok), called ONLY on a signal
+// js/futures/engine.js's own scoring/risk/no-trade logic has ALREADY
+// approved (see js/ai-signal.js and js/futures-ui.js's runLiveCycle). It
+// can only reject that one signal — it has no way to approve one the
+// engine rejected, size a position, set leverage, or touch any of this
+// app's other risk controls.
+//
+// Same "key never touches disk/log/database" handling as /api/verify
+// above: the provider key lives in this request's local variables for the
+// lifetime of this one call and nowhere else.
+//
+// HONESTY NOTE, matching this file's own standard for less-tested
+// exchange integrations (see the Bitget/MEXC Demo comments elsewhere):
+// each provider's endpoint/model/request-shape below is implemented
+// against that provider's documented API. This has now actually been
+// exercised against a real account once — Google's Gemini call was
+// confirmed broken by a live Test Connection: 'gemini-1.5-flash' had
+// been fully retired, unrelated to anything else in this app. Fixed by
+// switching to Google's own 'gemini-flash-latest' alias instead of a
+// pinned dated name (see callGemini below). The other three model names
+// (OpenAI/Anthropic/xAI) were re-verified against each provider's current
+// docs at the same time and updated where they'd also gone stale
+// (OpenAI's and xAI's had; Anthropic's hadn't). None of the four have
+// been confirmed against a real account beyond that one Gemini test.
+// These providers rename/retire model IDs every few months as a matter
+// of course — if a call ever starts failing with a "model not found"-
+// style error again, that's expected drift, not a deeper bug: check that
+// provider's current docs, update the model constant below, and use Test
+// Connection (API Keys tab) to confirm before trusting it again.
+// =============================================================
+// Raised from 12s: several of these providers now default to internal
+// "reasoning"/"thinking" before answering (see the max-tokens note below),
+// which adds real latency even for a one-line JSON verdict.
+const AI_TIMEOUT_MS = 20_000;
+const AI_PROVIDER_LABELS = { openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', xai: 'xAI' };
+
+function withTimeout(promise, ms, label){
+  let t;
+  const timeout = new Promise((_, reject) => { t = setTimeout(() => reject(new Error(`${label} request timed out after ${ms}ms`)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+}
+
+function buildAiPrompt(signal){
+  const {
+    symbol, exchange, direction, setup, regime, confidence,
+    entry, stop, tp1, riskRewardRatio, expectedNetPct, liquidityScore, reasons,
+  } = signal || {};
+  const system = 'You are a second, independent reviewer for a futures scalping bot\'s trade signals. '
+    + 'Every signal you see has ALREADY passed the bot\'s own confidence, risk, liquidity, and no-trade filters — those thresholds are not yours to re-litigate, and a metric merely sitting on the lower end of what the bot already approved (e.g. "modest confidence", "low-ish liquidity") is NOT by itself a reason to reject. '
+    + 'APPROVE BY DEFAULT. Only reject when there is a specific, concrete, disqualifying problem a reasonable trader would actually act on — for example the setup\'s direction flatly contradicts the stated market regime, the numbers given are internally inconsistent, or something about the setup itself (not just its score) looks structurally broken. General caution, hedging language, or restating an already-passed metric in more cautious words is not a valid reason to reject. '
+    + 'Reply with ONLY a compact JSON object and nothing else, no markdown fence, no prose outside it: {"approve": true or false, "confidence": a number 0-100, "reason": "one short, specific sentence"}.';
+  const user = [
+    `Exchange: ${exchange}`, `Symbol: ${symbol}`, `Direction: ${direction}`, `Setup: ${setup}`,
+    `Market regime: ${regime}`, `Bot confidence: ${confidence}/100`, `Entry: ${entry}`, `Stop: ${stop}`,
+    `Target (TP1): ${tp1}`, `Risk:Reward: ${riskRewardRatio}`, `Expected net return: ${expectedNetPct}%`,
+    `Liquidity score (0-100): ${liquidityScore}`, `Bot's stated reasons: ${(reasons||[]).join('; ') || 'none given'}`,
+    '', 'Should this specific trade be taken right now? Respond with ONLY the JSON object described.',
+  ].join('\n');
+  return { system, user };
+}
+
+function parseAiVerdict(text){
+  if(!text) throw new Error('empty response from model');
+  const cleaned = String(text).trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if(!match) throw new Error('no JSON object found in the model\'s response');
+  const parsed = JSON.parse(match[0]);
+  if(typeof parsed.approve !== 'boolean') throw new Error('response is missing a boolean "approve" field');
+  return {
+    approve: parsed.approve,
+    confidence: Number.isFinite(parsed.confidence) ? Math.max(0, Math.min(100, parsed.confidence)) : null,
+    reason: typeof parsed.reason === 'string' ? parsed.reason.slice(0, 300) : '',
+  };
+}
+
+// OpenAI and xAI (Grok) both speak the same Chat Completions request/
+// response shape in the common case, but GPT-5-family models specifically
+// broke compatibility with two long-standing fields: they 400 on any
+// `temperature` other than their own default (1, so omit it rather than
+// send 0.2), and `max_tokens` was renamed `max_completion_tokens` (the
+// old name also 400s). opts lets the two callers below opt into GPT-5's
+// stricter shape instead of assuming every OpenAI-compatible API still
+// takes the classic one.
+async function callOpenAiCompatible(baseUrl, model, apiKey, system, user, opts = {}){
+  const body = {
+    model,
+    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+  };
+  if(!opts.omitTemperature) body.temperature = 0.2;
+  // 1024, not 200: gpt-5-mini and grok-4.3 both reason by default before
+  // answering, drawing on this same token budget — 200 was enough for
+  // the JSON verdict alone but left no room for any reasoning ahead of it.
+  body[opts.maxCompletionTokens ? 'max_completion_tokens' : 'max_tokens'] = 1024;
+  if(opts.reasoningEffort) body.reasoning_effort = opts.reasoningEffort;
+  const res = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok) throw new Error((data && (data.error?.message || data.message)) || `HTTP ${res.status}`);
+  const text = data?.choices?.[0]?.message?.content;
+  return parseAiVerdict(text);
+}
+
+async function callAnthropic(apiKey, system, user){
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      // Verified current as of this fix: 'claude-sonnet-4-5' is a
+      // maintained alias (resolves to the latest 4.5 snapshot), still
+      // listed and working alongside newer 4.6/5-generation releases —
+      // not the retired situation callGemini below just hit. Still worth
+      // rechecking Anthropic's model list if this ever 404s.
+      model: 'claude-sonnet-4-5',
+      max_tokens: 300,
+      system,
+      messages: [{ role: 'user', content: user }],
+    }),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok) throw new Error((data && (data.error?.message || data.message)) || `HTTP ${res.status}`);
+  const text = Array.isArray(data?.content) ? data.content.map(b => b.text || '').join('') : '';
+  return parseAiVerdict(text);
+}
+
+async function callGemini(apiKey, system, user){
+  // 'gemini-1.5-flash' is fully retired (Gemini 1.5 line is end-of-life) —
+  // this is exactly the failure mode the file-header note above warned
+  // about, now confirmed live. Using Flash-LITE specifically (not just
+  // "-flash-latest"): Flash-Lite is Google's fast/cheap tier and, per
+  // their own docs, defaults to little-to-no internal "thinking" before
+  // answering, unlike the full Flash line which reasons by default now.
+  // 'gemini-flash-lite-latest' is Google's own maintained alias for it,
+  // so this keeps following whatever their current Flash-Lite build is
+  // instead of needing a manual fix every time they ship a new
+  // generation — and it's squarely within the free API tier (Flash/
+  // Flash-Lite only, not Pro).
+  const model = 'gemini-flash-lite-latest';
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: system }] },
+      contents: [{ role: 'user', parts: [{ text: user }] }],
+      // 1024, not 200: even Flash-Lite isn't guaranteed fully thinking-
+      // off on every build Google ships under this alias (their own docs
+      // say Gemini 3-generation Flash/Flash-Lite "do not support full
+      // thinking-off"), and any thinking tokens draw on this same
+      // budget before the model gets to write the actual JSON answer —
+      // which is exactly what produced the "no JSON object found"
+      // error: 200 was enough for the verdict alone, not for any
+      // reasoning ahead of it.
+      generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
+    }),
+  });
+  const data = await res.json().catch(() => null);
+  if(!res.ok) throw new Error((data && data.error?.message) || `HTTP ${res.status}`);
+  const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+  return parseAiVerdict(text);
+}
+
+const AI_PROVIDERS = {
+  // gpt-4o-mini's whole model family (4o/4.1/o4-mini) has been retired
+  // from ChatGPT and OpenAI has fully moved the ecosystem to the GPT-5
+  // line — gpt-5-mini is their current lightweight/cost-efficient model,
+  // same role gpt-4o-mini used to fill. GPT-5-family-specific request
+  // shape (see callOpenAiCompatible above): no temperature,
+  // max_completion_tokens instead of max_tokens, reasoning kept minimal.
+  openai: (apiKey, system, user) => callOpenAiCompatible('https://api.openai.com/v1', 'gpt-5-mini', apiKey, system, user, { omitTemperature: true, maxCompletionTokens: true, reasoningEffort: 'minimal' }),
+  anthropic: (apiKey, system, user) => callAnthropic(apiKey, system, user),
+  google: (apiKey, system, user) => callGemini(apiKey, system, user),
+  // grok-2-latest is long gone — xAI has retired the entire Grok 2/3/4
+  // (original) lines; grok-4.3 is their current mid-tier "standard
+  // workhorse" model, a reasonable cost/capability match for gpt-5-mini
+  // and claude-sonnet-4-5 above rather than paying flagship pricing for
+  // a one-line trade-signal check. Uses the classic Chat Completions
+  // shape (temperature + max_tokens both still accepted) — it's only
+  // OpenAI's own GPT-5 line that broke that compatibility, not xAI's.
+  xai: (apiKey, system, user) => callOpenAiCompatible('https://api.x.ai/v1', 'grok-4.3', apiKey, system, user),
+};
+
+app.use('/api/ai/confirm', rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true, legacyHeaders: false }));
+app.post('/api/ai/confirm', async (req, res) => {
+  const { provider, apiKey, signal } = req.body || {};
+  if(!provider || !apiKey || !signal){
+    return res.status(400).json({ ok:false, message:'provider, apiKey and signal are all required.' });
+  }
+  const caller = AI_PROVIDERS[provider];
+  if(!caller){
+    return res.status(400).json({ ok:false, message:`Unknown AI provider "${provider}" — only openai, anthropic, google, and xai are supported.` });
+  }
+  const { system, user } = buildAiPrompt(signal);
+  try{
+    const verdict = await withTimeout(caller(apiKey, system, user), AI_TIMEOUT_MS, AI_PROVIDER_LABELS[provider] || provider);
+    return res.json({ ok:true, ...verdict });
+  }catch(err){
+    return res.json({ ok:false, message: `${AI_PROVIDER_LABELS[provider] || provider} request failed: ${err.message}` });
+  }
+});
+
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err.message); // never log req.body here
+  res.status(500).json({ verified:false, rejected:false, message:'Internal error.' });
+});
+
+const port = process.env.PORT || 8787;
+app.listen(port, () => console.log(`nxtgen-verify-proxy listening on :${port}`));
