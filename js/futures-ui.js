@@ -37,7 +37,7 @@ import { computeBtcShock } from './futures/indicators.js';
 import { STRATEGY_REGISTRY } from './futures/setups.js';
 import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGridSymbol, closeAllGridSessions, buildGridPlan, buildManualGridPlan, suggestGridRange, detectGridBreakout, netCycleProfit, scoreGridSuitability, runTradingBotsGridBacktest, summarizeTradingBotsGridTrades } from './futures/grid.js';
 import { DCA_STRATEGY, DCA_DEFAULTS, buildDcaPlan, computeDcaExitPrices } from './futures/dca.js';
-import { classifyRegime } from './futures/regime.js';
+import { classifyRegime, REGIMES } from './futures/regime.js';
 import { getAiConfirmation } from './ai-signal.js';
 
 const CYCLE_MS = 4000; // one synthetic "cycle" every 4s; each cycle advances the mock clock by a few minutes
@@ -3757,7 +3757,12 @@ async function runGridAutoScan(){
 async function runTradingBotsCycle(){
   const f = fu();
   rollTradingBotsDay(Date.now());
-  const activeBots = f.tradingBots.filter(b => b.status === 'active');
+  // Paused bots (Smart Bots' individual Pause) keep status 'active' —
+  // they still hold their slot in every count/limit above — but are
+  // skipped here: no new orders, no recalculation, no auto-stop check.
+  // Whatever's already resting on the exchange is left exactly as-is
+  // until Resumed or Stopped.
+  const activeBots = f.tradingBots.filter(b => b.status === 'active' && !b.paused);
   for(const bot of activeBots){
     const cred = liveCred(bot.exchange, bot.mode);
     if(!cred){ tradingBotLog(bot, `No verified ${bot.exchange} ${bot.mode} credential anymore — check your connection.`, true); continue; }
@@ -3877,13 +3882,21 @@ function tbTypeBadgeLabel(bot){ return bot.type === 'grid' ? 'Futures Grid Bot' 
 function tbDirBadgeLabel(bot){ return `${bot.direction === 'NEUTRAL' ? 'Neutral' : bot.direction === 'LONG' ? 'Long' : 'Short'} ${bot.leverage}x`; }
 
 function renderTradingBotsList(){
+  // Refresh Smart Bots' own list/detail views too — they share this
+  // same tradingBots array and management loop, just filtered by
+  // origin, so anything that changes a bot's state here (a log line, a
+  // stop, a close) needs to reach that UI as well. Safe to call
+  // unconditionally: it no-ops via its own els checks when the person
+  // isn't on that tab, and never changes which sub-view is showing.
+  renderSmartBotsPanel();
   if(!els.fuTradingBotsList) return;
   const f = fu();
-  if(els.fuTradingBotsBadge) els.fuTradingBotsBadge.textContent = `${f.tradingBots.filter(b => b.status === 'active').length} active`;
-  if(f.tradingBots.length === 0){
+  const manualBots = f.tradingBots.filter(b => b.origin !== 'smart');
+  if(els.fuTradingBotsBadge) els.fuTradingBotsBadge.textContent = `${manualBots.filter(b => b.status === 'active').length} active`;
+  if(manualBots.length === 0){
     els.fuTradingBotsList.innerHTML = `<div style="font-size:12px;color:var(--dim);padding:8px 0;">No bots created yet.</div>`;
   } else {
-    els.fuTradingBotsList.innerHTML = [...f.tradingBots].reverse().map(bot => {
+    els.fuTradingBotsList.innerHTML = [...manualBots].reverse().map(bot => {
       const m = computeBotMetrics(bot);
       const statusColor = bot.status === 'active' ? 'var(--green)' : bot.status === 'error' ? 'var(--red)' : 'var(--dim)';
       const priceRange = bot.plan && bot.plan.lower != null ? `${bot.plan.lower.toLocaleString()} - ${bot.plan.upper.toLocaleString()}` : '—';
@@ -4077,6 +4090,562 @@ function restoreLivePositions(){
   if(!f.liveRunning) toggleLiveRunning(); // starts the same polling loop the Live/Demo switch uses — runLiveCycleInner already treats "has an open position" as enough reason to poll, even while liveArmed is false
 }
 
+// =============================================================
+// Smart Bots — a second, separate create-flow + "My Bots" list/detail
+// UI, layered on top of the EXACT SAME Grid/DCA order-placement and
+// management code as the Trading Bots section above (bot.origin:
+// 'smart' is the only thing that tells them apart in the shared
+// tradingBots array/management loop) — deployGridBotInstance,
+// deployDcaBotInstance, manageGridBotInstance, manageDcaBotInstance,
+// stopTradingBot, deleteTradingBot and the cross-bot Daily Risk Limits
+// are all reused completely unchanged. This section only differs in:
+//   - the pair comes from the exchange's REAL current top-25-by-24h-
+//     volume list (getLiveTradeableSymbols), picked from a dropdown,
+//     rather than typed freely
+//   - exactly two bot types, labeled by what they suit rather than by
+//     mechanism ("DCA Bot (Trend)" / "Grid Bot (Sideways)"); the form
+//     shows a regime read (classifyRegime) for whatever pair is
+//     selected as a suggestion, but the person still picks the type
+//   - funding is a single Margin amount (fixed USDT or % of free
+//     balance, same self-resolving % math as the manual form); Grid's
+//     price range is auto-suggested from the live snapshot
+//     (suggestGridRange) and DCA's base/safety sizing is derived from
+//     that one amount instead of being configured order-by-order
+//   - bots here get an individual Pause (skips this bot's own
+//     management tick; whatever's already resting on the exchange is
+//     left exactly as-is) on top of the existing Stop (flattens) and
+//     Delete, plus Copy (pre-fills the create form) and Rename
+//   - the list reads as an overview — Active/Stopped tabs, a combined
+//     P&L summary — with a per-bot detail page (day-bucketed P&L
+//     chart, stats, actions) rather than inline cards only
+//
+// Worth being direct about, because it shapes every default below:
+// nothing here can promise a "high win rate" or guaranteed profit — no
+// bot can. Grid suiting sideways markets and DCA suiting trending ones
+// is a general tendency, not a rule, and both can still lose money,
+// especially with leverage. The regime badge is a heuristic hint, not
+// a signal to trust blindly — which is exactly why Take Profit/Stop
+// Loss stay mandatory (Stop Loss is required, not optional, for Grid)
+// and why these bots still count against the same Daily Risk Limits
+// as every other Trading Bot.
+// =============================================================
+const SMART_BOT_TYPES = { dca: 'DCA Bot (Trend)', grid: 'Grid Bot (Sideways)' };
+
+function sbState(){
+  const f = fu();
+  if(!f.sbGridForm) f.sbGridForm = { fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 5, takeProfitPct: 10, stopLossPct: 10 };
+  if(!f.sbDcaForm) f.sbDcaForm = { fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 3, takeProfitPct: 2, stopLossPct: 15, direction: 'LONG' };
+  return f;
+}
+
+function smartBots(){ return fu().tradingBots.filter(b => b.origin === 'smart'); }
+
+// Real, current top-25-by-24h-volume pairs for `exchange` — the exact
+// same ranked list Live/Demo scans (getLiveTradeableSymbols), cached
+// here for LIVE_UNIVERSE_TTL_MS so switching back and forth between
+// Smart Bots and another tab doesn't re-fetch every render.
+async function getSmartBotPairs(exchange){
+  const f = sbState();
+  const cache = f.sbPairCache[exchange];
+  if(cache && Date.now() - cache.atMs < LIVE_UNIVERSE_TTL_MS) return cache.entries;
+  const u = await getLiveTradeableSymbols(exchange).catch(() => null);
+  const source = (u && u.entries && u.entries.length) ? u.entries : ((u && u.top) ? u.top.map(s => ({ symbol: s, volume24hUsd: null })) : []);
+  const entries = source.slice(0, 25);
+  f.sbPairCache[exchange] = { atMs: Date.now(), entries };
+  return entries;
+}
+
+// Maps classifyRegime's 8-way read down to the one choice this form
+// actually asks for (Trend vs Sideways), plus a suggested direction for
+// Trend. High Volatility/Chaotic default toward Grid — a bounded range
+// with a hard Stop Loss is the more conservative of the two when the
+// market isn't cleanly trending OR ranging.
+function sbRegimeLabel(regime){
+  if(!regime) return null;
+  const r = regime.regime;
+  if(r === REGIMES.RANGE) return { kind: 'SIDEWAYS', text: 'Range / sideways', suggestedType: 'grid' };
+  if(r === REGIMES.LOW_VOL) return { kind: 'SIDEWAYS', text: 'Low volatility (compressed)', suggestedType: 'grid' };
+  if(r === REGIMES.HIGH_VOL) return { kind: 'VOLATILE', text: 'High volatility, no clean trend', suggestedType: 'grid' };
+  if(r === REGIMES.CHAOTIC) return { kind: 'VOLATILE', text: 'Chaotic / uncertain', suggestedType: 'grid' };
+  const direction = (r === REGIMES.STRONG_BULL || r === REGIMES.WEAK_BULL) ? 'LONG' : 'SHORT';
+  return { kind: 'TREND', text: r, suggestedType: 'dca', direction };
+}
+
+async function sbCheckRegime(symbol){
+  const f = sbState();
+  const exchange = f.sbCreateExchange || 'bybit';
+  const snap = await fetchLiveSnapshot(exchange, symbol, '5m').catch(() => null);
+  if(!snap || fu().sbCreateSymbol !== symbol) return; // pair changed again while this was in flight
+  const regime = classifyRegime(snap.h1, snap.m15);
+  const label = sbRegimeLabel(regime);
+  f.sbRegimeSuggestion = label ? { symbol, ...label } : null;
+  renderSmartBotsCreate();
+}
+
+// Top-level dispatcher: shows exactly one of List / Create / Detail and
+// (re)renders it. Safe to call any time something about any smart bot
+// changes — it never changes which of the three is showing.
+function renderSmartBotsPanel(){
+  const f = fu();
+  if(els.sbListView) els.sbListView.style.display = f.sbView === 'list' ? '' : 'none';
+  if(els.sbCreateView) els.sbCreateView.style.display = f.sbView === 'create' ? '' : 'none';
+  if(els.sbDetailView) els.sbDetailView.style.display = f.sbView === 'detail' ? '' : 'none';
+  if(els.fuSmartBotsBadge) els.fuSmartBotsBadge.textContent = `${smartBots().filter(b => b.status === 'active' && !b.paused).length} active`;
+  if(f.sbView === 'create') renderSmartBotsCreate();
+  else if(f.sbView === 'detail') renderSmartBotDetail(f.sbDetailId);
+  else renderSmartBotsList();
+}
+
+function renderSmartBotsList(){
+  if(!els.sbListHost) return;
+  const f = fu();
+  const bots = smartBots();
+  const tab = f.sbListTab || 'active';
+  const shown = bots.filter(b => tab === 'active' ? (b.status === 'active' || b.status === 'deploying') : (b.status === 'stopped' || b.status === 'closed' || b.status === 'error'));
+
+  let sumPnl = 0, sumInv = 0;
+  bots.forEach(b => { const m = computeBotMetrics(b); sumPnl += (m.totalPnl || 0); sumInv += (b.investmentUsd || 0); });
+  if(els.sbSummaryHost){
+    els.sbSummaryHost.innerHTML = bots.length ? `
+      <div class="ov-grid" style="grid-template-columns:repeat(2, 1fr);margin-bottom:14px;">
+        <div class="ov-card ov-highlight"><span class="ov-label">Bots Profit</span><span class="ov-value">${pnlSpan(sumPnl, sumInv ? (sumPnl / sumInv) * 100 : null)}</span></div>
+        <div class="ov-card"><span class="ov-label">Committed Margin</span><span class="ov-value">${fmtUsd(sumInv)}</span></div>
+      </div>` : '';
+  }
+  if(els.sbTabsHost){
+    const activeN = bots.filter(b => b.status === 'active' || b.status === 'deploying').length;
+    const stoppedN = bots.length - activeN;
+    els.sbTabsHost.innerHTML = `
+      <div class="tb-tabs" style="margin-bottom:12px;">
+        <div class="tb-tab sb-list-tab ${tab === 'active' ? 'on' : ''}" data-tab="active">Active <span style="color:var(--dim);">${activeN}</span></div>
+        <div class="tb-tab sb-list-tab ${tab === 'stopped' ? 'on' : ''}" data-tab="stopped">Stopped <span style="color:var(--dim);">${stoppedN}</span></div>
+      </div>`;
+  }
+
+  const createBtnHtml = `<button type="button" class="primary" id="sbCreateBtn" style="font-size:12px;padding:6px 16px;margin-top:10px;">+ Create New Bot</button>`;
+  if(shown.length === 0){
+    els.sbListHost.innerHTML = `<div style="font-size:12px;color:var(--dim);padding:8px 0;">No ${tab === 'active' ? 'active' : 'stopped'} Smart Bots ${tab === 'active' ? 'yet.' : '.'}</div>${tab === 'active' ? createBtnHtml : ''}`;
+    return;
+  }
+  els.sbListHost.innerHTML = [...shown].reverse().map(bot => {
+    const m = computeBotMetrics(bot);
+    const label = bot.nickname || `${bot.symbol} ${bot.type === 'grid' ? 'Grid Bot' : 'DCA Bot'}`;
+    const isLiveAndRunning = bot.status === 'active' && !bot.paused;
+    const statusColor = isLiveAndRunning ? 'var(--green)' : bot.status === 'error' ? 'var(--red)' : 'var(--dim)';
+    return `
+    <div class="tb-card sb-card" data-id="${bot.id}" style="cursor:pointer;">
+      <div class="tb-card-head">
+        <div class="tb-card-id">
+          <div class="tb-icon">${icon(bot.type === 'grid' ? 'rows' : 'refresh-cw')}</div>
+          <div>
+            <div class="tb-card-title">
+              <strong>${label}</strong>
+              <span class="tb-badge">${SMART_BOT_TYPES[bot.type] || tbTypeBadgeLabel(bot)}</span>
+            </div>
+            <div class="tb-card-sub">
+              <span class="dot ${isLiveAndRunning ? 'live' : bot.status === 'error' ? 'err' : ''}" style="${!isLiveAndRunning && bot.status !== 'error' ? 'background:var(--dim2);' : ''}"></span>
+              <span style="color:${statusColor};text-transform:capitalize;">${bot.paused && bot.status === 'active' ? 'paused' : bot.status}</span>
+              <span style="color:var(--dim2);">· ${EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange} ${bot.mode}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tb-stats-row">
+        <div class="tb-stat"><span class="l">Amount</span><span class="n">${fmtUsd(bot.investmentUsd || 0)}</span></div>
+        <div class="tb-stat"><span class="l">Total P/L</span><span class="n">${pnlSpan(m.totalPnl, m.pctOfInvestment)}</span></div>
+        <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length} · ${fmtBotUptime(bot.createdAtMs)}</span></div>
+      </div>
+    </div>`;
+  }).join('') + createBtnHtml;
+}
+
+function renderSmartBotsCreate(){
+  if(!els.sbCreateHost) return;
+  const f = sbState();
+  const exchange = f.sbCreateExchange || 'bybit';
+  const mode = f.liveModeByExchange[exchange] || 'live';
+  const type = f.sbCreateType || 'dca';
+  const cfg = type === 'grid' ? f.sbGridForm : f.sbDcaForm;
+  const pairCache = f.sbPairCache[exchange];
+  const pairs = pairCache ? pairCache.entries : [];
+  const suggestion = f.sbRegimeSuggestion && f.sbRegimeSuggestion.symbol === f.sbCreateSymbol ? f.sbRegimeSuggestion : null;
+
+  els.sbCreateHost.innerHTML = `
+    <button type="button" class="primary ghost sb-back-btn" style="font-size:11px;padding:4px 10px;margin-bottom:12px;">&larr; Back to My Bots</button>
+    <div class="ov-block" style="padding:12px;">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;">
+        <label style="font-size:11px;color:var(--dim);">Exchange
+          <select id="sbExchange" style="display:block;margin-top:3px;min-width:110px;">
+            ${GRID_LIVE_EXCHANGES.map(x => `<option value="${x}" ${exchange === x ? 'selected' : ''}>${EXCHANGE_DISPLAY_NAMES[x] || x}</option>`).join('')}
+          </select>
+        </label>
+        <div style="align-self:flex-end;">
+          <div style="font-size:11px;color:var(--dim);margin-bottom:3px;">Network</div>
+          <div class="mode-toggle" role="group" aria-label="${exchange} network">
+            <button type="button" class="mode-btn sb-mode-btn ${mode === 'live' ? 'active' : ''}" data-mode="live">Live</button>
+            <button type="button" class="mode-btn sb-mode-btn ${mode === 'demo' ? 'active' : ''}" data-mode="demo">Demo</button>
+          </div>
+        </div>
+        <label style="font-size:11px;color:var(--dim);">Pair (top 25 by 24h volume)
+          <select id="sbSymbol" style="display:block;margin-top:3px;min-width:160px;text-transform:uppercase;">
+            ${pairs.length ? pairs.map(p => `<option value="${p.symbol}" ${f.sbCreateSymbol === p.symbol ? 'selected' : ''}>${p.symbol}</option>`).join('') : `<option value="">Loading top 25…</option>`}
+          </select>
+        </label>
+      </div>
+      <div id="sbRegimeNote" style="font-size:11.5px;color:var(--dim);margin-bottom:12px;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel2);">
+        ${suggestion
+          ? `${f.sbCreateSymbol} right now: <strong style="color:var(--ink);">${suggestion.text}</strong> — suggested type: <strong style="color:var(--amber);">${SMART_BOT_TYPES[suggestion.suggestedType]}</strong>${suggestion.suggestedType !== type ? ` <button type="button" id="sbApplySuggestionBtn" class="primary ghost" style="font-size:10.5px;padding:2px 8px;margin-left:6px;">Use this</button>` : ' (already selected below)'}`
+          : (f.sbCreateSymbol ? 'Checking current regime for this pair…' : 'Pick a pair to see its current regime and a suggested bot type.')}
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
+        <label style="font-size:11px;color:var(--dim);">Bot Type
+          <select id="sbType" style="display:block;margin-top:3px;min-width:180px;">
+            ${Object.entries(SMART_BOT_TYPES).map(([k, v]) => `<option value="${k}" ${type === k ? 'selected' : ''}>${v}</option>`).join('')}
+          </select>
+        </label>
+        ${type === 'dca' ? `
+        <div style="align-self:flex-end;">
+          <div style="font-size:11px;color:var(--dim);margin-bottom:3px;">Direction</div>
+          <div class="mode-toggle">
+            ${['LONG', 'SHORT'].map(d => `<button type="button" class="mode-btn sb-dca-direction ${cfg.direction === d ? 'active' : ''}" data-dir="${d}">${d === 'LONG' ? 'Long' : 'Short'}</button>`).join('')}
+          </div>
+        </div>` : ''}
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
+        <label style="font-size:11px;color:var(--dim);">Sizing
+          <div style="display:flex;gap:6px;margin-top:3px;">
+            <button type="button" class="mode-btn sb-fundmode ${cfg.fundingMode !== 'pct' ? 'active' : ''}" data-mode="usdt">Fixed USDT</button>
+            <button type="button" class="mode-btn sb-fundmode ${cfg.fundingMode === 'pct' ? 'active' : ''}" data-mode="pct">% of balance</button>
+          </div>
+        </label>
+        ${cfg.fundingMode === 'pct' ? `
+        <label style="font-size:11px;color:var(--dim);">Margin (% of free balance)
+          <div style="display:flex;align-items:center;gap:8px;margin-top:3px;min-width:170px;">
+            <input id="sbFundingPctRange" type="range" min="1" max="95" step="1" value="${cfg.fundingPct}" style="flex:1;">
+            <input id="sbFundingPct" type="number" min="1" max="95" step="1" value="${cfg.fundingPct}" style="width:54px;">
+          </div>
+        </label>` : `
+        <label style="font-size:11px;color:var(--dim);">Margin (USDT)
+          <input id="sbFundingUsd" type="number" min="1" step="any" value="${cfg.fundingUsd}" style="display:block;margin-top:3px;min-width:110px;">
+        </label>`}
+        <label style="font-size:11px;color:var(--dim);">Leverage
+          <input id="sbLeverage" type="number" min="1" max="20" step="1" value="${cfg.leverage}" style="display:block;margin-top:3px;min-width:80px;">
+        </label>
+        <label style="font-size:11px;color:var(--dim);">Take Profit (%)
+          <input id="sbTakeProfit" type="number" min="0" step="any" value="${cfg.takeProfitPct}" style="display:block;margin-top:3px;min-width:90px;">
+        </label>
+        <label style="font-size:11px;color:var(--dim);">Stop Loss (%)${type === 'grid' ? ' — required' : ' — optional'}
+          <input id="sbStopLoss" type="number" min="0" step="any" value="${cfg.stopLossPct == null ? '' : cfg.stopLossPct}" style="display:block;margin-top:3px;min-width:90px;">
+        </label>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin:8px 0 12px;line-height:1.5;">
+        ${type === 'grid'
+          ? 'Grid Bot: a neutral range of resting orders around the current price — range auto-suggested from live data the moment you click Create — that cycles as price moves within it. Stops (flattens) the instant Stop Loss or Take Profit is hit.'
+          : 'DCA Bot: a base order now plus a laddered set of resting safety orders that average into the position if price moves against it, with one take-profit off the blended average entry. Stops (position flat, orders cancelled) the instant Take Profit or Stop Loss is hit.'}
+        Neither can promise a win rate or guaranteed profit — set Stop Loss/Take Profit at levels you're actually comfortable with.
+      </div>
+      <div id="sbCreateStatus" style="font-size:11.5px;color:var(--dim);margin-bottom:8px;"></div>
+      <button type="button" id="sbCreateBtn" class="primary" style="font-size:12px;padding:6px 16px;">Create Bot</button>
+    </div>
+  `;
+  if(!pairs.length){
+    getSmartBotPairs(exchange).then(entries => {
+      if(fu().sbCreateExchange !== exchange) return; // exchange changed while this was in flight
+      if(entries.length && !fu().sbCreateSymbol) fu().sbCreateSymbol = entries[0].symbol;
+      renderSmartBotsCreate();
+      if(fu().sbCreateSymbol) sbCheckRegime(fu().sbCreateSymbol);
+    });
+  } else if(f.sbCreateSymbol && !suggestion){
+    sbCheckRegime(f.sbCreateSymbol);
+  }
+}
+
+function sbCreateStatus(msg, isError){
+  const host = document.getElementById('sbCreateStatus');
+  if(host){ host.textContent = msg; host.style.color = isError ? 'var(--red)' : ''; }
+}
+
+function readSmartBotFormNumbers(){
+  const f = sbState();
+  const type = f.sbCreateType || 'dca';
+  const cfg = type === 'grid' ? f.sbGridForm : f.sbDcaForm;
+  const fundingUsdEl = document.getElementById('sbFundingUsd');
+  const fundingPctEl = document.getElementById('sbFundingPct');
+  if(fundingUsdEl) cfg.fundingUsd = parseFloat(fundingUsdEl.value) || cfg.fundingUsd;
+  if(fundingPctEl) cfg.fundingPct = Math.max(1, Math.min(95, parseInt(fundingPctEl.value, 10) || cfg.fundingPct));
+  const lev = document.getElementById('sbLeverage'); if(lev) cfg.leverage = Math.max(1, parseFloat(lev.value) || cfg.leverage);
+  const tp = document.getElementById('sbTakeProfit'); if(tp) cfg.takeProfitPct = tp.value === '' ? '' : parseFloat(tp.value);
+  const sl = document.getElementById('sbStopLoss'); if(sl) cfg.stopLossPct = sl.value === '' ? null : parseFloat(sl.value);
+}
+
+async function createSmartBotFromForm(){
+  const f = sbState();
+  rollTradingBotsDay(Date.now());
+  if(f.tbDailyHalted){ sbCreateStatus(`Paused for today: ${f.tbDailyHaltMessage || 'daily limit reached'} — try again after the next UTC day rollover.`, true); return; }
+  readSmartBotFormNumbers();
+  const type = f.sbCreateType || 'dca';
+  const exchange = f.sbCreateExchange || 'bybit';
+  const symbol = f.sbCreateSymbol;
+  if(!GRID_LIVE_EXCHANGES.includes(exchange)){ sbCreateStatus('Smart Bots only support Bybit or Binance.', true); return; }
+  if(!symbol){ sbCreateStatus('Pick a pair first.', true); return; }
+  const mode = f.liveModeByExchange[exchange] || 'live';
+  const cred = liveCred(exchange, mode);
+  if(!cred){ sbCreateStatus(`No verified ${exchange} ${mode} credential — connect it in Autotrade & Balances first.`, true); return; }
+  const cfg = type === 'grid' ? f.sbGridForm : f.sbDcaForm;
+  if(type === 'grid' && !(cfg.stopLossPct > 0)){ sbCreateStatus('Grid Bots need a Stop Loss % greater than 0.', true); return; }
+  if(cfg.fundingMode !== 'pct' && !(cfg.fundingUsd > 0)){ sbCreateStatus('Enter a margin amount.', true); return; }
+
+  sbCreateStatus('Reading free margin…');
+  const proxyArgsBal = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase };
+  const marginProbe = await checkAvailableMarginFor(proxyArgsBal, 0).catch(() => ({ available: null }));
+  if(marginProbe.available == null){ sbCreateStatus(`Could not read free margin on ${exchange} right now — try again in a moment.`, true); return; }
+  const fundingUsd = cfg.fundingMode === 'pct' ? marginProbe.available * (cfg.fundingPct / 100) : cfg.fundingUsd;
+  if(!(fundingUsd > 0)){ sbCreateStatus(`Free margin on ${exchange} is effectively 0 — nothing to allocate.`, true); return; }
+  if(fundingUsd > marginProbe.available){ sbCreateStatus(`Not enough free margin — this bot needs ~${fmtUsd(fundingUsd)} but only ${fmtUsd(marginProbe.available)} is free on ${exchange} right now.`, true); return; }
+
+  sbCreateStatus('Fetching live snapshot…');
+  const snap = await fetchLiveSnapshot(exchange, symbol, '5m').catch(err => { sbCreateStatus(`Could not fetch ${symbol}: ${err.message}`, true); return null; });
+  if(!snap) return;
+  const regime = classifyRegime(snap.h1, snap.m15);
+
+  const bot = {
+    id: newTradingBotId(type), type, exchange, mode, symbol, origin: 'smart', paused: false, nickname: null,
+    createdAtMs: Date.now(), status: 'deploying', statusMessage: 'Deploying…', statusIsError: false,
+    realizedUsd: 0, runtime: {}, regimeAtCreate: regime.regime, leverage: cfg.leverage,
+  };
+
+  if(type === 'grid'){
+    const range = suggestGridRange(snap, regime);
+    const levelCount = 10;
+    const plan = buildManualGridPlan({ symbol, direction: 'NEUTRAL', upper: range.upper, lower: range.lower, levelCount, leverage: cfg.leverage, investmentUsd: fundingUsd });
+    if(!plan){ sbCreateStatus('Could not build a valid grid plan from current market data — try again.', true); return; }
+    bot.direction = 'NEUTRAL'; bot.investmentUsd = fundingUsd;
+    bot.config = { maxLossPct: cfg.stopLossPct, profitTargetPct: cfg.takeProfitPct || '', autoScan: false, levelCount, leverage: cfg.leverage };
+    bot.plan = plan; bot.runtime = { levels: [], longStopSet: false, shortStopSet: false };
+    f.tbDayAnchorInvestmentUsd += bot.investmentUsd;
+  } else {
+    const direction = cfg.direction || 'LONG';
+    bot.direction = direction;
+    // Base/safety sizing derived from the one funding amount: roughly
+    // base 25% + a 4-order ladder growing 1.3x each step sums back to
+    // ~fundingUsd total committed (0.25 + 0.12*(1+1.3+1.3^2+1.3^3) ≈ 1.0),
+    // same DCA_DEFAULTS deviation/step shape as the manual form uses.
+    bot.config = {
+      baseOrderUsd: fundingUsd * 0.25, safetyOrderUsd: fundingUsd * 0.12, maxSafetyOrders: 4,
+      priceDeviationPct: DCA_DEFAULTS.priceDeviationPct, stepScale: DCA_DEFAULTS.stepScale, volumeScale: 1.3,
+      takeProfitPct: cfg.takeProfitPct || DCA_DEFAULTS.takeProfitPct, stopLossPct: cfg.stopLossPct, leverage: cfg.leverage,
+    };
+    bot.investmentUsd = null; // filled once the plan is built against a real anchor price, see deployDcaBotInstance
+  }
+
+  f.tradingBots.push(bot);
+  f.sbView = 'list'; f.sbListTab = 'active';
+  renderSmartBotsPanel();
+  sbCreateStatus('');
+
+  if(type === 'grid') await deployGridBotInstance(bot, cred);
+  else await deployDcaBotInstance(bot, cred);
+
+  if(!f.tradingBotsRunning) toggleTradingBotsRunning();
+  renderSmartBotsPanel();
+}
+
+function pauseOrResumeSmartBot(id){
+  const f = fu();
+  const bot = f.tradingBots.find(b => b.id === id);
+  if(!bot) return;
+  bot.paused = !bot.paused;
+  tradingBotLog(bot, bot.paused ? 'Paused — this bot will not be managed until Resumed. Whatever is already resting on the exchange is left exactly as-is.' : 'Resumed.', false);
+  renderSmartBotsPanel();
+}
+
+function renameSmartBot(id){
+  const f = fu();
+  const bot = f.tradingBots.find(b => b.id === id);
+  if(!bot) return;
+  const current = bot.nickname || `${bot.symbol} ${bot.type === 'grid' ? 'Grid Bot' : 'DCA Bot'}`;
+  const name = typeof prompt === 'function' ? prompt('Name this bot', current) : current;
+  if(name == null) return;
+  bot.nickname = name.trim().slice(0, 40) || null;
+  renderSmartBotsPanel();
+}
+
+// Pre-fills the create form from an existing bot's own settings — does
+// NOT deploy anything itself; the person still reviews and clicks
+// Create Bot, same as the reference app's "Create new bot using same
+// settings".
+function copySmartBot(id){
+  const f = sbState();
+  const bot = f.tradingBots.find(b => b.id === id);
+  if(!bot) return;
+  f.sbCreateExchange = bot.exchange;
+  f.liveModeByExchange[bot.exchange] = bot.mode;
+  f.sbCreateSymbol = bot.symbol;
+  f.sbCreateType = bot.type;
+  f.sbRegimeSuggestion = null;
+  if(bot.type === 'grid'){
+    f.sbGridForm = { fundingUsd: bot.investmentUsd || f.sbGridForm.fundingUsd, fundingMode: 'usdt', fundingPct: f.sbGridForm.fundingPct, leverage: bot.leverage || f.sbGridForm.leverage, takeProfitPct: bot.config?.profitTargetPct || '', stopLossPct: bot.config?.maxLossPct || f.sbGridForm.stopLossPct };
+  } else {
+    f.sbDcaForm = { fundingUsd: bot.investmentUsd || f.sbDcaForm.fundingUsd, fundingMode: 'usdt', fundingPct: f.sbDcaForm.fundingPct, leverage: bot.leverage || f.sbDcaForm.leverage, takeProfitPct: bot.config?.takeProfitPct || f.sbDcaForm.takeProfitPct, stopLossPct: bot.config?.stopLossPct ?? f.sbDcaForm.stopLossPct, direction: bot.direction || 'LONG' };
+  }
+  f.sbView = 'create';
+  renderSmartBotsPanel();
+}
+
+function renderSmartBotChart(bot, range){
+  const host = document.getElementById('sbDetailChart');
+  if(!host) return;
+  const records = getBotTradeRecords(bot).slice().sort((a, b) => a.closedAtMs - b.closedAtMs);
+  const now = Date.now();
+  const rangeMs = { '1d': 86400000, '7d': 7 * 86400000, '30d': 30 * 86400000, all: Infinity }[range] || Infinity;
+  const windowed = records.filter(r => now - r.closedAtMs <= rangeMs);
+  if(!windowed.length){ host.innerHTML = `<div style="font-size:12px;color:var(--dim);padding:24px 0;text-align:center;">No closed trades in this range yet.</div>`; return; }
+  const byDay = new Map();
+  windowed.forEach(r => {
+    const key = new Date(r.closedAtMs).toISOString().slice(0, 10);
+    byDay.set(key, (byDay.get(key) || 0) + (r.netUsd || 0));
+  });
+  const days = [...byDay.keys()].sort();
+  const values = days.map(d => byDay.get(d));
+  const W = 700, H = 160, PAD = 10;
+  const maxAbs = Math.max(1, ...values.map(v => Math.abs(v)));
+  const slot = (W - PAD * 2) / values.length;
+  const barW = Math.max(4, slot - 4);
+  const zeroY = H / 2;
+  const bars = values.map((v, i) => {
+    const x = PAD + i * slot;
+    const h = (Math.abs(v) / maxAbs) * (H / 2 - PAD);
+    const y = v >= 0 ? zeroY - h : zeroY;
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(1, h).toFixed(1)}" rx="2" fill="${v >= 0 ? 'var(--green)' : 'var(--red)'}"/>`;
+  }).join('');
+  host.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:${H}px;display:block;">
+      <line x1="0" y1="${zeroY}" x2="${W}" y2="${zeroY}" stroke="var(--line)" stroke-width="1"/>
+      ${bars}
+    </svg>
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--dim);margin-top:4px;">
+      <span>${days[0]}</span><span>${days[days.length - 1]}</span>
+    </div>`;
+}
+
+function renderSmartBotDetail(id){
+  if(!els.sbDetailHost) return;
+  const f = fu();
+  const bot = f.tradingBots.find(b => b.id === id);
+  if(!bot){ f.sbView = 'list'; renderSmartBotsPanel(); return; }
+  const m = computeBotMetrics(bot);
+  const label = bot.nickname || `${bot.symbol} ${bot.type === 'grid' ? 'Grid Bot' : 'DCA Bot'}`;
+  const range = f.sbChartRange || 'all';
+  els.sbDetailHost.innerHTML = `
+    <button type="button" class="primary ghost sb-back-btn" style="font-size:11px;padding:4px 10px;margin-bottom:14px;">&larr; Back to My Bots</button>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+      <div>
+        <div style="font-size:15px;font-weight:600;">${label}</div>
+        <div style="font-size:11px;color:var(--dim);">${SMART_BOT_TYPES[bot.type] || ''} · ${EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange} ${bot.mode} · <span style="text-transform:capitalize;">${bot.paused && bot.status === 'active' ? 'paused' : bot.status}</span></div>
+      </div>
+    </div>
+    <div class="ov-grid" style="grid-template-columns:repeat(2, 1fr);margin-bottom:14px;">
+      <div class="ov-card ov-highlight"><span class="ov-label">Total P/L</span><span class="ov-value">${pnlSpan(m.totalPnl, m.pctOfInvestment)}</span></div>
+      <div class="ov-card"><span class="ov-label">Realized</span><span class="ov-value">${fmtUsd(bot.realizedUsd)}</span></div>
+    </div>
+    <div class="tb-tabs">
+      ${['1d', '7d', '30d', 'all'].map(r => `<div class="tb-tab sb-range-tab ${range === r ? 'on' : ''}" data-range="${r}">${r === 'all' ? 'All' : r}</div>`).join('')}
+    </div>
+    <div id="sbDetailChart" style="margin:10px 0 16px;"></div>
+    <div class="tb-params-head">Stats</div>
+    <div class="tb-stats-row" style="margin-top:0;padding-top:0;border-top:none;">
+      <div class="tb-stat"><span class="l">Margin Committed</span><span class="n">${fmtUsd(bot.investmentUsd || 0)}</span></div>
+      <div class="tb-stat"><span class="l">Leverage</span><span class="n">${bot.leverage || '—'}x</span></div>
+      <div class="tb-stat"><span class="l">Uptime</span><span class="n">${fmtBotUptime(bot.createdAtMs)}</span></div>
+      <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length}</span></div>
+    </div>
+    ${bot.statusMessage ? `<div class="tb-card-log" style="margin-top:14px;${bot.statusIsError ? 'color:var(--red);' : ''}">${bot.statusMessage}</div>` : ''}
+    <div class="tb-card-actions" style="margin-top:18px;gap:10px;flex-wrap:wrap;">
+      ${bot.status === 'active' ? `
+        <button type="button" class="primary ghost sb-pause-btn" data-id="${bot.id}">${bot.paused ? 'Resume' : 'Pause'}</button>
+        <button type="button" class="primary ghost sb-stop-btn" data-id="${bot.id}" style="border-color:var(--red);color:var(--red);">Stop</button>
+      ` : `<button type="button" class="primary ghost sb-delete-btn" data-id="${bot.id}">Delete</button>`}
+      <button type="button" class="primary ghost sb-copy-btn" data-id="${bot.id}">Copy Bot</button>
+      <button type="button" class="primary ghost sb-rename-btn" data-id="${bot.id}">Rename</button>
+    </div>
+  `;
+  renderSmartBotChart(bot, range);
+}
+
+function initSmartBots(){
+  renderSmartBotsPanel();
+
+  if(els.sbListHost){
+    els.sbListHost.addEventListener('click', (e) => {
+      if(e.target.id === 'sbCreateBtn'){ fu().sbView = 'create'; renderSmartBotsPanel(); return; }
+      const card = e.target.closest('.sb-card');
+      if(card){ fu().sbView = 'detail'; fu().sbDetailId = card.dataset.id; renderSmartBotsPanel(); }
+    });
+  }
+  if(els.sbTabsHost){
+    els.sbTabsHost.addEventListener('click', (e) => {
+      if(e.target.classList.contains('sb-list-tab')){ fu().sbListTab = e.target.dataset.tab; renderSmartBotsList(); }
+    });
+  }
+  if(els.sbCreateHost){
+    els.sbCreateHost.addEventListener('change', (e) => {
+      const f = sbState();
+      if(e.target.id === 'sbExchange'){
+        readSmartBotFormNumbers(); f.sbCreateExchange = e.target.value; f.sbCreateSymbol = ''; f.sbRegimeSuggestion = null; renderSmartBotsCreate();
+      } else if(e.target.id === 'sbSymbol'){
+        f.sbCreateSymbol = e.target.value; f.sbRegimeSuggestion = null; renderSmartBotsCreate();
+        if(f.sbCreateSymbol) sbCheckRegime(f.sbCreateSymbol);
+      } else if(e.target.id === 'sbType'){
+        readSmartBotFormNumbers(); f.sbCreateType = e.target.value; renderSmartBotsCreate();
+      } else if(e.target.id === 'sbFundingPctRange' || e.target.id === 'sbFundingPct'){
+        const v = Math.max(1, Math.min(95, parseInt(e.target.value, 10) || 1));
+        const range = document.getElementById('sbFundingPctRange'); const num = document.getElementById('sbFundingPct');
+        if(range) range.value = v; if(num) num.value = v;
+        (f.sbCreateType === 'grid' ? f.sbGridForm : f.sbDcaForm).fundingPct = v;
+      }
+    });
+    els.sbCreateHost.addEventListener('click', async (e) => {
+      if(e.target.classList.contains('sb-back-btn')){ fu().sbView = 'list'; renderSmartBotsPanel(); return; }
+      if(e.target.id === 'sbApplySuggestionBtn'){
+        const f = sbState();
+        if(f.sbRegimeSuggestion){
+          f.sbCreateType = f.sbRegimeSuggestion.suggestedType;
+          if(f.sbRegimeSuggestion.direction) f.sbDcaForm.direction = f.sbRegimeSuggestion.direction;
+        }
+        renderSmartBotsCreate();
+        return;
+      }
+      if(e.target.classList.contains('sb-mode-btn')){
+        const f = sbState(); readSmartBotFormNumbers();
+        f.liveModeByExchange[f.sbCreateExchange || 'bybit'] = e.target.dataset.mode === 'demo' ? 'demo' : 'live';
+        renderSmartBotsCreate(); return;
+      }
+      if(e.target.classList.contains('sb-dca-direction')){
+        readSmartBotFormNumbers(); sbState().sbDcaForm.direction = e.target.dataset.dir; renderSmartBotsCreate(); return;
+      }
+      if(e.target.classList.contains('sb-fundmode')){
+        readSmartBotFormNumbers();
+        const f = sbState(); const cfg = f.sbCreateType === 'grid' ? f.sbGridForm : f.sbDcaForm;
+        cfg.fundingMode = e.target.dataset.mode; renderSmartBotsCreate(); return;
+      }
+      if(e.target.id === 'sbCreateBtn'){ await createSmartBotFromForm(); return; }
+    });
+  }
+  if(els.sbDetailHost){
+    els.sbDetailHost.addEventListener('click', async (e) => {
+      if(e.target.classList.contains('sb-back-btn')){ fu().sbView = 'list'; renderSmartBotsPanel(); return; }
+      if(e.target.classList.contains('sb-range-tab')){ fu().sbChartRange = e.target.dataset.range; renderSmartBotDetail(fu().sbDetailId); return; }
+      const id = e.target.dataset.id;
+      if(!id) return;
+      if(e.target.classList.contains('sb-pause-btn')) pauseOrResumeSmartBot(id);
+      else if(e.target.classList.contains('sb-stop-btn')){ await stopTradingBot(id); renderSmartBotsPanel(); }
+      else if(e.target.classList.contains('sb-delete-btn')){ deleteTradingBot(id); fu().sbView = 'list'; renderSmartBotsPanel(); }
+      else if(e.target.classList.contains('sb-copy-btn')) copySmartBot(id);
+      else if(e.target.classList.contains('sb-rename-btn')) renameSmartBot(id);
+    });
+  }
+}
+
 export function initFuturesEngine(){
   ensureDayState();
   if(els.fuStartingBalance) els.fuStartingBalance.value = String(fu().dayState.startingEquity);
@@ -4090,6 +4659,7 @@ export function initFuturesEngine(){
   initGridPanel();
   initScannerCollapse();
   initTradingBots();
+  initSmartBots();
   initLiveTradingControls();
   initTradeLog();
   restoreLivePositions();

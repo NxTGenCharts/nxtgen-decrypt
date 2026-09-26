@@ -149,6 +149,18 @@ export const els = {
   fuTradingBotsBadge: document.getElementById('fuTradingBotsBadge'),
   fuTradingBotsCreate: document.getElementById('fuTradingBotsCreate'),
   fuTradingBotsList: document.getElementById('fuTradingBotsList'),
+  // ---- Smart Bots (separate DCA/Grid create-flow + My Bots overview) ----
+  tabSmartBotsBtn: document.getElementById('tabSmartBotsBtn'),
+  panelSmartBots: document.getElementById('panelSmartBots'),
+  fuSmartBotsBadge: document.getElementById('fuSmartBotsBadge'),
+  sbListView: document.getElementById('sbListView'),
+  sbCreateView: document.getElementById('sbCreateView'),
+  sbDetailView: document.getElementById('sbDetailView'),
+  sbSummaryHost: document.getElementById('sbSummaryHost'),
+  sbTabsHost: document.getElementById('sbTabsHost'),
+  sbListHost: document.getElementById('sbListHost'),
+  sbCreateHost: document.getElementById('sbCreateHost'),
+  sbDetailHost: document.getElementById('sbDetailHost'),
   fuLiveExchRows: document.getElementById('fuLiveExchRows'),
   fuLiveStatusLabel: document.getElementById('fuLiveStatusLabel'),
   fuLiveArmWrap: document.getElementById('fuLiveArmWrap'),
@@ -471,6 +483,27 @@ export const state = {
     tbAutoScanExchange: null,
     tbAutoScanConfig: null,
     tbAutoScanCursor: 0,
+    // ---- Smart Bots — a second, separate create-flow + "My Bots"
+    // list/detail UI layered on the EXACT SAME grid/DCA engine as
+    // Trading Bots above (bots created here live in the same
+    // tradingBots array, tagged origin:'smart', and are ticked by the
+    // same management loop) — see futures-ui.js's Smart Bots section.
+    // Differences from the manual form: pair comes from the real
+    // top-25-by-24h-volume list (not typed), exactly two labeled types
+    // ("DCA Bot (Trend)" / "Grid Bot (Sideways)") with a regime-based
+    // suggestion, funding is one Margin amount, and bots get an
+    // individual Pause on top of Stop/Delete.
+    sbCreateExchange: 'bybit',
+    sbCreateSymbol: '',
+    sbCreateType: 'dca',
+    sbPairCache: {},          // { [exchange]: { atMs, entries:[{symbol, volume24hUsd}] } }
+    sbRegimeSuggestion: null, // { symbol, kind, text, suggestedType, direction? } for the currently selected pair
+    sbGridForm: null,         // lazily initialised: { fundingUsd, fundingMode, fundingPct, leverage, takeProfitPct, stopLossPct }
+    sbDcaForm: null,          // lazily initialised: same shape + direction
+    sbListTab: 'active',      // 'active' | 'stopped'
+    sbView: 'list',           // 'list' | 'create' | 'detail'
+    sbDetailId: null,
+    sbChartRange: 'all',      // '1d' | '7d' | '30d' | 'all'
     lastRows: [],
     lastRegimeSummary: null,
     lastExplainIndex: null,
