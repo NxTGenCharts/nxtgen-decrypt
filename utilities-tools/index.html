@@ -69,6 +69,7 @@
       <a class="navtab subnavtab active" id="tabPaperBtn" href="#paper-trading" role="tab" aria-selected="true"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-clipboard-list"/></svg></span>Paper Trading</a>
       <a class="navtab subnavtab" id="tabBacktestBtn" href="#backtesting" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-history"/></svg></span>Backtesting</a>
       <a class="navtab subnavtab" id="tabBotsBtn" href="#trading-bots" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-bot"/></svg></span>Trading Bots</a>
+      <a class="navtab subnavtab" id="tabSmartBotsBtn" href="#smart-bots" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-cpu"/></svg></span>Smart Bots</a>
     </nav>
 
   <div class="panel active" id="panelPaper">
@@ -339,6 +340,31 @@
     </div>
 
   </div>
+
+  <div class="panel" id="panelSmartBots">
+
+    <div class="ov-block fu-strategies" id="fuSmartBotsDetails" style="margin-bottom:18px;">
+      <div class="ov-block-title">Smart Bots <span class="fu-strategies-badge" id="fuSmartBotsBadge"></span></div>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:10px;line-height:1.5;">
+        Pick a pair from the exchange's real top 25 by 24h volume, then choose either a DCA Bot (suited to trending markets) or a Grid Bot (suited to sideways/ranging markets) to run on it — separate from the manual Trading Bots section above, though both place real Bybit/Binance Live/Demo orders and share the same Daily Risk Limits. The regime badge in the create form is a heuristic suggestion, not a guarantee: no bot type can promise a win rate or guaranteed profit, which is why every bot here still needs its own Take Profit / Stop Loss — the bot force-stops the moment either is hit.
+      </div>
+
+      <div id="sbListView">
+        <div id="sbSummaryHost"></div>
+        <div id="sbTabsHost"></div>
+        <div id="sbListHost"></div>
+      </div>
+
+      <div id="sbCreateView" style="display:none;">
+        <div id="sbCreateHost"></div>
+      </div>
+
+      <div id="sbDetailView" style="display:none;">
+        <div id="sbDetailHost"></div>
+      </div>
+    </div>
+
+  </div>
 </div>
 </div>
 
@@ -348,9 +374,9 @@
    lives in js/ui.js (SUBTAB_GROUPS) - keep these slugs in sync with it. */
 (function(){
   var h = (location.hash || '').replace(/^#/, '').toLowerCase();
-  var map = { 'backtesting': 'backtest', 'backtest': 'backtest', 'trading-bots': 'bots', 'bots': 'bots' };
+  var map = { 'backtesting': 'backtest', 'backtest': 'backtest', 'trading-bots': 'bots', 'bots': 'bots', 'smart-bots': 'smartbots', 'smartbots': 'smartbots' };
   var which = map[h]; if(!which) return;
-  var ids = { paper: ['tabPaperBtn', 'panelPaper'], backtest: ['tabBacktestBtn', 'panelBacktest'], bots: ['tabBotsBtn', 'panelBots'] };
+  var ids = { paper: ['tabPaperBtn', 'panelPaper'], backtest: ['tabBacktestBtn', 'panelBacktest'], bots: ['tabBotsBtn', 'panelBots'], smartbots: ['tabSmartBotsBtn', 'panelSmartBots'] };
   Object.keys(ids).forEach(function(k){
     var on = k === which, b = document.getElementById(ids[k][0]), p = document.getElementById(ids[k][1]);
     if(b){ b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); }
