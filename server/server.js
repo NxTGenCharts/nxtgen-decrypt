@@ -1111,8 +1111,34 @@ async function flattenBybitGrid(mode, apiKey, secretKey, symbol){
 // idempotent-replace approach as setBybitGridSideStop/
 // setBinanceGridSideStop above use for the stop side.
 // =============================================================
+// Proactively switches SYMBOL back to Bybit's one-way ("MergedSingle")
+// position mode before a DCA order — the mirror image of
+// bybitGridEnsureHedgeMode above, and safe for the identical reason:
+// Bybit's position mode is scoped to category+symbol, not the account.
+// A Grid bot (Smart Bots or manual) may have switched this exact
+// symbol to hedge mode earlier; once nothing is left open on it,
+// Bybit's switch-mode call succeeds silently, so most of the time this
+// fixes DCA's "hedge mode" failure automatically — without the person
+// ever needing to touch Bybit's own app. If something genuinely is
+// still open on the symbol, this just fails quietly and the order
+// placed right after it will hit the same specific, already-handled
+// hedge-mode error explaining that.
+async function bybitDcaEnsureOneWayMode(mode, apiKey, secretKey, symbol){
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  try{
+    await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/position/switch-mode', {
+      category: 'linear', symbol, mode: 0, // 0 = MergedSingle (one-way)
+    });
+  }catch(err){
+    // Ignore — "already in that mode" is the common case and not an
+    // error; anything else (something still open) surfaces below via
+    // the order placement's own hedge-mode detection instead.
+  }
+}
+
 async function placeBybitDcaOrder(mode, apiKey, secretKey, { symbol, direction, orderType, price, qty, leverage }){
   const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  await bybitDcaEnsureOneWayMode(mode, apiKey, secretKey, symbol);
   const filters = await bybitFuturesSymbolFilters(base, symbol);
   const roundedQty = floorToStep(qty, filters.qtyStep);
   if(roundedQty <= 0 || roundedQty < filters.minOrderQty){

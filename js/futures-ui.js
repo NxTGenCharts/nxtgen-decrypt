@@ -3015,6 +3015,19 @@ function initTradingBots(){
   // trusting whatever was last saved, so a stale snapshot self-corrects
   // within one cycle either way).
   if(fu().tradingBots.some(b => b.status === 'active') && !fu().tradingBotsRunning) toggleTradingBotsRunning();
+  // Same throttled-background-tab reality as the Live Trading engine
+  // above: a phone browser backgrounds this tab (screen locked, app
+  // switched away from) rather than closing it far more often than it
+  // actually gets closed, and browsers slow setInterval to roughly
+  // once/minute or less while backgrounded — so a level that filled, a
+  // Profit Target that was quietly exceeded, or a Recovery trigger can
+  // sit unnoticed for a while. Firing one cycle the instant the tab is
+  // foregrounded again closes most of that gap. It does NOT help once
+  // the tab/browser is actually closed — see this bot's own Trades/Stats
+  // for what happened once it's reopened in that case.
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState === 'visible' && fu().tradingBotsRunning) runTradingBotsCycle();
+  });
   renderTradingBotsCreate();
   renderTradingBotsList();
   if(els.fuTradingBotsCreate){
@@ -4275,6 +4288,11 @@ function sbState(){
   const f = fu();
   if(!f.sbGridForm) f.sbGridForm = {
     fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 5, takeProfitPct: 10, stopLossPct: 10,
+    // Fewer levels over the SAME auto-suggested range means each one is
+    // wider — bigger $ per fill, less often; more levels means smaller
+    // fills, more often. Same total capital either way; this is a
+    // trade-off dial, not a "make it more profitable" knob.
+    levelCount: 8,
     // Recovery / averaging — off by default. See applyGridRecovery's
     // header comment for exactly what this does and why it's riskier
     // than a plain grid, not a free upgrade to it.
@@ -4543,6 +4561,14 @@ function renderSmartBotsCreate(){
         <label style="font-size:11px;color:var(--dim);">Stop Loss (%)${type === 'grid' ? ' — required' : ' — optional'}
           <input id="sbStopLoss" type="number" min="0" step="any" value="${cfg.stopLossPct == null ? '' : cfg.stopLossPct}" style="display:block;margin-top:3px;min-width:90px;">
         </label>
+        ${type === 'grid' ? `
+        <label style="font-size:11px;color:var(--dim);">Grid Levels
+          <input id="sbLevelCount" type="number" min="3" max="20" step="1" value="${cfg.levelCount}" style="display:block;margin-top:3px;min-width:70px;">
+        </label>` : ''}
+      </div>
+      ${type === 'grid' ? `
+      <div style="font-size:11px;color:var(--dim);margin:0 0 10px;line-height:1.5;">
+        Fewer levels over the same auto-suggested range = wider steps = bigger $ per fill, less often. More levels = smaller fills, more often. Same margin committed either way — this trades fill size against fill frequency, it doesn't create extra profit on its own.
       </div>
       ${type === 'grid' ? `
       <div class="ov-block" style="padding:10px 12px;margin-bottom:12px;background:var(--panel2);">
@@ -4597,6 +4623,7 @@ function readSmartBotFormNumbers(){
   const tp = document.getElementById('sbTakeProfit'); if(tp) cfg.takeProfitPct = tp.value === '' ? '' : parseFloat(tp.value);
   const sl = document.getElementById('sbStopLoss'); if(sl) cfg.stopLossPct = sl.value === '' ? null : parseFloat(sl.value);
   if(type === 'grid'){
+    const lvl = document.getElementById('sbLevelCount'); if(lvl) cfg.levelCount = Math.max(3, Math.min(20, parseInt(lvl.value, 10) || cfg.levelCount));
     const recTrigger = document.getElementById('sbRecoveryTrigger'); if(recTrigger) cfg.recoveryTriggerPct = Math.max(0.5, parseFloat(recTrigger.value) || cfg.recoveryTriggerPct);
     const recMax = document.getElementById('sbRecoveryMaxAdds'); if(recMax) cfg.maxRecoveryAdds = Math.max(1, Math.min(6, parseInt(recMax.value, 10) || cfg.maxRecoveryAdds));
     const recMult = document.getElementById('sbRecoveryMult'); if(recMult) cfg.recoverySizeMult = Math.max(1, parseFloat(recMult.value) || cfg.recoverySizeMult);
@@ -4613,6 +4640,18 @@ async function createSmartBotFromForm(){
   const symbol = f.sbCreateSymbol;
   if(!GRID_LIVE_EXCHANGES.includes(exchange)){ sbCreateStatus('Smart Bots only support Bybit or Binance.', true); return; }
   if(!symbol){ sbCreateStatus('Pick a pair first.', true); return; }
+  // Grid needs hedge (BothSide) position mode; DCA needs one-way — the
+  // exchange can't hold both at once. On Bybit that's scoped per-symbol,
+  // on Binance it's account-wide (see bybitDcaEnsureOneWayMode/
+  // flattenBinanceGrid's comments server-side), so check accordingly
+  // rather than letting the order fail with a confusing exchange error.
+  const otherType = type === 'grid' ? 'dca' : 'grid';
+  const conflicting = fu().tradingBots.find(b => b.exchange === exchange && b.type === otherType && (b.status === 'active' || b.status === 'deploying') && (exchange === 'binance' || b.symbol === symbol));
+  if(conflicting){
+    const scope = exchange === 'binance' ? 'anywhere on your Binance account' : `on ${symbol} on Bybit`;
+    sbCreateStatus(`Can't run a ${SMART_BOT_TYPES[type]} ${scope} while "${conflicting.nickname || conflicting.symbol + ' ' + (conflicting.type === 'grid' ? 'Grid Bot' : 'DCA Bot')}" is ${conflicting.status} — Stop or Pause it first, then try again.`, true);
+    return;
+  }
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);
   if(!cred){ sbCreateStatus(`No verified ${exchange} ${mode} credential — connect it in Autotrade & Balances first.`, true); return; }
@@ -4641,7 +4680,7 @@ async function createSmartBotFromForm(){
 
   if(type === 'grid'){
     const range = suggestGridRange(snap, regime);
-    const levelCount = 10;
+    const levelCount = cfg.levelCount || 8;
     const plan = buildManualGridPlan({ symbol, direction: 'NEUTRAL', upper: range.upper, lower: range.lower, levelCount, leverage: cfg.leverage, investmentUsd: fundingUsd });
     if(!plan){ sbCreateStatus('Could not build a valid grid plan from current market data — try again.', true); return; }
     bot.direction = 'NEUTRAL'; bot.investmentUsd = fundingUsd;
@@ -4759,7 +4798,7 @@ function copySmartBot(id){
   f.sbCreateType = bot.type;
   f.sbRegimeSuggestion = null;
   if(bot.type === 'grid'){
-    f.sbGridForm = { fundingUsd: bot.investmentUsd || f.sbGridForm.fundingUsd, fundingMode: 'usdt', fundingPct: f.sbGridForm.fundingPct, leverage: bot.leverage || f.sbGridForm.leverage, takeProfitPct: bot.config?.profitTargetPct || '', stopLossPct: bot.config?.maxLossPct || f.sbGridForm.stopLossPct };
+    f.sbGridForm = { fundingUsd: bot.investmentUsd || f.sbGridForm.fundingUsd, fundingMode: 'usdt', fundingPct: f.sbGridForm.fundingPct, leverage: bot.leverage || f.sbGridForm.leverage, takeProfitPct: bot.config?.profitTargetPct || '', stopLossPct: bot.config?.maxLossPct || f.sbGridForm.stopLossPct, levelCount: bot.config?.levelCount || f.sbGridForm.levelCount, recoveryMode: bot.config?.recoveryMode || false, recoveryTriggerPct: bot.config?.recoveryTriggerPct || f.sbGridForm.recoveryTriggerPct, maxRecoveryAdds: bot.config?.maxRecoveryAdds || f.sbGridForm.maxRecoveryAdds, recoverySizeMult: bot.config?.recoverySizeMult || f.sbGridForm.recoverySizeMult };
   } else {
     f.sbDcaForm = { fundingUsd: bot.investmentUsd || f.sbDcaForm.fundingUsd, fundingMode: 'usdt', fundingPct: f.sbDcaForm.fundingPct, leverage: bot.leverage || f.sbDcaForm.leverage, takeProfitPct: bot.config?.takeProfitPct || f.sbDcaForm.takeProfitPct, stopLossPct: bot.config?.stopLossPct ?? f.sbDcaForm.stopLossPct, direction: bot.direction || 'LONG' };
   }
