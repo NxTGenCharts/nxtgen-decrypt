@@ -2712,6 +2712,31 @@ const TRADING_BOTS_CYCLE_MS = 8000; // same conservative real-API cadence as NxT
 
 function newTradingBotId(type){ return `BOT-${type.toUpperCase()}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`; }
 
+const TRADING_BOTS_STORE_KEY = 'nxtgen_futures_trading_bots_v1';
+
+// Persists the WHOLE trading-bots list (manual Trading Bots AND Smart
+// Bots — they share this one array) to localStorage, so an active bot
+// survives a page refresh. Without this, refreshing wiped the in-memory
+// list even though the bot itself kept running for real on the exchange
+// — leaving nothing in the app to manage its TP/SL/recovery, show its
+// history, or let it be paused/stopped, until it was found again by
+// checking the exchange directly. Bot objects never hold API secrets
+// (those live in exchangeCreds and are looked up fresh via liveCred
+// every tick), so this is safe to store as plain JSON.
+function saveTradingBotsSnapshot(){
+  try{ localStorage.setItem(TRADING_BOTS_STORE_KEY, JSON.stringify(fu().tradingBots || [])); }
+  catch(e){ /* non-fatal — worst case, a refresh loses the in-app list same as before this existed */ }
+}
+
+function loadTradingBotsSnapshot(){
+  try{
+    const raw = localStorage.getItem(TRADING_BOTS_STORE_KEY);
+    if(!raw) return;
+    const parsed = JSON.parse(raw);
+    if(Array.isArray(parsed)) fu().tradingBots = parsed;
+  }catch(e){ /* corrupt/old value — start empty rather than throw */ }
+}
+
 function tradingBotLog(bot, msg, isError){
   bot.statusMessage = msg;
   bot.statusIsError = !!isError;
@@ -2982,6 +3007,14 @@ function tbCreateStatus(msg, isError){
 }
 
 function initTradingBots(){
+  loadTradingBotsSnapshot();
+  // Anything that was 'active' when the page last closed is presumably
+  // still open for real on the exchange — get the management loop
+  // running again so it picks each one back up (grid/DCA both re-read
+  // real state from the exchange on their very first tick rather than
+  // trusting whatever was last saved, so a stale snapshot self-corrects
+  // within one cycle either way).
+  if(fu().tradingBots.some(b => b.status === 'active') && !fu().tradingBotsRunning) toggleTradingBotsRunning();
   renderTradingBotsCreate();
   renderTradingBotsList();
   if(els.fuTradingBotsCreate){
@@ -3291,6 +3324,60 @@ async function deployGridBotInstance(bot, cred){
   tradingBotLog(bot, `Grid ACTIVE — ${levels.length}/${plan.levelCount} levels resting.`, false);
 }
 
+// -------------------------------------------------------------
+// Grid Recovery / averaging — an OPTIONAL, off-by-default add-on for
+// Smart Bots' Grid type (bot.config.recoveryMode; manual Trading Bots
+// grids never set this, so they're unaffected). Same idea as DCA's
+// safety-order ladder, bolted onto Grid instead of run as a separate
+// bot type: once this bot's floating equity has drawn down past
+// recoveryTriggerPct — compounding per add, so the 2nd add needs
+// roughly 2x the drawdown the 1st did — it opens ONE MORE market entry
+// on whichever side is actually underwater (the side with more open
+// legs), sized recoverySizeMult times bigger than the last add. That
+// grows the position and shifts the blended average toward the
+// current price, which can turn a smaller bounce into breakeven/profit
+// sooner than waiting on the grid's own cycle alone.
+//
+// Worth being direct about the trade-off: this is a martingale-style
+// average-down. It commits MORE margin to a bot that is already
+// losing, in exchange for a shot at a smaller loss or none at all — it
+// does not make the bot "safer", and a market that keeps moving
+// against it just makes each add bigger. Stop Loss (bot.config.
+// maxLossPct, checked right after this runs) is what actually bounds
+// the worst case; recovery adding never raises, disables, or delays it.
+// -------------------------------------------------------------
+async function applyGridRecovery(bot, plan, snap, proxyArgs){
+  const cfg = bot.config;
+  if(!cfg?.recoveryMode || bot.status !== 'active') return;
+  const rt = bot.runtime;
+  if(rt.recoveryAddsUsed == null) rt.recoveryAddsUsed = 0;
+  const addsUsed = rt.recoveryAddsUsed;
+  const maxAdds = cfg.maxRecoveryAdds || 3;
+  if(addsUsed >= maxAdds) return;
+
+  const uPnl = rt.unrealizedUsd || 0;
+  const equityUsd = (bot.investmentUsd || 0) + (rt.recoveryAddedUsd || 0);
+  const drawdownPct = equityUsd ? (uPnl / equityUsd) * 100 : 0;
+  const triggerPct = -(Math.abs(cfg.recoveryTriggerPct || 15)) * (addsUsed + 1);
+  if(drawdownPct > triggerPct) return; // not underwater enough yet for the NEXT add
+
+  const openLegs = rt.levels.filter(l => l.status === 'PENDING_CLOSE');
+  if(!openLegs.length) return; // nothing open to average against
+  const longCount = openLegs.filter(l => l.direction === 'LONG').length;
+  const direction = longCount >= (openLegs.length - longCount) ? 'LONG' : 'SHORT';
+
+  const baseLevelUsd = plan.allocationUsd / plan.levelCount;
+  const addUsd = baseLevelUsd * Math.pow(cfg.recoverySizeMult || 1.5, addsUsed + 1);
+  const qty = (addUsd * plan.leverage) / snap.price;
+  const placed = await callProxy('/api/futures/dca/place', { ...proxyArgs, direction, orderType: 'MARKET', qty, leverage: plan.leverage }).catch(err => ({ ok:false, message: err.message }));
+  if(!placed.ok){ tradingBotLog(bot, `Recovery add #${addsUsed + 1} failed: ${placed.message}`, true); return; }
+  rt.recoveryAddsUsed = addsUsed + 1;
+  rt.recoveryAddedUsd = (rt.recoveryAddedUsd || 0) + addUsd;
+  bot.investmentUsd = (bot.investmentUsd || 0) + addUsd; // Max Loss/Profit Target % below are read off bot.investmentUsd, so they recalculate against this larger base automatically
+  fu().tbDayAnchorInvestmentUsd += addUsd; // keep the cross-bot daily cap's denominator honest about total capital actually committed
+  tradingBotLog(bot, `Recovery add #${addsUsed}/${maxAdds} — added ~${fmtUsd(addUsd)} ${direction} at market (floating drawdown was ${drawdownPct.toFixed(1)}%). Investment now ${fmtUsd(bot.investmentUsd)}.`, false);
+}
+
 async function manageGridBotInstance(bot, cred, nowMs){
   const plan = bot.plan;
   const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
@@ -3363,6 +3450,9 @@ async function manageGridBotInstance(bot, cred, nowMs){
   // card always reflects the exchange's own mark, not a stale snapshot.
   const posResp = await callProxy('/api/futures/grid/positions', proxyArgs).catch(err => ({ ok:false, message: err.message }));
   bot.runtime.unrealizedUsd = posResp.ok ? (posResp.long?.unrealisedPnl || 0) + (posResp.short?.unrealisedPnl || 0) : null;
+
+  await applyGridRecovery(bot, plan, snap, proxyArgs);
+  if(bot.status !== 'active') return; // recovery itself never closes the bot, but stays consistent with every other early-return in this tick
 
   for(const level of bot.runtime.levels){
     if(level.status === 'PENDING_ENTRY' && level.entryOrderId != null && !openIds.has(String(level.entryOrderId))){
@@ -3794,17 +3884,67 @@ function toggleTradingBotsRunning(){
   }
 }
 
+// Actually closes whatever this bot currently has open — shared by
+// Stop and (for Smart Bots) Pause; the only difference between those
+// two is what happens to the bot record AFTERWARD (Stop ends it for
+// good, Pause puts it to sleep so Resume can redeploy it fresh). Grid
+// runs in hedge mode with no server-side "closed P&L" detector the way
+// DCA's single-sided position has, so its number here is the last
+// polled floating P&L read immediately before the flatten call — an
+// ESTIMATE, not a post-close balance-diff — and is logged/tagged as
+// such (exitReason ends in "_EST"). DCA's number comes from the exact
+// same balance-diff/closed-PnL read its own normal TP/SL close
+// detection already uses, so it's exact.
+async function closeBotPositionForcefully(bot, cred, reasonLabel){
+  const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
+  let netUsd = 0, hadSomethingOpen = false, entry = null, exit = null, qty = null;
+
+  if(bot.type === 'grid'){
+    const posResp = await callProxy('/api/futures/grid/positions', proxyArgs).catch(() => ({ ok:false }));
+    if(posResp.ok){
+      hadSomethingOpen = (posResp.long?.size > 0) || (posResp.short?.size > 0);
+      netUsd = (posResp.long?.unrealisedPnl || 0) + (posResp.short?.unrealisedPnl || 0);
+    }
+    const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+    if(!flat.ok) return { ok:false, message: flat.message };
+  } else {
+    const flat = await callProxy('/api/futures/dca/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+    if(!flat.ok) return { ok:false, message: flat.message };
+    const posResp = await callProxy('/api/futures/position', { ...proxyArgs, openedAtMs: bot.runtime.openedAtMs, balanceBeforeUsd: bot.runtime.balanceBeforeUsd }).catch(() => ({ ok:false }));
+    if(posResp.ok && posResp.closed){
+      hadSomethingOpen = true;
+      netUsd = posResp.closed.closedPnl || 0;
+      entry = posResp.closed.avgEntryPrice != null ? posResp.closed.avgEntryPrice : bot.runtime.avgEntryPrice;
+      exit = posResp.closed.avgExitPrice != null ? posResp.closed.avgExitPrice : null;
+      qty = bot.runtime.totalQty || null;
+    } else if(bot.runtime.totalQty > 0){
+      hadSomethingOpen = true; // couldn't confirm the exact closed number, but there was definitely something open
+    }
+  }
+
+  if(hadSomethingOpen){
+    bot.realizedUsd = (bot.realizedUsd || 0) + netUsd;
+    addTradingBotsRealized(netUsd);
+    appendPersistentTrade({
+      closedAtMs: Date.now(), exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: bot.direction,
+      entry, exit, leverage: bot.leverage || bot.plan?.leverage || null, qty, netUsd,
+      setupType: `Trading Bot: ${bot.type === 'grid' ? 'Grid' : 'DCA'} (${reasonLabel === 'PAUSED' ? 'paused' : 'stopped'})`,
+      durationMin: bot.runtime.openedAtMs ? Math.round((Date.now() - bot.runtime.openedAtMs) / 60_000) : null,
+      gridId: bot.id, exitReason: bot.type === 'grid' ? `${reasonLabel}_EST` : reasonLabel,
+    });
+  }
+  return { ok:true, netUsd, hadSomethingOpen };
+}
+
 async function stopTradingBot(id){
   const f = fu();
   const bot = f.tradingBots.find(b => b.id === id);
   if(!bot) return;
   const cred = liveCred(bot.exchange, bot.mode);
   if(cred){
-    const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
-    const path = bot.type === 'grid' ? '/api/futures/grid/flatten' : '/api/futures/dca/flatten';
-    const result = await callProxy(path, proxyArgs).catch(err => ({ ok:false, message: err.message }));
+    const result = await closeBotPositionForcefully(bot, cred, 'STOPPED');
     if(!result.ok) tradingBotLog(bot, `Stop/flatten failed: ${result.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
-    else tradingBotLog(bot, 'Stopped — all resting orders cancelled, any open position closed.', false);
+    else tradingBotLog(bot, result.hadSomethingOpen ? `Stopped — every pending order cancelled, open position closed at ${fmtUsd(result.netUsd)} realized (regardless of win/loss).` : 'Stopped — pending orders cancelled; nothing was open.', false);
   }
   bot.status = 'stopped';
   if(f.tradingBots.every(b => b.status !== 'active') && f.tradingBotsRunning) toggleTradingBotsRunning();
@@ -4133,26 +4273,68 @@ const SMART_BOT_TYPES = { dca: 'DCA Bot (Trend)', grid: 'Grid Bot (Sideways)' };
 
 function sbState(){
   const f = fu();
-  if(!f.sbGridForm) f.sbGridForm = { fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 5, takeProfitPct: 10, stopLossPct: 10 };
+  if(!f.sbGridForm) f.sbGridForm = {
+    fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 5, takeProfitPct: 10, stopLossPct: 10,
+    // Recovery / averaging — off by default. See applyGridRecovery's
+    // header comment for exactly what this does and why it's riskier
+    // than a plain grid, not a free upgrade to it.
+    recoveryMode: false, recoveryTriggerPct: 15, maxRecoveryAdds: 3, recoverySizeMult: 1.5,
+  };
   if(!f.sbDcaForm) f.sbDcaForm = { fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 3, takeProfitPct: 2, stopLossPct: 15, direction: 'LONG' };
   return f;
 }
 
 function smartBots(){ return fu().tradingBots.filter(b => b.origin === 'smart'); }
 
-// Real, current top-25-by-24h-volume pairs for `exchange` — the exact
-// same ranked list Live/Demo scans (getLiveTradeableSymbols), cached
-// here for LIVE_UNIVERSE_TTL_MS so switching back and forth between
-// Smart Bots and another tab doesn't re-fetch every render.
-async function getSmartBotPairs(exchange){
+const FULL_UNIVERSE_TTL_MS = 5 * 60_000; // exchange listings change on the order of days, not seconds — no need to refetch as eagerly as the 45s top-25 cache
+
+// The FULL current USDT-perp symbol list for `exchange` — same
+// /api/futures/universe endpoint Live/Demo's own watchlist ranks down
+// to a top-N from (see liveEngine.js's getTradeableSymbols), fetched
+// here WITHOUT that truncation so pair search can find any symbol
+// either exchange lists, not just its 25 most-traded.
+async function getFullFuturesUniverse(exchange){
   const f = sbState();
-  const cache = f.sbPairCache[exchange];
-  if(cache && Date.now() - cache.atMs < LIVE_UNIVERSE_TTL_MS) return cache.entries;
-  const u = await getLiveTradeableSymbols(exchange).catch(() => null);
-  const source = (u && u.entries && u.entries.length) ? u.entries : ((u && u.top) ? u.top.map(s => ({ symbol: s, volume24hUsd: null })) : []);
-  const entries = source.slice(0, 25);
-  f.sbPairCache[exchange] = { atMs: Date.now(), entries };
-  return entries;
+  const cache = f.sbUniverseCache[exchange];
+  if(cache && Date.now() - cache.atMs < FULL_UNIVERSE_TTL_MS) return cache.list;
+  const resp = await callProxy('/api/futures/universe', { exchange }).catch(() => null);
+  const list = (resp && resp.ok && Array.isArray(resp.symbols)) ? resp.symbols : (cache ? cache.list : []);
+  f.sbUniverseCache[exchange] = { atMs: Date.now(), list };
+  return list;
+}
+
+// Searches BOTH Bybit's and Binance's full symbol universe at once (the
+// only two GRID_LIVE_EXCHANGES Smart Bots supports) and merges by
+// symbol, so a pair shows up (with which exchange(s) actually list it)
+// regardless of whether it's in either one's top-25-by-volume —
+// "search across every exchange in use", not one exchange at a time.
+// An empty query returns the combined list sorted by volume, which is
+// what the create form shows before the person types anything.
+async function searchSmartBotPairs(query){
+  const q = (query || '').trim().toUpperCase();
+  const lists = await Promise.all(GRID_LIVE_EXCHANGES.map(x => getFullFuturesUniverse(x)));
+  const merged = new Map(); // symbol -> { symbol, volume24hUsd, exchanges:Set }
+  GRID_LIVE_EXCHANGES.forEach((exchange, i) => {
+    (lists[i] || []).forEach(entry => {
+      const symbol = entry.symbol;
+      if(!symbol || (q && !symbol.toUpperCase().includes(q))) return;
+      if(!merged.has(symbol)) merged.set(symbol, { symbol, volume24hUsd: 0, exchanges: new Set() });
+      const m = merged.get(symbol);
+      m.exchanges.add(exchange);
+      m.volume24hUsd = Math.max(m.volume24hUsd, entry.volume24hUsd || 0);
+    });
+  });
+  const results = [...merged.values()].map(m => ({ ...m, exchanges: [...m.exchanges] }));
+  results.sort((a, b) => {
+    if(q){
+      const aExact = a.symbol.toUpperCase() === q, bExact = b.symbol.toUpperCase() === q;
+      if(aExact !== bExact) return aExact ? -1 : 1;
+      const aStarts = a.symbol.toUpperCase().startsWith(q), bStarts = b.symbol.toUpperCase().startsWith(q);
+      if(aStarts !== bStarts) return aStarts ? -1 : 1;
+    }
+    return (b.volume24hUsd || 0) - (a.volume24hUsd || 0);
+  });
+  return results.slice(0, 30);
 }
 
 // Maps classifyRegime's 8-way read down to the one choice this form
@@ -4186,6 +4368,11 @@ async function sbCheckRegime(symbol){
 // (re)renders it. Safe to call any time something about any smart bot
 // changes — it never changes which of the three is showing.
 function renderSmartBotsPanel(){
+  // Called after essentially every bot mutation (manual or smart, via
+  // renderTradingBotsList calling this too) — the one hook point that
+  // keeps the persisted snapshot in sync without touching every call
+  // site individually.
+  saveTradingBotsSnapshot();
   const f = fu();
   if(els.sbListView) els.sbListView.style.display = f.sbView === 'list' ? '' : 'none';
   if(els.sbCreateView) els.sbCreateView.style.display = f.sbView === 'create' ? '' : 'none';
@@ -4259,6 +4446,28 @@ function renderSmartBotsList(){
   }).join('') + createBtnHtml;
 }
 
+// Renders one search-result row for the pair dropdown — shows which of
+// the two supported exchanges actually list it, since that's the whole
+// point of searching across both rather than picking a per-exchange
+// top-25 first.
+function sbSymbolResultRow(entry){
+  const exchNames = entry.exchanges.map(x => EXCHANGE_DISPLAY_NAMES[x] || x).join(', ');
+  return `<div class="sb-symbol-result" data-symbol="${entry.symbol}" data-exchanges="${entry.exchanges.join(',')}">
+    <span>${entry.symbol}</span><span style="color:var(--dim);font-size:11px;">${exchNames}</span>
+  </div>`;
+}
+
+async function sbRunSymbolSearch(query){
+  const host = document.getElementById('sbSymbolResults');
+  const results = await searchSmartBotPairs(query);
+  fu().sbLastSearchResults = results; // so the click handler can read back which exchanges the chosen symbol supports without re-searching
+  if(!host) return; // the create form may have been navigated away from while this was in flight
+  host.innerHTML = results.length
+    ? results.map(sbSymbolResultRow).join('')
+    : `<div class="sb-symbol-result" style="color:var(--dim);cursor:default;">No match on Bybit or Binance.</div>`;
+  host.style.display = '';
+}
+
 function renderSmartBotsCreate(){
   if(!els.sbCreateHost) return;
   const f = sbState();
@@ -4266,8 +4475,6 @@ function renderSmartBotsCreate(){
   const mode = f.liveModeByExchange[exchange] || 'live';
   const type = f.sbCreateType || 'dca';
   const cfg = type === 'grid' ? f.sbGridForm : f.sbDcaForm;
-  const pairCache = f.sbPairCache[exchange];
-  const pairs = pairCache ? pairCache.entries : [];
   const suggestion = f.sbRegimeSuggestion && f.sbRegimeSuggestion.symbol === f.sbCreateSymbol ? f.sbRegimeSuggestion : null;
 
   els.sbCreateHost.innerHTML = `
@@ -4286,16 +4493,15 @@ function renderSmartBotsCreate(){
             <button type="button" class="mode-btn sb-mode-btn ${mode === 'demo' ? 'active' : ''}" data-mode="demo">Demo</button>
           </div>
         </div>
-        <label style="font-size:11px;color:var(--dim);">Pair (top 25 by 24h volume)
-          <select id="sbSymbol" style="display:block;margin-top:3px;min-width:160px;text-transform:uppercase;">
-            ${pairs.length ? pairs.map(p => `<option value="${p.symbol}" ${f.sbCreateSymbol === p.symbol ? 'selected' : ''}>${p.symbol}</option>`).join('') : `<option value="">Loading top 25…</option>`}
-          </select>
+        <label style="font-size:11px;color:var(--dim);position:relative;">Pair (search Bybit &amp; Binance)
+          <input id="sbSymbolInput" type="text" autocomplete="off" placeholder="e.g. FLOKIUSDT" value="${f.sbCreateSymbol || ''}" style="display:block;margin-top:3px;min-width:200px;text-transform:uppercase;">
+          <div id="sbSymbolResults" class="sb-symbol-results" style="display:none;"></div>
         </label>
       </div>
       <div id="sbRegimeNote" style="font-size:11.5px;color:var(--dim);margin-bottom:12px;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel2);">
         ${suggestion
           ? `${f.sbCreateSymbol} right now: <strong style="color:var(--ink);">${suggestion.text}</strong> — suggested type: <strong style="color:var(--amber);">${SMART_BOT_TYPES[suggestion.suggestedType]}</strong>${suggestion.suggestedType !== type ? ` <button type="button" id="sbApplySuggestionBtn" class="primary ghost" style="font-size:10.5px;padding:2px 8px;margin-left:6px;">Use this</button>` : ' (already selected below)'}`
-          : (f.sbCreateSymbol ? 'Checking current regime for this pair…' : 'Pick a pair to see its current regime and a suggested bot type.')}
+          : (f.sbCreateSymbol ? 'Checking current regime for this pair…' : 'Search or pick a pair to see its current regime and a suggested bot type.')}
       </div>
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
         <label style="font-size:11px;color:var(--dim);">Bot Type
@@ -4338,26 +4544,40 @@ function renderSmartBotsCreate(){
           <input id="sbStopLoss" type="number" min="0" step="any" value="${cfg.stopLossPct == null ? '' : cfg.stopLossPct}" style="display:block;margin-top:3px;min-width:90px;">
         </label>
       </div>
+      ${type === 'grid' ? `
+      <div class="ov-block" style="padding:10px 12px;margin-bottom:12px;background:var(--panel2);">
+        <label class="toggle-check" style="font-size:12px;">
+          <input id="sbRecoveryToggle" type="checkbox" ${cfg.recoveryMode ? 'checked' : ''}>
+          <span>Recovery mode — add to the position on a drawdown, to try to average into a better exit instead of only waiting for the range/Stop Loss</span>
+        </label>
+        <div style="font-size:11px;color:var(--dim);margin:6px 0 ${cfg.recoveryMode ? '10px' : '0'};line-height:1.5;">
+          This is a martingale-style averaging add, same idea as DCA's safety orders bolted onto Grid — it INCREASES risk (more margin committed while already underwater) in exchange for a shot at a smaller/no loss instead of riding it to Stop Loss. Stop Loss above still fires as the hard backstop regardless.
+        </div>
+        ${cfg.recoveryMode ? `
+        <div style="display:flex;gap:16px;flex-wrap:wrap;">
+          <label style="font-size:11px;color:var(--dim);">Add trigger (% drawdown)
+            <input id="sbRecoveryTrigger" type="number" min="1" step="any" value="${cfg.recoveryTriggerPct}" style="display:block;margin-top:3px;min-width:80px;">
+          </label>
+          <label style="font-size:11px;color:var(--dim);">Max adds
+            <input id="sbRecoveryMaxAdds" type="number" min="1" max="6" step="1" value="${cfg.maxRecoveryAdds}" style="display:block;margin-top:3px;min-width:70px;">
+          </label>
+          <label style="font-size:11px;color:var(--dim);">Size multiplier per add
+            <input id="sbRecoveryMult" type="number" min="1" step="0.1" value="${cfg.recoverySizeMult}" style="display:block;margin-top:3px;min-width:80px;">
+          </label>
+        </div>` : ''}
+      </div>` : ''}
       <div style="font-size:11px;color:var(--dim);margin:8px 0 12px;line-height:1.5;">
         ${type === 'grid'
           ? 'Grid Bot: a neutral range of resting orders around the current price — range auto-suggested from live data the moment you click Create — that cycles as price moves within it. Stops (flattens) the instant Stop Loss or Take Profit is hit.'
           : 'DCA Bot: a base order now plus a laddered set of resting safety orders that average into the position if price moves against it, with one take-profit off the blended average entry. Stops (position flat, orders cancelled) the instant Take Profit or Stop Loss is hit.'}
         Neither can promise a win rate or guaranteed profit — set Stop Loss/Take Profit at levels you're actually comfortable with.
+        Pause and Stop both cancel every pending order and close any open position at market immediately, regardless of profit or loss — Pause then sleeps (Resume redeploys fresh at current market), Stop ends the bot for good.
       </div>
       <div id="sbCreateStatus" style="font-size:11.5px;color:var(--dim);margin-bottom:8px;"></div>
       <button type="button" id="sbCreateBtn" class="primary" style="font-size:12px;padding:6px 16px;">Create Bot</button>
     </div>
   `;
-  if(!pairs.length){
-    getSmartBotPairs(exchange).then(entries => {
-      if(fu().sbCreateExchange !== exchange) return; // exchange changed while this was in flight
-      if(entries.length && !fu().sbCreateSymbol) fu().sbCreateSymbol = entries[0].symbol;
-      renderSmartBotsCreate();
-      if(fu().sbCreateSymbol) sbCheckRegime(fu().sbCreateSymbol);
-    });
-  } else if(f.sbCreateSymbol && !suggestion){
-    sbCheckRegime(f.sbCreateSymbol);
-  }
+  if(f.sbCreateSymbol && !suggestion) sbCheckRegime(f.sbCreateSymbol);
 }
 
 function sbCreateStatus(msg, isError){
@@ -4376,6 +4596,11 @@ function readSmartBotFormNumbers(){
   const lev = document.getElementById('sbLeverage'); if(lev) cfg.leverage = Math.max(1, parseFloat(lev.value) || cfg.leverage);
   const tp = document.getElementById('sbTakeProfit'); if(tp) cfg.takeProfitPct = tp.value === '' ? '' : parseFloat(tp.value);
   const sl = document.getElementById('sbStopLoss'); if(sl) cfg.stopLossPct = sl.value === '' ? null : parseFloat(sl.value);
+  if(type === 'grid'){
+    const recTrigger = document.getElementById('sbRecoveryTrigger'); if(recTrigger) cfg.recoveryTriggerPct = Math.max(0.5, parseFloat(recTrigger.value) || cfg.recoveryTriggerPct);
+    const recMax = document.getElementById('sbRecoveryMaxAdds'); if(recMax) cfg.maxRecoveryAdds = Math.max(1, Math.min(6, parseInt(recMax.value, 10) || cfg.maxRecoveryAdds));
+    const recMult = document.getElementById('sbRecoveryMult'); if(recMult) cfg.recoverySizeMult = Math.max(1, parseFloat(recMult.value) || cfg.recoverySizeMult);
+  }
 }
 
 async function createSmartBotFromForm(){
@@ -4420,8 +4645,11 @@ async function createSmartBotFromForm(){
     const plan = buildManualGridPlan({ symbol, direction: 'NEUTRAL', upper: range.upper, lower: range.lower, levelCount, leverage: cfg.leverage, investmentUsd: fundingUsd });
     if(!plan){ sbCreateStatus('Could not build a valid grid plan from current market data — try again.', true); return; }
     bot.direction = 'NEUTRAL'; bot.investmentUsd = fundingUsd;
-    bot.config = { maxLossPct: cfg.stopLossPct, profitTargetPct: cfg.takeProfitPct || '', autoScan: false, levelCount, leverage: cfg.leverage };
-    bot.plan = plan; bot.runtime = { levels: [], longStopSet: false, shortStopSet: false };
+    bot.config = {
+      maxLossPct: cfg.stopLossPct, profitTargetPct: cfg.takeProfitPct || '', autoScan: false, levelCount, leverage: cfg.leverage,
+      recoveryMode: !!cfg.recoveryMode, recoveryTriggerPct: cfg.recoveryTriggerPct, maxRecoveryAdds: cfg.maxRecoveryAdds, recoverySizeMult: cfg.recoverySizeMult,
+    };
+    bot.plan = plan; bot.runtime = { levels: [], longStopSet: false, shortStopSet: false, recoveryAddsUsed: 0, recoveryAddedUsd: 0 };
     f.tbDayAnchorInvestmentUsd += bot.investmentUsd;
   } else {
     const direction = cfg.direction || 'LONG';
@@ -4450,12 +4678,59 @@ async function createSmartBotFromForm(){
   renderSmartBotsPanel();
 }
 
-function pauseOrResumeSmartBot(id){
+// Pause CLOSES this bot's current position right now — win or loss,
+// same as Stop — then puts it to sleep; Resume redeploys it fresh (a
+// new entry at whatever the market is when you resume), rather than
+// trying to resurrect the exact position that was just closed. The
+// only real difference from Stop is what happens to the bot record
+// afterward: Stop ends it for good (moves to Stopped, Trades history
+// stays), Pause just parks it so Resume can start it again later.
+// Since actually closing is irreversible (realizes real P&L), confirm
+// before doing it — Resume needs no such confirmation, it's just
+// placing a fresh, ordinary entry.
+async function pauseOrResumeSmartBot(id){
   const f = fu();
   const bot = f.tradingBots.find(b => b.id === id);
   if(!bot) return;
-  bot.paused = !bot.paused;
-  tradingBotLog(bot, bot.paused ? 'Paused — this bot will not be managed until Resumed. Whatever is already resting on the exchange is left exactly as-is.' : 'Resumed.', false);
+
+  if(!bot.paused){
+    const warning = "Pausing will FLATTEN this bot entirely, right now: every pending/resting order gets cancelled AND any open position gets closed at market — regardless of whether it's currently winning or losing. Nothing is left running in the background. Continue?";
+    if(typeof confirm === 'function' && !confirm(warning)) return;
+    const cred = liveCred(bot.exchange, bot.mode);
+    if(!cred){ tradingBotLog(bot, `No verified ${bot.exchange} ${bot.mode} credential — can't flatten to pause.`, true); return; }
+    tradingBotLog(bot, 'Pausing — cancelling pending orders and closing any open position…', false);
+    const result = await closeBotPositionForcefully(bot, cred, 'PAUSED');
+    if(!result.ok){ tradingBotLog(bot, `Could not flatten to pause: ${result.message} — still active, try again.`, true); return; }
+    bot.paused = true;
+    // Clear the runtime so Resume starts a clean, fresh deployment
+    // rather than assuming stale levels/orders that no longer exist.
+    bot.runtime = bot.type === 'grid'
+      ? { levels: [], longStopSet: false, shortStopSet: false, recoveryAddsUsed: 0, recoveryAddedUsd: 0, unrealizedUsd: null }
+      : { avgEntryPrice: null, totalQty: 0, safetyOrders: [], tpAlgoId: null, slAlgoId: null, openedAtMs: null, balanceBeforeUsd: null, unrealizedUsd: null };
+    tradingBotLog(bot, result.hadSomethingOpen ? `Paused — every pending order cancelled, open position closed at ${fmtUsd(result.netUsd)} realized (regardless of win/loss). Resume to redeploy fresh at market.` : 'Paused — pending orders cancelled; nothing was open to close.', false);
+    return;
+  }
+
+  // RESUME — redeploys fresh at current market conditions, since Pause
+  // already closed out whatever was open before.
+  const cred = liveCred(bot.exchange, bot.mode);
+  if(!cred){ tradingBotLog(bot, `No verified ${bot.exchange} ${bot.mode} credential — can't resume.`, true); return; }
+  tradingBotLog(bot, 'Resuming — redeploying at current market…', false);
+  if(bot.type === 'grid'){
+    const snap = await fetchLiveSnapshot(bot.exchange, bot.symbol, '5m').catch(err => { tradingBotLog(bot, `Snapshot fetch failed: ${err.message}`, true); return null; });
+    if(!snap) return;
+    const regime = classifyRegime(snap.h1, snap.m15);
+    const range = suggestGridRange(snap, regime);
+    const plan = buildManualGridPlan({ symbol: bot.symbol, direction: 'NEUTRAL', upper: range.upper, lower: range.lower, levelCount: bot.config.levelCount || 10, leverage: bot.leverage, investmentUsd: bot.investmentUsd });
+    if(!plan){ tradingBotLog(bot, 'Could not rebuild a grid plan from current market data — still paused.', true); return; }
+    bot.plan = plan;
+    await deployGridBotInstance(bot, cred);
+  } else {
+    fu().tbDayAnchorInvestmentUsd -= (bot.investmentUsd || 0); // deployDcaBotInstance below re-adds a freshly computed amount for the redeploy — this avoids double-counting the same capital in the cross-bot daily cap
+    await deployDcaBotInstance(bot, cred);
+  }
+  if(bot.status === 'active') bot.paused = false;
+  if(!fu().tradingBotsRunning) toggleTradingBotsRunning();
   renderSmartBotsPanel();
 }
 
@@ -4559,6 +4834,26 @@ function renderSmartBotDetail(id){
       <div class="tb-stat"><span class="l">Uptime</span><span class="n">${fmtBotUptime(bot.createdAtMs)}</span></div>
       <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length}</span></div>
     </div>
+    <div class="tb-params-head">Trades</div>
+    <div class="table-scroll">
+      <table class="tb-orders-table">
+        <thead><tr><th>Closed</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Lev</th><th>Net P&amp;L</th><th>Duration</th><th>Reason</th></tr></thead>
+        <tbody>
+          ${m.records.length ? [...m.records].sort((a, b) => b.closedAtMs - a.closedAtMs).map(r => `
+            <tr>
+              <td>${fmtBotDateTime(r.closedAtMs)}</td>
+              <td style="color:${r.side === 'LONG' || r.direction === 'LONG' ? 'var(--green)' : 'var(--red)'};">${r.side || r.direction || '—'}</td>
+              <td>${r.entry != null ? r.entry : '—'}</td>
+              <td>${r.exit != null ? r.exit : '—'}</td>
+              <td>${r.qty != null ? (+r.qty).toFixed(6) : '—'}</td>
+              <td>${r.leverage != null ? r.leverage + 'x' : '—'}</td>
+              <td style="color:${(r.netUsd || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(r.netUsd || 0)}</td>
+              <td>${r.durationMin != null ? r.durationMin + 'm' : '—'}</td>
+              <td>${r.exitReason || (bot.type === 'dca' ? 'TP/SL' : '—')}</td>
+            </tr>`).join('') : `<tr><td colspan="9" style="color:var(--dim);text-align:center;padding:14px 0;">No closed trades yet.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
     ${bot.statusMessage ? `<div class="tb-card-log" style="margin-top:14px;${bot.statusIsError ? 'color:var(--red);' : ''}">${bot.statusMessage}</div>` : ''}
     <div class="tb-card-actions" style="margin-top:18px;gap:10px;flex-wrap:wrap;">
       ${bot.status === 'active' ? `
@@ -4591,10 +4886,11 @@ function initSmartBots(){
     els.sbCreateHost.addEventListener('change', (e) => {
       const f = sbState();
       if(e.target.id === 'sbExchange'){
-        readSmartBotFormNumbers(); f.sbCreateExchange = e.target.value; f.sbCreateSymbol = ''; f.sbRegimeSuggestion = null; renderSmartBotsCreate();
-      } else if(e.target.id === 'sbSymbol'){
-        f.sbCreateSymbol = e.target.value; f.sbRegimeSuggestion = null; renderSmartBotsCreate();
-        if(f.sbCreateSymbol) sbCheckRegime(f.sbCreateSymbol);
+        readSmartBotFormNumbers(); f.sbCreateExchange = e.target.value; renderSmartBotsCreate();
+        // Deliberately does NOT clear sbCreateSymbol/sbRegimeSuggestion —
+        // pair search is now cross-exchange, so switching the Exchange
+        // dropdown is just picking where a bot on the ALREADY-selected
+        // pair will place its orders, not a reason to lose the pair.
       } else if(e.target.id === 'sbType'){
         readSmartBotFormNumbers(); f.sbCreateType = e.target.value; renderSmartBotsCreate();
       } else if(e.target.id === 'sbFundingPctRange' || e.target.id === 'sbFundingPct'){
@@ -4602,7 +4898,43 @@ function initSmartBots(){
         const range = document.getElementById('sbFundingPctRange'); const num = document.getElementById('sbFundingPct');
         if(range) range.value = v; if(num) num.value = v;
         (f.sbCreateType === 'grid' ? f.sbGridForm : f.sbDcaForm).fundingPct = v;
+      } else if(e.target.id === 'sbRecoveryToggle'){
+        readSmartBotFormNumbers(); f.sbGridForm.recoveryMode = e.target.checked; renderSmartBotsCreate();
       }
+    });
+    // Pair search — debounced as-you-type, searching Bybit + Binance's
+    // FULL symbol universe together (see searchSmartBotPairs), not just
+    // one exchange's top 25. mousedown (not click) on a result fires
+    // before the input's blur, so a click still registers the pick.
+    let sbSearchDebounce = null;
+    els.sbCreateHost.addEventListener('input', (e) => {
+      if(e.target.id !== 'sbSymbolInput') return;
+      const f = sbState();
+      f.sbSymbolQuery = e.target.value;
+      f.sbCreateSymbol = ''; f.sbRegimeSuggestion = null;
+      if(sbSearchDebounce) clearTimeout(sbSearchDebounce);
+      sbSearchDebounce = setTimeout(() => sbRunSymbolSearch(f.sbSymbolQuery), 250);
+    });
+    els.sbCreateHost.addEventListener('focus', (e) => {
+      if(e.target.id !== 'sbSymbolInput') return;
+      sbRunSymbolSearch(fu().sbSymbolQuery || '');
+    }, true);
+    els.sbCreateHost.addEventListener('blur', (e) => {
+      if(e.target.id !== 'sbSymbolInput') return;
+      setTimeout(() => { const host = document.getElementById('sbSymbolResults'); if(host) host.style.display = 'none'; }, 150);
+    }, true);
+    els.sbCreateHost.addEventListener('mousedown', (e) => {
+      const row = e.target.closest('.sb-symbol-result');
+      if(!row || !row.dataset.symbol) return;
+      e.preventDefault(); // keeps focus/blur from firing before this handler reads the click
+      const f = sbState();
+      f.sbCreateSymbol = row.dataset.symbol;
+      f.sbSymbolQuery = row.dataset.symbol;
+      f.sbRegimeSuggestion = null;
+      const exchanges = (row.dataset.exchanges || '').split(',').filter(Boolean);
+      if(exchanges.length && !exchanges.includes(f.sbCreateExchange)) f.sbCreateExchange = exchanges[0];
+      renderSmartBotsCreate();
+      sbCheckRegime(f.sbCreateSymbol);
     });
     els.sbCreateHost.addEventListener('click', async (e) => {
       if(e.target.classList.contains('sb-back-btn')){ fu().sbView = 'list'; renderSmartBotsPanel(); return; }
@@ -4637,7 +4969,7 @@ function initSmartBots(){
       if(e.target.classList.contains('sb-range-tab')){ fu().sbChartRange = e.target.dataset.range; renderSmartBotDetail(fu().sbDetailId); return; }
       const id = e.target.dataset.id;
       if(!id) return;
-      if(e.target.classList.contains('sb-pause-btn')) pauseOrResumeSmartBot(id);
+      if(e.target.classList.contains('sb-pause-btn')) await pauseOrResumeSmartBot(id);
       else if(e.target.classList.contains('sb-stop-btn')){ await stopTradingBot(id); renderSmartBotsPanel(); }
       else if(e.target.classList.contains('sb-delete-btn')){ deleteTradingBot(id); fu().sbView = 'list'; renderSmartBotsPanel(); }
       else if(e.target.classList.contains('sb-copy-btn')) copySmartBot(id);

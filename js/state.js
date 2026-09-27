@@ -496,9 +496,10 @@ export const state = {
     sbCreateExchange: 'bybit',
     sbCreateSymbol: '',
     sbCreateType: 'dca',
-    sbPairCache: {},          // { [exchange]: { atMs, entries:[{symbol, volume24hUsd}] } }
+    sbUniverseCache: {},      // { [exchange]: { atMs, list:[{symbol, volume24hUsd, lastPrice}] } } — the FULL per-exchange symbol list (/api/futures/universe), not just top-25, so pair search covers every symbol either exchange lists
+    sbSymbolQuery: '',        // raw text currently typed in the pair search box
     sbRegimeSuggestion: null, // { symbol, kind, text, suggestedType, direction? } for the currently selected pair
-    sbGridForm: null,         // lazily initialised: { fundingUsd, fundingMode, fundingPct, leverage, takeProfitPct, stopLossPct }
+    sbGridForm: null,         // lazily initialised: { fundingUsd, fundingMode, fundingPct, leverage, takeProfitPct, stopLossPct, recoveryMode, recoveryTriggerPct, maxRecoveryAdds, recoverySizeMult }
     sbDcaForm: null,          // lazily initialised: same shape + direction
     sbListTab: 'active',      // 'active' | 'stopped'
     sbView: 'list',           // 'list' | 'create' | 'detail'
