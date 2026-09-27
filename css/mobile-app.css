@@ -1,0 +1,364 @@
+/* =============================================================
+   mobile-app.css — turns the site into a phone-first "app" shell.
+
+   Loaded LAST on every page. Everything that changes layout lives
+   inside the (max-width:768px) block, so desktop and tablet-landscape
+   keep the existing horizontal nav and header exactly as they were.
+
+   What this adds on phones:
+     • a slim sticky app bar (logo · live status · menu) instead of the
+       big stacked header + hamburger
+     • a fixed bottom tab bar (Home · Triangular · Trade · Cross · Keys)
+       that replaces the top nav, with safe-area padding for notches and
+       gesture bars
+     • sticky pill sub-tabs on the Trade page
+     • a status sheet (exchange connectivity, install, reload)
+     • an app-style Home: hero card, quick actions, ticker, movers
+     • 16px inputs (stops iOS zooming on focus), 44px touch targets,
+       and no pull-to-refresh (a stray swipe must never reload a page
+       that has a trading engine running in it)
+
+   The markup for the tab bar / app-bar actions / sheet is built by
+   js/mobile-shell.js from the existing .term-nav links, so there is one
+   source of truth for navigation.
+   ============================================================= */
+
+/* ---------- desktop / default: all mobile-only chrome is hidden ---------- */
+.m-only,
+.m-tabbar,
+.m-appbar-actions,
+.m-overlay,
+.m-sheet{ display:none; }
+
+/* ---------- shared bits (icons) ---------- */
+.m-ic{ display:block; width:100%; height:100%; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+
+@media (max-width:768px){
+
+  :root{
+    --appbar-h:calc(54px + env(safe-area-inset-top, 0px));
+    --tabbar-h:62px;
+    --sab:env(safe-area-inset-bottom, 0px);
+    --edge-pad:14px;
+  }
+
+  /* ---------- page-level behaviour ---------- */
+  html{
+    overscroll-behavior-y:none;          /* no pull-to-refresh: a stray swipe must not reload a running engine */
+    -webkit-tap-highlight-color:transparent;
+    scroll-padding-top:calc(var(--appbar-h) + 56px);
+  }
+  body{
+    /* main.css sets overflow-x:hidden on <body> too, which turns body into
+       its own scroll container and silently breaks position:sticky for
+       everything inside it. <html> already clips horizontal overflow, so
+       body goes back to visible here. */
+    overflow:visible !important;
+    overscroll-behavior-y:none;
+    touch-action:manipulation;           /* removes the 300ms double-tap delay */
+    background-attachment:fixed;
+  }
+  .wrap{
+    padding:0 var(--edge-pad) calc(var(--tabbar-h) + var(--sab) + 28px);
+  }
+
+  /* ---------- app bar ----------
+     .term-header dissolves (display:contents) so its children become
+     direct children of .wrap. That lets .brand-block be sticky for the
+     whole page while the exchange status strip just scrolls away. */
+  .term-header{ display:contents; }
+  .nav-toggle{ display:none !important; }
+
+  .brand-block{
+    position:sticky; top:0; z-index:60;
+    margin:0 calc(-1 * var(--edge-pad));
+    padding:env(safe-area-inset-top, 0px) var(--edge-pad) 0;
+    min-height:var(--appbar-h);
+    gap:10px;
+    background:rgba(8,9,10,.92);
+    -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--line);
+  }
+  .logo-img{ height:26px; }
+  .brand-copy{ display:none; }
+
+  .m-appbar-actions{ display:flex; align-items:center; gap:8px; margin-left:auto; }
+  .m-live{
+    display:inline-flex; align-items:center; gap:7px;
+    font-size:11px; color:var(--ink-dim);
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--r-pill);
+    padding:6px 11px 6px 9px; max-width:132px;
+  }
+  .m-live b{ font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .m-iconbtn{
+    appearance:none; cursor:pointer;
+    width:40px; height:40px; padding:9px;
+    display:inline-flex; align-items:center; justify-content:center;
+    background:var(--panel2); border:1px solid var(--line); border-radius:12px; color:var(--ink-dim);
+  }
+  .m-iconbtn:active{ background:var(--panel-hi); }
+
+  /* exchange status strip: one scrollable row under the app bar */
+  .status-cluster{
+    flex-direction:row; flex-wrap:nowrap; align-items:center; justify-content:flex-start;
+    width:auto; gap:8px;
+    margin:0 calc(-1 * var(--edge-pad));
+    padding:10px var(--edge-pad);
+    overflow-x:auto; scrollbar-width:none;
+  }
+  .status-cluster::-webkit-scrollbar{ display:none; }
+  .status-cluster .live-pill{ display:none; }        /* mirrored in the app bar */
+  .exchange-badges{ flex-wrap:nowrap; flex:none; justify-content:flex-start; }
+  .last-update{ flex:none; order:0; padding-left:4px; }
+
+  /* ---------- bottom tab bar (replaces top nav) ---------- */
+  body.has-tabbar .term-nav{ display:none !important; }
+  /* graceful fallback if the shell script ever fails to run: keep a usable nav */
+  body:not(.has-tabbar) .term-nav{
+    display:flex; flex-direction:row; gap:18px; overflow-x:auto;
+    background:none; border:0; border-bottom:1px solid var(--line); border-radius:0; padding:0; margin-bottom:14px;
+  }
+  body:not(.has-tabbar) .navtab{ width:auto; padding:11px 2px 12px; border-radius:0; }
+  body:not(.has-tabbar) .navtab.active{ background:none; border-bottom-color:var(--amber); }
+
+  .m-tabbar{
+    display:grid; grid-template-columns:repeat(5, 1fr); align-items:end;
+    position:fixed; left:0; right:0; bottom:0; z-index:100;
+    height:calc(var(--tabbar-h) + var(--sab));
+    padding:0 4px var(--sab);
+    background:rgba(17,20,17,.95);
+    -webkit-backdrop-filter:blur(16px); backdrop-filter:blur(16px);
+    border-top:1px solid var(--line);
+  }
+  .m-tab{
+    position:relative;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
+    height:var(--tabbar-h);
+    color:var(--dim); text-decoration:none;
+    font-family:var(--disp); font-weight:600; font-size:10.5px; letter-spacing:.01em;
+    -webkit-tap-highlight-color:transparent;
+    transition:color .15s, transform .1s;
+  }
+  .m-tab:active{ transform:scale(.95); }
+  .m-tab-ic{ width:23px; height:23px; }
+  .m-tab[aria-current="page"]{ color:var(--amber); }
+  .m-tab[aria-current="page"]::before{
+    content:''; position:absolute; top:0; left:50%; width:28px; height:2px; margin-left:-14px;
+    border-radius:0 0 3px 3px; background:var(--amber);
+  }
+  /* raised centre button (Trade) */
+  .m-tab.is-center{ color:var(--ink-dim); }
+  .m-tab.is-center .m-tab-ic{
+    width:50px; height:50px; padding:13px; margin-top:-24px; border-radius:50%;
+    background:var(--amber); color:var(--amber-ink);
+    box-shadow:0 0 0 5px var(--bg), 0 8px 20px rgba(240,180,41,.32);
+  }
+  .m-tab.is-center[aria-current="page"]{ color:var(--amber); }
+  .m-tab.is-center[aria-current="page"]::before{ display:none; }
+  .m-tab.is-center span:last-child{ margin-top:-2px; }
+
+  /* ---------- status / menu sheet ---------- */
+  .m-overlay{
+    display:none; position:fixed; inset:0; z-index:150;
+    background:rgba(4,5,4,.62);
+  }
+  .m-overlay.open{ display:block; animation:mFade .18s ease; }
+  .m-sheet{
+    display:block; position:fixed; left:0; right:0; bottom:0; z-index:151;
+    transform:translateY(105%); visibility:hidden;
+    transition:transform .24s cubic-bezier(.2,.8,.2,1), visibility 0s .24s;
+    background:var(--panel); border-top:1px solid var(--line); border-radius:20px 20px 0 0;
+    padding:10px 18px calc(18px + var(--sab));
+    max-height:82vh; overflow-y:auto;
+  }
+  .m-sheet.open{ transform:none; visibility:visible; transition:transform .24s cubic-bezier(.2,.8,.2,1); }
+  .m-sheet-grab{ width:38px; height:4px; border-radius:2px; background:var(--line); margin:0 auto 14px; }
+  .m-sheet h3{ font-size:12px; text-transform:uppercase; letter-spacing:.09em; color:var(--dim); margin:4px 0 10px; }
+  .m-xrow{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:11px 0; border-top:1px solid var(--line-soft); font-size:13px;
+  }
+  .m-xrow:first-of-type{ border-top:0; }
+  .m-xstate{ font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--dim2); display:inline-flex; align-items:center; gap:7px; }
+  .m-xstate::before{ content:''; width:7px; height:7px; border-radius:50%; background:var(--dim2); }
+  .m-xstate[data-state="up"]{ color:var(--green); }
+  .m-xstate[data-state="up"]::before{ background:var(--green); }
+  .m-xstate[data-state="down"]{ color:var(--red); }
+  .m-xstate[data-state="down"]::before{ background:var(--red); }
+  .m-sheet-note{ font-size:11.5px; color:var(--dim); margin:10px 0 0; line-height:1.55; }
+  .m-sheet-actions{ display:grid; gap:10px; margin-top:16px; }
+  .m-sheet-actions button{ width:100%; }
+  .m-sheet-actions [hidden]{ display:none; }
+  @keyframes mFade{ from{ opacity:0; } to{ opacity:1; } }
+
+  /* ---------- sub-tabs on the Trade page: sticky pills ---------- */
+  .term-subnav{
+    position:sticky; top:var(--appbar-h); z-index:50;
+    gap:8px; margin:0 calc(-1 * var(--edge-pad)) 14px;
+    padding:9px var(--edge-pad);
+    background:rgba(8,9,10,.94);
+    -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px);
+    border-bottom:1px solid var(--line-soft);
+  }
+  .navtab.subnavtab{
+    width:auto; flex:none; justify-content:center;
+    padding:8px 15px; min-height:38px; font-size:12.5px;
+    background:var(--panel); border:1px solid var(--line); border-radius:999px;
+  }
+  .navtab.subnavtab.active{ background:var(--amber); color:var(--amber-ink); border-color:var(--amber); }
+
+  /* ---------- content polish ---------- */
+  .panel{ padding-top:2px; }
+  .ov-card, .ov-block, .tb-card, .controls{ border-radius:14px; }
+  .ov-block{ padding:14px 14px; }
+
+  /* Home: "Market Status" header is a compact row, not a stacked block */
+  .ov-head{ flex-direction:row; align-items:center; margin:14px 0 12px; }
+  .ov-head button.primary{ width:auto; min-height:38px; padding:8px 14px; font-size:12px; }
+
+  /* Home: best opportunity becomes the hero card */
+  .ov-grid{ gap:10px; margin-bottom:14px; }
+  #panelOverview .ov-card.ov-highlight{
+    grid-column:1 / -1; order:-1;
+    padding:18px 18px 16px; border-radius:16px; min-height:104px;
+    background:
+      radial-gradient(240px 120px at 100% 0%, rgba(61,220,151,.16), transparent 70%),
+      var(--panel);
+  }
+  #panelOverview .ov-grid > .ov-card:last-child{ grid-column:1 / -1; }   /* 5 small cards: the odd one out spans the row */
+  #panelOverview .ov-card.ov-highlight .ov-label{ font-size:11px; }
+  #panelOverview .ov-card.ov-highlight .ov-value{ font-size:36px; line-height:1.05; }
+
+  /* Control panels stay two-up on phones (the 480px rule in responsive.css
+     drops to one long column, which pushes the results a full screen away) */
+  .controls{ grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px 10px; padding:14px 12px; }
+  .controls .field:has(#cliMode){ grid-column:1 / -1; }
+  .controls > .btn-row, .controls > .stats-row{ grid-column:1 / -1; }
+
+  /* Futures Engine settings block. futures.css caps each cell at 230px so five
+     short number inputs don't stretch across a monitor — on a phone that same
+     cap left one lonely 230px column floating in a 360px panel with a ragged
+     right edge. Two even columns here instead, with the checkbox field (whose
+     label is a full sentence) spanning the row so it never gets squeezed. */
+  .controls.controls--compact{ grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  .controls.controls--compact .field{ max-width:none; min-width:0; }
+  .controls.controls--compact .field:has(.toggle-check){ grid-column:1 / -1; }
+  .controls.controls--compact .toggle-check{ align-items:center; font-size:12px; min-height:var(--touch-target); }
+  /* uppercase 11.5px labels wrap to two lines at this width; keep the inputs
+     on a common baseline (components.css pushes them down with margin-top:auto) */
+  .controls.controls--compact .field > label{ line-height:1.35; }
+
+  /* Same treatment for the Live/Demo settings row: futures.css auto-fits at
+     minmax(150px,1fr), which tips to a single column on a 360px handset. Pin
+     it to two, and give the Auto/Manual toggle the full width it needs. */
+  .fu-live-settings{ grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px 10px; }
+  .fu-live-settings .field:has(.mode-toggle){ grid-column:1 / -1; }
+  .fu-live-settings .mode-toggle{ width:100%; }
+  .fu-live-settings .mode-toggle .mode-btn{ flex:1; }
+
+  /* Forms: 16px stops iOS zooming into a field; 44px is a comfortable tap */
+  input, select, textarea{ font-size:16px !important; }
+  input:not([type="checkbox"]):not([type="radio"]), select{ min-height:44px; }
+  label{ font-size:11.5px; }
+  .field > label{ margin-bottom:5px; }
+
+  /* Any leftover inline fixed-width form fields shrink to the screen */
+  .field[style*="max-width"]{ max-width:100% !important; }
+  select[style*="min-width"], input[style*="min-width"]{ min-width:0 !important; max-width:100%; }
+
+  /* wide data stays scrollable inside its own box, never the page */
+  .table-scroll, .xresults-wrap{ -webkit-overflow-scrolling:touch; }
+  pre, code{ white-space:pre-wrap; word-break:break-word; }
+  img, svg, canvas, video{ max-width:100%; }
+
+  /* ---------- Home: quick actions ---------- */
+  .m-only{ display:block; }
+  .m-quick{
+    display:grid; grid-template-columns:repeat(4, 1fr); gap:4px 2px;
+    background:var(--panel); border:1px solid var(--line); border-radius:16px;
+    padding:12px 4px 8px; margin-bottom:14px;
+  }
+  .m-qa{
+    appearance:none; background:none; border:0; cursor:pointer;
+    display:flex; flex-direction:column; align-items:center; gap:7px;
+    padding:6px 2px 4px; min-height:70px;
+    color:var(--ink-dim); text-decoration:none; text-align:center;
+    font-family:var(--disp); font-weight:600; font-size:11px; line-height:1.2;
+    -webkit-tap-highlight-color:transparent;
+  }
+  .m-qa:active{ transform:scale(.95); }
+  .m-qa-ic{ width:30px; height:30px; color:var(--amber); }
+  .m-qa.is-green .m-qa-ic{ color:var(--green); }
+  .m-qa[hidden]{ display:none; }
+
+  /* ---------- Home: ticker strip ---------- */
+  /* (the desktop presentation of these two lives in css/components.css —
+     everything here re-states what the phone needs, including resets for the
+     desktop border/radius/grid so nothing leaks down) */
+  .m-ticker{
+    overflow:hidden; white-space:nowrap;
+    margin:0 calc(-1 * var(--edge-pad)) 14px;
+    background:var(--panel);
+    border:0; border-block:1px solid var(--line-soft); border-radius:0;
+  }
+  .m-ticker[hidden]{ display:none; }
+  .m-ticker-track{ display:inline-flex; animation:mTick 42s linear infinite; will-change:transform; }
+  .m-ticker-grp{ display:inline-flex; gap:22px; padding:10px 22px 10px 0; }
+  .m-tk{ font-size:12px; font-weight:600; color:var(--ink-dim); }
+  .m-tk i{ font-style:normal; margin-left:6px; }
+  @keyframes mTick{ to{ transform:translateX(-50%); } }
+
+  /* ---------- Home: market movers ---------- */
+  .m-movers{
+    background:var(--panel); border:1px solid var(--line); border-radius:16px;
+    padding:14px 14px 4px; margin-top:14px;
+  }
+  .m-movers[hidden]{ display:none; }
+  .m-movers-head{ display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px; padding-bottom:0; border-bottom:0; }
+  .m-movers-head h3{ font-size:13px; letter-spacing:.02em; text-transform:none; }
+  .m-movers-head small{ font-size:10.5px; color:var(--dim2); }
+  #mMoversList{ display:block; }
+  .m-mrow{
+    display:grid; grid-template-columns:1.1fr 1.2fr 76px; gap:10px; align-items:center;
+    padding:12px 0; border:0; border-top:1px solid var(--line-soft); border-radius:0; background:none;
+  }
+  .m-mrow:first-of-type{ border-top:0; }
+  .m-pair{ font-family:var(--disp); font-weight:700; font-size:13.5px; }
+  .m-pair small{ display:block; margin-top:2px; font-family:var(--mono); font-weight:500; font-size:10.5px; color:var(--dim2); }
+  .m-price{ grid-column:2; grid-row:1; text-align:right; font-family:var(--disp); font-weight:600; font-size:13.5px; font-variant-numeric:tabular-nums; }
+  .m-chg{
+    grid-column:3; grid-row:1; justify-self:stretch; min-width:0;
+    text-align:center; padding:7px 4px; border-radius:7px;
+    font-family:var(--disp); font-weight:700; font-size:12px; font-variant-numeric:tabular-nums;
+  }
+  .m-chg.up{ background:var(--green-soft); color:var(--green); }
+  .m-chg.down{ background:var(--red-soft); color:var(--red); }
+  .m-skel{ height:46px; margin:8px 0; border-radius:8px; background:linear-gradient(90deg, var(--panel2), var(--panel-hi), var(--panel2)); background-size:200% 100%; animation:mShimmer 1.4s infinite; }
+  @keyframes mShimmer{ to{ background-position:-200% 0; } }
+  .m-up{ color:var(--green); }
+  .m-down{ color:var(--red); }
+
+  @media (prefers-reduced-motion: reduce){
+    .m-ticker{ overflow-x:auto; }
+    .m-ticker-track{ animation:none; }
+  }
+}
+
+/* very small phones */
+@media (max-width:340px){
+  .controls,
+  .controls.controls--compact{ grid-template-columns:1fr; }
+}
+@media (max-width:360px){
+  .m-live b{ display:none; }
+  .m-live{ padding:8px; }
+  .m-tab{ font-size:9.5px; }
+  .m-qa{ font-size:10.5px; }
+  #panelOverview .ov-card.ov-highlight .ov-value{ font-size:30px; }
+}
+
+/* installed (standalone) app: nothing extra needed for layout, but hide
+   the "Install" affordances — JS also removes them, this is the no-flash path */
+@media (display-mode: standalone){
+  [data-m-install]{ display:none !important; }
+}
