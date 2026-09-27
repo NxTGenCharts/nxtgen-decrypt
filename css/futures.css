@@ -316,6 +316,16 @@
 /* -------------------- Trading Bots — cards + Details view -------------------- */
 /* Layout modeled on Bybit's own "My Bots" card and bot-details page,
    using this app's existing dark palette/vars rather than Bybit's light one. */
+.sb-symbol-results{
+  position:absolute; top:100%; left:0; right:0; z-index:20; margin-top:2px;
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r-md);
+  max-height:220px; overflow:auto; box-shadow:0 6px 18px rgba(0,0,0,.35);
+}
+.sb-symbol-result{
+  padding:7px 10px; font-size:12px; cursor:pointer; display:flex; justify-content:space-between; gap:10px;
+}
+.sb-symbol-result:hover{ background:var(--panel2); color:var(--amber); }
+
 .tb-card{
   background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
   padding:14px 16px; margin-bottom:10px;
