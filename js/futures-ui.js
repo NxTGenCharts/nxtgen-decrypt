@@ -5022,18 +5022,34 @@ export function initFuturesEngine(){
   if(els.fuStartingBalance) els.fuStartingBalance.value = String(fu().dayState.startingEquity);
   if(els.fuModeBtn) els.fuModeBtn.addEventListener('click', toggleRunning);
   if(els.fuResetSessionBtn) els.fuResetSessionBtn.addEventListener('click', resetSession);
-  initRiskPctInputs();
-  initLiveDailyProfitTargetInput();
-  initLiveMaxDailyLossInput();
-  initLiveTimeframeInput();
-  initStrategySelector();
-  initGridPanel();
-  initScannerCollapse();
-  initTradingBots();
-  initSmartBots();
-  initLiveTradingControls();
-  initTradeLog();
-  restoreLivePositions();
-  renderLive();
-  render();
+  // This one function sets up every piece of the Futures Engine, and
+  // runs unconditionally on EVERY page (app.js imports and calls it
+  // regardless of which page loaded — Overview, Cross-Exchange,
+  // Utilities & Tools, Autotrade & Futures all share it). Before this,
+  // a bug thrown by any ONE step below would abort the rest of this
+  // function AND everything app.js calls after it — on every page,
+  // including ones with nothing to do with Futures at all. Running
+  // each step in its own try/catch means a broken step logs to console
+  // and gets skipped, instead of taking the rest of the site down with
+  // it.
+  const steps = [
+    ['risk pct inputs', initRiskPctInputs],
+    ['live daily profit target input', initLiveDailyProfitTargetInput],
+    ['live max daily loss input', initLiveMaxDailyLossInput],
+    ['live timeframe input', initLiveTimeframeInput],
+    ['strategy selector', initStrategySelector],
+    ['grid panel', initGridPanel],
+    ['scanner collapse', initScannerCollapse],
+    ['trading bots', initTradingBots],
+    ['smart bots', initSmartBots],
+    ['live trading controls', initLiveTradingControls],
+    ['trade log', initTradeLog],
+    ['live positions restore', restoreLivePositions],
+    ['live render', renderLive],
+    ['render', render],
+  ];
+  for(const [label, fn] of steps){
+    try{ fn(); }
+    catch(err){ console.error(`[futures-ui] "${label}" init failed — continuing with the rest of the page:`, err); }
+  }
 }

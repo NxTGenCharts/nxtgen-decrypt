@@ -46,13 +46,25 @@ if(els.xScanBtn) els.xScanBtn.addEventListener('click', runXScan);
 // tabAutoBtn/tabFuturesBtn are the sub-tab switch within this one page. The
 // selected sub-tab is kept in the URL hash (#autotrade-balances /
 // #ai-futures-engine) — see initSubTabRouting in ui.js.
-initSubTabRouting();
 
 // ---- Init calls: each one is a no-op (or close to it) on a page that
 // doesn't have its elements, since every render function it calls now
-// guards on its own elements existing. ----
-initAutotrade();
-initFuturesEngine();
-initAiSignal();
-initBacktestUI();
-initMobileNav();
+// guards on its own elements existing. Each runs in its own try/catch:
+// this file loads on EVERY page, so an uncaught throw partway through
+// used to abort everything still to come in this list — e.g. a bug in
+// initFuturesEngine could silently skip initAiSignal/initBacktestUI/
+// initMobileNav on every page site-wide, not just the Futures one.
+// Isolating them means a broken feature logs to console and gets
+// skipped instead of taking the rest of the site's init down with it.
+const initSteps = [
+  ['sub-tab routing', initSubTabRouting],
+  ['autotrade', initAutotrade],
+  ['futures engine', initFuturesEngine],
+  ['ai signal', initAiSignal],
+  ['backtest UI', initBacktestUI],
+  ['mobile nav', initMobileNav],
+];
+for(const [label, fn] of initSteps){
+  try{ fn(); }
+  catch(err){ console.error(`[app.js] "${label}" init failed — continuing with the rest of the page:`, err); }
+}
