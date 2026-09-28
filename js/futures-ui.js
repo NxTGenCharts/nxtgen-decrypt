@@ -3421,7 +3421,7 @@ async function resolveGridCyclePnl(proxyArgs, orderId, estimate){
   if(!row) return { ...estimate, pnlSource: 'estimate' };
   // Bybit's closedPnl is already net of both real fees — don't also
   // subtract the estimate's modeled fees/slippage/funding on top of it.
-  return { grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: row.closedPnl, avgEntryPrice: row.avgEntryPrice || null, avgExitPrice: row.avgExitPrice || null, pnlSource: 'exchange' };
+  return { grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: row.closedPnl, avgEntryPrice: row.avgEntryPrice || null, avgExitPrice: row.avgExitPrice || null, qty: row.qty || null, closedAtMs: row.createdTime || null, pnlSource: 'exchange' };
 }
 
 async function manageGridBotInstance(bot, cred, nowMs){
@@ -3500,6 +3500,26 @@ async function manageGridBotInstance(bot, cred, nowMs){
   await applyGridRecovery(bot, plan, snap, proxyArgs);
   if(bot.status !== 'active') return; // recovery itself never closes the bot, but stays consistent with every other early-return in this tick
 
+  // ---- Close-order-vanished handling (fix) ------------------------------
+  // A resting TP close order disappearing from the open-orders list does
+  // NOT prove it filled: when the side's protective stop fires, Bybit
+  // cancels every reduce-only TP on that side too. The old code treated
+  // both cases as "TP hit" and booked a modeled +profit while the exchange
+  // had really booked a loss. Now every vanished close order is settled
+  // against Bybit's own closed-P&L rows: a row with this order's id = real
+  // TP; unclaimed close rows on that side = stop-out (booked as-is).
+  bot.runtime.claimedPnl = bot.runtime.claimedPnl || [];
+  const claimed = new Set(bot.runtime.claimedPnl.map(String));
+  let pnlRowsCache = null;
+  const getPnlRows = async () => {
+    if(pnlRowsCache !== null) return pnlRowsCache;
+    if(bot.exchange !== 'bybit'){ pnlRowsCache = []; return pnlRowsCache; }
+    const r = await callProxy('/api/futures/grid/closed-pnl', proxyArgs).catch(() => null);
+    pnlRowsCache = r && r.ok ? (r.list || []) : [];
+    return pnlRowsCache;
+  };
+  const claimRow = (orderId) => { claimed.add(String(orderId)); bot.runtime.claimedPnl.push(String(orderId)); if(bot.runtime.claimedPnl.length > 400) bot.runtime.claimedPnl.splice(0, 100); };
+
   for(const level of bot.runtime.levels){
     if(level.status === 'PENDING_ENTRY' && level.entryOrderId != null && !openIds.has(String(level.entryOrderId))){
       const targetPrice = plan.levels[level.targetIndex];
@@ -3519,24 +3539,113 @@ async function manageGridBotInstance(bot, cred, nowMs){
     } else if(level.status === 'PENDING_CLOSE' && level.closeOrderId != null && !openIds.has(String(level.closeOrderId))){
       const perLevelUsd = plan.allocationUsd / plan.levelCount;
       const qty = (perLevelUsd * plan.leverage) / level.entryPrice;
-      const estimate = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: level.targetPrice, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
-      const pnl = await resolveGridCyclePnl(proxyArgs, level.closeOrderId, estimate);
-      bot.realizedUsd += pnl.netUsd;
-      addTradingBotsRealized(pnl.netUsd);
-      tradingBotLog(bot, `Level ${level.levelIndex} cycle closed — ${fmtUsd(pnl.netUsd)} (${pnl.pnlSource === 'exchange' ? 'Bybit-verified' : 'estimated — Bybit closed P&L not available for this close yet'}).`, false);
-      const record = {
+      const dirKey = level.direction === 'LONG' ? 'long' : 'short';
+      const closingSide = level.direction === 'LONG' ? 'Sell' : 'Buy';
+      const sidePos = posResp.ok ? posResp[dirKey] : null;
+      const rows = await getPnlRows();
+      const tpRow = rows.find(r => String(r.orderId) === String(level.closeOrderId));
+
+      // Sibling legs on this side whose TP is still resting — their qty is still legitimately held.
+      const siblings = bot.runtime.levels.filter(l => l !== level && l.direction === level.direction && l.status === 'PENDING_CLOSE' && l.closeOrderId != null && openIds.has(String(l.closeOrderId)));
+      const siblingQty = siblings.reduce((a, l) => a + (plan.allocationUsd / plan.levelCount * plan.leverage) / l.entryPrice, 0);
+
+      if(!tpRow && posResp.ok && sidePos && sidePos.size >= siblingQty + qty * 0.9){
+        // Position still holds this leg's size -> the TP was cancelled (not filled). Re-place it.
+        const again = await callProxy('/api/futures/grid/place-close', { ...proxyArgs, direction: level.direction, price: level.targetPrice, qty, orderLinkTag: `${bot.id}-${level.levelIndex}-c${nowMs % 100000}` }).catch(err => ({ ok:false, message: err.message }));
+        if(again.ok){ level.closeOrderId = again.orderId; tradingBotLog(bot, `Level ${level.levelIndex}'s take-profit order was cancelled while the position is still open — re-placed it.`, true); }
+        else tradingBotLog(bot, `Level ${level.levelIndex}'s take-profit order vanished with the position still open and re-placing failed: ${again.message}`, true);
+        continue;
+      }
+
+      if(tpRow){
+        // ---- genuine take-profit fill, exchange-verified ----
+        const estimate = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: level.targetPrice, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
+        const pnl = await resolveGridCyclePnl(proxyArgs, level.closeOrderId, estimate);
+        claimRow(level.closeOrderId);
+        bot.realizedUsd += pnl.netUsd;
+        addTradingBotsRealized(pnl.netUsd);
+        tradingBotLog(bot, `Level ${level.levelIndex} cycle closed — ${fmtUsd(pnl.netUsd)} (${pnl.pnlSource === 'exchange' ? 'Bybit-verified' : 'estimated'}).`, false);
+        const closedAt = pnl.closedAtMs || nowMs;
+        // Entry/exit/qty come from the SAME Bybit row as the P&L so a row's prices always reproduce its P&L
+        // (Bybit realizes hedge-mode closes against the position's AVERAGE entry, not this level's own price).
+        appendPersistentTrade({
+          closedAtMs: closedAt, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
+          entry: pnl.avgEntryPrice || level.entryPrice, exit: pnl.avgExitPrice || level.targetPrice, qty: pnl.qty || qty, leverage: plan.leverage,
+          grossUsd: pnl.grossUsd != null ? pnl.grossUsd : estimate.grossUsd, feesUsd: pnl.feesUsd != null ? pnl.feesUsd : estimate.feesUsd,
+          fundingUsd: pnl.fundingUsd != null ? pnl.fundingUsd : estimate.fundingUsd, slippageUsd: pnl.slippageUsd != null ? pnl.slippageUsd : estimate.slippageUsd,
+          netUsd: pnl.netUsd, pnlSource: pnl.pnlSource,
+          confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_CYCLE_TP', durationMin: Math.max(0, Math.round((closedAt - level.openedAt) / 60_000)),
+          gridId: bot.id, gridLevel: level.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
+        });
+        level.missTicks = 0;
+        const rePlaced = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction: level.direction, price: level.price, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${level.levelIndex}-r` }).catch(err => ({ ok:false, message: err.message }));
+        if(rePlaced.ok){ level.status = 'PENDING_ENTRY'; level.entryOrderId = rePlaced.orderId; level.closeOrderId = null; }
+        else { level.status = 'IDLE'; level.entryOrderId = null; level.closeOrderId = null; tradingBotLog(bot, `Cycle closed on level ${level.levelIndex} but couldn't re-arm it: ${rePlaced.message}`, true); }
+        continue;
+      }
+
+      // ---- No TP row for this order: side stop-out, or Bybit hasn't indexed the fill yet ----
+      const trackedIds = new Set(bot.runtime.levels.map(l => l.closeOrderId).filter(x => x != null).map(String));
+      const sideStart = Math.min(...bot.runtime.levels.filter(l => l.direction === level.direction && l.openedAt).map(l => l.openedAt), level.openedAt) - 120_000;
+      const stopRows = rows.filter(r => r.side === closingSide && r.createdTime >= sideStart && !claimed.has(String(r.orderId)) && !trackedIds.has(String(r.orderId)));
+
+      if(stopRows.length){
+        let total = 0;
+        for(const r of stopRows){
+          claimRow(r.orderId);
+          total += r.closedPnl;
+          bot.realizedUsd += r.closedPnl;
+          addTradingBotsRealized(r.closedPnl);
+          appendPersistentTrade({
+            closedAtMs: r.createdTime || nowMs, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
+            entry: r.avgEntryPrice, exit: r.avgExitPrice, qty: r.qty, leverage: plan.leverage,
+            grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: r.closedPnl, pnlSource: 'exchange',
+            confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_SIDE_STOP', durationMin: Math.max(0, Math.round(((r.createdTime || nowMs) - level.openedAt) / 60_000)),
+            gridId: bot.id, gridLevel: level.levelIndex, cycleResult: r.closedPnl > 0 ? 'WIN' : 'LOSS',
+          });
+        }
+        // Every leg on this side whose TP vanished was closed by that same stop.
+        for(const l of bot.runtime.levels){
+          if(l.direction === level.direction && l.status === 'PENDING_CLOSE' && l.closeOrderId != null && !openIds.has(String(l.closeOrderId))){
+            l.status = 'IDLE'; l.entryOrderId = null; l.closeOrderId = null; l.missTicks = 0;
+          }
+        }
+        bot.runtime[level.direction === 'LONG' ? 'longStopSet' : 'shortStopSet'] = false;
+        tradingBotLog(bot, `${level.direction} side STOPPED OUT on the exchange — ${stopRows.length} close(s) booked from Bybit, ${fmtUsd(total)} net. Affected levels will re-arm when price is back inside the range.`, true);
+        continue;
+      }
+
+      // Nothing indexed yet: wait a few ticks before ever falling back to an estimate.
+      level.missTicks = (level.missTicks || 0) + 1;
+      const waitTicks = bot.exchange === 'bybit' ? 4 : 0;
+      if(level.missTicks <= waitTicks){ continue; }
+      const stopPx = level.direction === 'LONG' ? plan.lower : plan.upper;
+      const stoppedOut = level.direction === 'LONG' ? snap.price <= stopPx : snap.price >= stopPx;
+      const exitPx = stoppedOut ? stopPx : level.targetPrice;
+      const estimate = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: exitPx, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
+      bot.realizedUsd += estimate.netUsd;
+      addTradingBotsRealized(estimate.netUsd);
+      tradingBotLog(bot, `Level ${level.levelIndex} closed — ${fmtUsd(estimate.netUsd)} (estimated ${stoppedOut ? 'as a stop-out' : 'as a take-profit'}; exchange P&L not available). Use Verify with Bybit to reconcile.`, true);
+      appendPersistentTrade({
         closedAtMs: nowMs, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
-        entry: level.entryPrice, exit: level.targetPrice, qty, leverage: plan.leverage,
-        grossUsd: pnl.grossUsd != null ? pnl.grossUsd : estimate.grossUsd, feesUsd: pnl.feesUsd != null ? pnl.feesUsd : estimate.feesUsd,
-        fundingUsd: pnl.fundingUsd != null ? pnl.fundingUsd : estimate.fundingUsd, slippageUsd: pnl.slippageUsd != null ? pnl.slippageUsd : estimate.slippageUsd,
-        netUsd: pnl.netUsd, pnlSource: pnl.pnlSource,
-        confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_CYCLE_TP', durationMin: Math.round((nowMs - level.openedAt) / 60_000),
-        gridId: bot.id, gridLevel: level.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
-      };
-      appendPersistentTrade(record);
-      const rePlaced = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction: level.direction, price: level.price, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${level.levelIndex}-r` }).catch(err => ({ ok:false, message: err.message }));
-      if(rePlaced.ok){ level.status = 'PENDING_ENTRY'; level.entryOrderId = rePlaced.orderId; level.closeOrderId = null; }
-      else { level.status = 'IDLE'; level.entryOrderId = null; level.closeOrderId = null; tradingBotLog(bot, `Cycle closed on level ${level.levelIndex} but couldn't re-arm it: ${rePlaced.message}`, true); }
+        entry: level.entryPrice, exit: exitPx, qty, leverage: plan.leverage,
+        grossUsd: estimate.grossUsd, feesUsd: estimate.feesUsd, fundingUsd: estimate.fundingUsd, slippageUsd: estimate.slippageUsd, netUsd: estimate.netUsd, pnlSource: 'estimate',
+        confidence: null, setupType: 'Trading Bot: Grid', exitReason: stoppedOut ? 'GRID_SIDE_STOP' : 'GRID_CYCLE_TP', durationMin: Math.round((nowMs - level.openedAt) / 60_000),
+        gridId: bot.id, gridLevel: level.levelIndex, cycleResult: estimate.netUsd > 0 ? 'WIN' : 'LOSS',
+      });
+      level.missTicks = 0;
+      level.status = 'IDLE'; level.entryOrderId = null; level.closeOrderId = null;
+    } else if(level.status === 'IDLE' && level.price != null){
+      // Re-arm a level that was stopped out (or failed to re-arm) once price is back on the correct side of it.
+      const buffer = snap.price * 0.0005;
+      const okSide = level.direction === 'LONG' ? level.price < snap.price - buffer : level.price > snap.price + buffer;
+      const inRange = snap.price > plan.lower && snap.price < plan.upper;
+      if(okSide && inRange){
+        const perLevelUsd = plan.allocationUsd / plan.levelCount;
+        const qty = (perLevelUsd * plan.leverage) / level.price;
+        const rePlaced = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction: level.direction, price: level.price, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${level.levelIndex}-a${nowMs % 100000}` }).catch(err => ({ ok:false, message: err.message }));
+        if(rePlaced.ok){ level.status = 'PENDING_ENTRY'; level.entryOrderId = rePlaced.orderId; tradingBotLog(bot, `Level ${level.levelIndex} re-armed.`, false); }
+      }
     }
   }
   // This bot's OWN Max Loss / Profit Target — separate from, and checked
@@ -5266,14 +5375,6 @@ function renderSmartBotDetail(id){
       <div class="tb-stat"><span class="l">Uptime</span><span class="n">${fmtBotUptime(bot.createdAtMs)}</span></div>
       <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length}</span></div>
     </div>
-    <div class="tb-params-head">Exchange check</div>
-    <div style="font-size:11.5px;color:var(--dim);line-height:1.5;margin-bottom:8px;">
-      ${bot.exchange === 'bybit'
-        ? `Net P&amp;L rows marked <strong style="color:var(--ink);">✓</strong> are Bybit's own realized P&amp;L for that exact close (already net of real fees) — pulled the moment the cycle closes, not modeled. Rows marked <strong style="color:var(--ink);">≈</strong> fall back to the app's fee estimate, which only happens on the rare close Bybit's own closed-P&amp;L feed didn't have indexed yet at that instant.`
-        : 'Exchange-verified P&amp;L is only wired up for Bybit right now — Net P&amp;L above is the app\'s fee-model estimate.'}
-    </div>
-    ${bot.exchange === 'bybit' ? `<button type="button" class="primary ghost sb-verify-btn" data-id="${bot.id}" style="font-size:11px;padding:4px 10px;">Verify with Bybit</button>` : ''}
-    <div style="font-size:11.5px;color:var(--dim);line-height:1.5;margin:8px 0 14px;">${exchangeCheckHtml(bot)}</div>
     <div class="tb-params-head">Trades</div>
     <div class="table-scroll">
       <table class="tb-orders-table">
