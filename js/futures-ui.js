@@ -2860,13 +2860,13 @@ function renderTradingBotTypeFields(){
           </label>`;
     const investmentModeToggle = `
           <label style="font-size:11px;color:var(--dim);">Sizing
-            <div style="display:flex;gap:6px;margin-top:3px;">
-              ${[['usdt', 'Fixed USDT'], ['pct', '% of balance']].map(([m, label]) => `<button type="button" class="primary ${cfg.investmentMode === m ? '' : 'ghost'} tb-grid-invmode" data-invmode="${m}" style="font-size:11px;padding:4px 10px;">${label}</button>`).join('')}
+            <div class="seg" style="margin-top:3px;">
+              ${[['usdt', 'Fixed USDT'], ['pct', '% of balance']].map(([m, label]) => `<button type="button" class="seg-btn tb-grid-invmode ${cfg.investmentMode === m ? 'is-active' : ''}" data-invmode="${m}" style="font-size:11px;padding:5px 12px;min-height:30px;">${label}</button>`).join('')}
             </div>
           </label>`;
     host.innerHTML = `
-      <div style="display:flex;gap:10px;margin-bottom:10px;">
-        ${[['manual', 'Manual'], ['auto', 'Auto-Scan Watchlist']].map(([m, label]) => `<button type="button" class="primary ${(cfg.autoScan ? 'auto' : 'manual') === m ? '' : 'ghost'} tb-grid-mode" data-mode="${m}" style="font-size:12px;padding:5px 14px;">${label}</button>`).join('')}
+      <div class="seg" style="margin-bottom:10px;">
+        ${[['manual', 'Manual'], ['auto', 'Auto-Scan Watchlist']].map(([m, label]) => `<button type="button" class="seg-btn tb-grid-mode ${(cfg.autoScan ? 'auto' : 'manual') === m ? 'is-active' : ''}" data-mode="${m}">${label}</button>`).join('')}
       </div>
       ${cfg.autoScan ? `
         <div style="font-size:11px;color:var(--dim);margin-bottom:8px;line-height:1.5;">
@@ -2896,8 +2896,8 @@ function renderTradingBotTypeFields(){
         </div>
         <div id="tbAutoScanStatus" style="font-size:11.5px;color:var(--dim);margin-top:10px;"></div>
       ` : `
-      <div style="display:flex;gap:10px;margin-bottom:10px;">
-        ${['NEUTRAL', 'LONG', 'SHORT'].map(d => `<button type="button" class="primary ${cfg.direction === d ? '' : 'ghost'} tb-grid-direction" data-dir="${d}" style="font-size:12px;padding:5px 14px;">${d === 'NEUTRAL' ? 'Neutral' : d === 'LONG' ? 'Long' : 'Short'}</button>`).join('')}
+      <div class="seg" style="margin-bottom:10px;">
+        ${['NEUTRAL', 'LONG', 'SHORT'].map(d => `<button type="button" class="seg-btn tb-grid-direction ${cfg.direction === d ? 'is-active' : ''}" data-dir="${d}">${d === 'NEUTRAL' ? 'Neutral' : d === 'LONG' ? 'Long' : 'Short'}</button>`).join('')}
       </div>
       <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
         <label style="font-size:11px;color:var(--dim);">Price Range (lower)
@@ -2952,8 +2952,8 @@ function renderTradingBotTypeFields(){
   } else {
     const cfg = f.tbDcaForm || (f.tbDcaForm = { direction: 'LONG', baseOrderUsd: DCA_DEFAULTS.baseOrderUsd, safetyOrderUsd: DCA_DEFAULTS.safetyOrderUsd, maxSafetyOrders: DCA_DEFAULTS.maxSafetyOrders, priceDeviationPct: DCA_DEFAULTS.priceDeviationPct, stepScale: DCA_DEFAULTS.stepScale, volumeScale: DCA_DEFAULTS.volumeScale, takeProfitPct: DCA_DEFAULTS.takeProfitPct, stopLossPct: '', leverage: DCA_DEFAULTS.leverage });
     host.innerHTML = `
-      <div style="display:flex;gap:10px;margin-bottom:10px;">
-        ${['LONG', 'SHORT'].map(d => `<button type="button" class="primary ${cfg.direction === d ? '' : 'ghost'} tb-dca-direction" data-dir="${d}" style="font-size:12px;padding:5px 14px;">${d === 'LONG' ? 'Long' : 'Short'}</button>`).join('')}
+      <div class="seg" style="margin-bottom:10px;">
+        ${['LONG', 'SHORT'].map(d => `<button type="button" class="seg-btn tb-dca-direction ${cfg.direction === d ? 'is-active' : ''}" data-dir="${d}">${d === 'LONG' ? 'Long' : 'Short'}</button>`).join('')}
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;">
         <label style="font-size:11px;color:var(--dim);">Base Order (USDT)<input id="tbDcaBase" type="number" min="1" step="any" value="${cfg.baseOrderUsd}" style="display:block;margin-top:3px;width:100%;"></label>

@@ -328,8 +328,10 @@
 
 .tb-card{
   background:var(--panel); border:1px solid var(--line); border-radius:var(--r-lg);
-  padding:14px 16px; margin-bottom:10px;
+  padding:14px 16px; margin-bottom:10px; box-shadow:var(--sh-1);
+  transition:border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
+.tb-card:hover{ border-color:#2a352d; box-shadow:var(--sh-2); }
 .tb-card-head{ display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px; }
 .tb-card-id{ display:flex; gap:10px; align-items:flex-start; }
 .tb-icon{
@@ -370,8 +372,12 @@
 }
 .tb-modal-close:hover{ color:var(--ink); border-color:var(--dim2); }
 .tb-tabs{ display:flex; gap:20px; border-bottom:1px solid var(--line-soft); margin:16px 0 16px; }
-.tb-tab{ font-size:12.5px; color:var(--dim); padding-bottom:9px; cursor:pointer; border-bottom:2px solid transparent; }
-.tb-tab.on{ color:var(--ink); border-bottom-color:var(--amber); }
+.tb-tab{
+  font-size:12.5px; color:var(--dim); padding:6px 8px 9px; cursor:pointer; border-bottom:2px solid transparent;
+  border-radius:var(--r-sm) var(--r-sm) 0 0; transition:color var(--dur) var(--ease), border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.tb-tab:hover{ color:var(--ink-dim); background:rgba(255,255,255,.03); }
+.tb-tab.on{ color:var(--ink); border-bottom-color:var(--amber); font-weight:600; background:linear-gradient(180deg, rgba(240,180,41,.07), transparent 85%); }
 .tb-metrics-grid{
   display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:16px 18px;
 }
@@ -560,30 +566,39 @@
 .sbf-select select{
   appearance:none; -webkit-appearance:none; width:100%; min-height:var(--touch-target); padding:0 40px 0 12px;
   background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:var(--r-md);
-  font-family:var(--mono); font-size:14px; cursor:pointer; transition:border-color .15s, box-shadow .15s;
+  font-family:var(--mono); font-size:14px; cursor:pointer; box-shadow:var(--inset-press);
+  transition:border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), background var(--dur) var(--ease);
 }
-.sbf-select select:hover{ border-color:#33443a; }
-.sbf-select select:focus, .sbf-select select:focus-visible{ outline:none; border-color:var(--amber); box-shadow:0 0 0 3px rgba(240,180,41,.16); }
+.sbf-select select:hover{ border-color:#33443a; background:var(--panel-hi); }
+.sbf-select select:focus, .sbf-select select:focus-visible{ outline:none; border-color:var(--amber); box-shadow:var(--inset-press), var(--focus-ring); }
 .sbf-select > .icon{ position:absolute; right:14px; top:50%; transform:translateY(-50%); pointer-events:none; color:var(--dim); font-size:16px; }
 
-/* ---- segmented controls ---- */
+/* ---- segmented controls ----
+   Same visual language as the global .seg/.seg-btn in components.css
+   (gradient active fill, layered shadow, inner highlight); kept as its
+   own class here because the Smart Bots form markup (sbfSegBtn()) wires
+   up aria-pressed rather than an .is-active class. */
 .sbf-seg{
   display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:4px; padding:4px;
-  background:var(--panel); border:1px solid var(--line); border-radius:var(--r-md);
+  background:var(--panel2); border:1px solid var(--line); border-radius:var(--r-btn);
+  box-shadow:var(--inset-press);
 }
 .sbf-seg-btn{
   display:inline-flex; align-items:center; justify-content:center; gap:6px; min-width:0; min-height:var(--touch-target); padding:0 10px;
   border:1px solid transparent; border-radius:var(--r-sm); background:transparent; color:var(--dim);
   font-family:var(--mono); font-size:13px; font-weight:600; letter-spacing:.02em; cursor:pointer;
-  transition:background .15s, color .15s, border-color .15s;
+  transition:background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
-.sbf-seg-btn:hover{ color:var(--ink); background:rgba(255,255,255,.04); }
-.sbf-seg-btn:focus-visible{ outline:2px solid var(--amber); outline-offset:1px; }
+.sbf-seg-btn:hover{ color:var(--ink); background:rgba(255,255,255,.045); }
+.sbf-seg-btn:focus-visible{ outline:none; box-shadow:var(--focus-ring); }
 .sbf-seg-btn .icon-check{ display:none; }
-.sbf-seg-btn[aria-pressed="true"]{ background:var(--amber); color:var(--amber-ink); font-weight:700; }
+.sbf-seg-btn[aria-pressed="true"]{
+  background:var(--amber-grad); color:var(--amber-ink); font-weight:700; border-color:var(--amber-edge);
+  box-shadow:var(--sh-1), var(--inset-hi-strong);
+}
 .sbf-seg-btn[aria-pressed="true"] .icon-check{ display:inline-block; }
-.sbf-seg-btn[data-dir="LONG"][aria-pressed="true"]{ background:var(--green-soft); color:var(--green); border-color:var(--green); }
-.sbf-seg-btn[data-dir="SHORT"][aria-pressed="true"]{ background:var(--red-soft); color:var(--red); border-color:var(--red); }
+.sbf-seg-btn[data-dir="LONG"][aria-pressed="true"]{ background:linear-gradient(180deg, #2d5940, var(--green-soft)); background-color:var(--green-soft); color:var(--green); border-color:var(--green-line); }
+.sbf-seg-btn[data-dir="SHORT"][aria-pressed="true"]{ background:linear-gradient(180deg, #5a2d38, var(--red-soft)); background-color:var(--red-soft); color:var(--red); border-color:var(--red-line); }
 
 /* ---- % of balance slider ---- */
 .sbf-pct{ display:flex; align-items:center; gap:14px; }
