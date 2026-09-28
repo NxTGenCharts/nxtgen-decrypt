@@ -659,6 +659,14 @@
 .sbf-rules li strong{ color:var(--ink); font-weight:600; }
 .sbf-rule-ic{ margin-top:.2em; color:var(--amber); font-size:15px; }
 
+/* Estimate + Recovery reuse the .sbf-rules disclosure look; this is just their body padding. */
+.sbf-collapse-body{ padding:16px; }
+.sbf-est.sbf-rules, .sbf-recovery.sbf-rules{ background:var(--panel2); }
+.sbf-on-badge{
+  margin-left:8px; padding:1px 7px; border-radius:999px; font-size:10px; font-weight:700;
+  letter-spacing:.04em; color:var(--amber); border:1px solid var(--amber);
+}
+
 /* ---- CTA ---- */
 .sbf-actions{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px 20px; }
 .sbf-status{ flex:1 1 260px; min-width:0; min-height:20px; font-size:13px; line-height:1.5; color:var(--dim); overflow-wrap:anywhere; }

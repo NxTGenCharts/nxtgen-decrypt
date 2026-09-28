@@ -481,6 +481,7 @@ footer b{ color:#a9bfae; }
 .progress-bar{ height:100%; background:linear-gradient(90deg, var(--amber), #f0d17d); border-radius:var(--r-pill); transition:width .3s ease; }
 .progress-bar.done{ background:linear-gradient(90deg, var(--green), #8fd6ab); }
 .progress-label{ margin-top:6px; font-size:11px; color:var(--dim); text-align:center; }
+.progress-label .progress-left{ color:var(--ink); font-weight:700; }
 
 .cycle-log{ display:flex; flex-direction:column; gap:6px; margin-top:10px; }
 .cycle-log-row{

@@ -4684,7 +4684,7 @@ function renderSmartBotsList(){
       </div>
       ${tgt ? `<div class="progress-wrap" style="margin-top:10px;margin-bottom:0;">
         <div class="progress-track"><div class="progress-bar${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div></div>
-        <div class="progress-label" style="text-align:left;">${tgt.reached ? `Profit Target (${tgt.profitTargetPct}%) reached` : `${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%) left of ${tgt.profitTargetPct}% target`}</div>
+        <div class="progress-label" style="text-align:left;">${tgt.reached ? `Profit Target (${tgt.profitTargetPct}%) reached` : `<strong class="progress-left">${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left of ${tgt.profitTargetPct}% target`}</div>
       </div>` : ''}
     </div>`;
   }).join('') + createBtnHtml;
@@ -4765,8 +4765,9 @@ function sbPreviewHtml(){
   const est = estimateGridPreview({ snap: last.snap, regime: last.regime, fundingUsd, leverage, levelCount, exchange, scanGuard: true });
   if(!est) return '<div class="sbf-card sbf-note sbf-note--block">Could not build a grid from current market data for this pair.</div>';
   const row = (label, value) => '<div class="sbf-est-row"><span class="sbf-est-k">' + label + '</span><span class="sbf-est-v">' + value + '</span></div>';
-  let html = '<div class="sbf-card sbf-est">';
-  html += '<h4 class="sbf-sec">Estimate before you deploy</h4>';
+  const estOpen = !!(f.sbOpenSections && f.sbOpenSections.est);
+  let html = '<details class="sbf-card sbf-est sbf-rules" data-sbf-section="est"' + (estOpen ? ' open' : '') + '>';
+  html += '<summary class="sbf-sec">Estimate before you deploy</summary><div class="sbf-collapse-body">';
   if(pctMode) html += '<div class="sbf-hint" style="margin-bottom:8px;">Based on $100 of margin — your real amount is resolved from free balance when you click Create.</div>';
   html += row('Position per level', fmtUsd(est.perLevelNotional));
   html += row('Range / spacing', est.rangePct.toFixed(2) + '% wide · ' + est.spacingPct.toFixed(2) + '% per level');
@@ -4801,7 +4802,7 @@ function sbPreviewHtml(){
     }
     html += '<div class="sbf-hint" style="margin-top:8px;">Fewer levels means fewer, larger fills; more leverage means a bigger loss on every leg that goes against you.</div>';
   }
-  html += '</div>';
+  html += '</div></details>';
   return html;
 }
 
@@ -5081,7 +5082,9 @@ function renderSmartBotsCreate(){
 
       ${isGrid ? `
       <div id="sbPreview"></div>
-      <section class="sbf-card sbf-recovery" aria-label="Recovery mode">
+      <details class="sbf-card sbf-recovery sbf-rules" data-sbf-section="rec" ${(f.sbOpenSections && f.sbOpenSections.rec) ? 'open' : ''}>
+        <summary class="sbf-sec">Recovery mode${cfg.recoveryMode ? ' <span class="sbf-on-badge">ON</span>' : ''}</summary>
+        <div class="sbf-collapse-body">
         <label class="toggle-check">
           <input id="sbRecoveryToggle" type="checkbox" ${cfg.recoveryMode ? 'checked' : ''}>
           <span>Recovery mode &mdash; add to the position on a drawdown, to try to average into a better exit instead of only waiting for the range/Stop Loss</span>
@@ -5093,7 +5096,8 @@ function renderSmartBotsCreate(){
           ${sbfNumberField({ id: 'sbRecoveryMaxAdds', label: 'Max adds', value: cfg.maxRecoveryAdds, min: 1, max: 6, step: 1 })}
           ${sbfNumberField({ id: 'sbRecoveryMult', label: 'Size multiplier per add', value: cfg.recoverySizeMult, unit: 'x', min: 1, step: 0.1 })}
         </div>` : ''}
-      </section>` : ''}
+        </div>
+      </details>` : ''}
 
       <details class="sbf-card sbf-rules">
         <summary class="sbf-sec">How this bot works</summary>
@@ -5401,7 +5405,7 @@ function renderSmartBotDetail(id){
     <div class="tb-params-head">Profit Target</div>
     <div class="progress-wrap" style="margin-bottom:14px;">
       <div class="progress-track"><div class="progress-bar${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div></div>
-      <div class="progress-label">${fmtUsd(tgt.realizedUsd)} of ${fmtUsd(tgt.targetUsd)} (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — ${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%) left`}</div>
+      <div class="progress-label">${fmtUsd(tgt.realizedUsd)} of ${fmtUsd(tgt.targetUsd)} (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}</div>
     </div>` : '';
   els.sbDetailHost.innerHTML = `
     <button type="button" class="primary ghost sb-back-btn" style="font-size:11px;padding:4px 10px;margin-bottom:14px;">&larr; Back to My Bots</button>
@@ -5476,6 +5480,15 @@ function initSmartBots(){
     });
   }
   if(els.sbCreateHost){
+    // <details> 'toggle' doesn't bubble, so listen in the capture phase. Remembering
+    // open/closed here keeps the Estimate and Recovery dropdowns from snapping shut
+    // every time the form or the live estimate re-renders.
+    els.sbCreateHost.addEventListener('toggle', (e) => {
+      const key = e.target && e.target.dataset && e.target.dataset.sbfSection;
+      if(!key) return;
+      const f = sbState();
+      f.sbOpenSections = Object.assign({}, f.sbOpenSections, { [key]: e.target.open });
+    }, true);
     els.sbCreateHost.addEventListener('change', (e) => {
       const f = sbState();
       if(e.target.id === 'sbExchange'){
