@@ -1070,6 +1070,25 @@ async function getBybitGridPositions(mode, apiKey, secretKey, symbol){
   };
 }
 
+// Bybit's own per-close realized P&L for SYMBOL (last 100 closes) — the
+// exact numbers Bybit's app shows under P&L > Closed Orders. closedPnl
+// is already net of opening + closing fees. Used by Smart Bots' "Verify
+// with Bybit" check to compare the app's modeled per-cycle profit with
+// what the exchange actually booked. In hedge mode Bybit realizes each
+// close against the position's AVERAGE entry price, so individual rows
+// can differ from a per-level model even when the totals agree.
+async function getBybitGridClosedPnlList(mode, apiKey, secretKey, symbol){
+  const data = await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'GET', '/v5/position/closed-pnl', `category=linear&symbol=${symbol}&limit=100`);
+  return (data.result?.list || []).map(r => ({
+    orderId: r.orderId, side: r.side, qty: parseFloat(r.closedSize || r.qty || '0'),
+    avgEntryPrice: parseFloat(r.avgEntryPrice || '0'), avgExitPrice: parseFloat(r.avgExitPrice || '0'),
+    closedPnl: parseFloat(r.closedPnl || '0'), createdTime: parseInt(r.createdTime || '0', 10),
+  }));
+}
+async function getBinanceClosedPnlUnsupported(){
+  throw new Error('exchange-verified P&L is only wired up for Bybit right now');
+}
+
 // Breakout/emergency/manual flatten — cancels every resting grid order
 // on the symbol, then market-closes whichever side(s) actually hold
 // size. Best-effort on the cancel (a leg mid-fill when this runs is not
@@ -3920,6 +3939,7 @@ const GRID_CANCEL_ORDER = { bybit: cancelBybitOrder, binance: cancelBinanceOrder
 const GRID_OPEN_ORDERS = { bybit: getBybitGridOpenOrders, binance: getBinanceGridOpenOrders };
 const GRID_POSITIONS = { bybit: getBybitGridPositions, binance: getBinanceGridPositions };
 const GRID_FLATTEN = { bybit: flattenBybitGrid, binance: flattenBinanceGrid };
+const GRID_CLOSED_PNL = { bybit: getBybitGridClosedPnlList, binance: getBinanceClosedPnlUnsupported };
 
 function gridRoute(path, table, argsFromBody){
   app.post(path, async (req, res) => {
@@ -3974,6 +3994,7 @@ function gridSimpleRoute(path, table){
 gridSimpleRoute('/api/futures/grid/orders', GRID_OPEN_ORDERS);
 gridSimpleRoute('/api/futures/grid/positions', GRID_POSITIONS);
 gridSimpleRoute('/api/futures/grid/flatten', GRID_FLATTEN);
+gridSimpleRoute('/api/futures/grid/closed-pnl', GRID_CLOSED_PNL);
 
 // =============================================================
 // Trading Bots — DCA routes. Same generic gridRoute/gridSimpleRoute

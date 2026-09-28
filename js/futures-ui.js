@@ -2734,6 +2734,16 @@ function loadTradingBotsSnapshot(){
     if(!raw) return;
     const parsed = JSON.parse(raw);
     if(Array.isArray(parsed)) fu().tradingBots = parsed;
+    // One-time repair: bots that ran before the cycle lock existed may
+    // have booked some cycles more than once into realizedUsd. Take the
+    // duplicate amount back out once (flagged so it never repeats).
+    for(const b of fu().tradingBots){
+      if(b.type === 'grid' && !b.dupRepaired){
+        const { dupNetUsd } = dedupeTradeRecords(loadPersistentTradeLog().filter(t => t.gridId === b.id));
+        if(dupNetUsd) b.realizedUsd = (b.realizedUsd || 0) - dupNetUsd;
+        b.dupRepaired = true;
+      }
+    }
   }catch(e){ /* corrupt/old value — start empty rather than throw */ }
 }
 
@@ -3857,7 +3867,23 @@ async function runGridAutoScan(){
   tbAutoScanStatus(`Scanned ${candidates.join(', ')} — none suitable this cycle${bestReject ? ` (closest: ${bestReject.symbol} at ${bestReject.score}/${cfg.minGridScore}, regime ${bestReject.regime})` : ''}. ${activeAutoCount}/${cfg.maxConcurrent} slots in use.`);
 }
 
+// A cycle makes many awaited network calls, and setInterval fires again
+// every TRADING_BOTS_CYCLE_MS whether or not the previous one finished —
+// and a backgrounded phone tab releases a burst of queued timer ticks
+// the moment it's foregrounded (plus the visibilitychange catch-up
+// below). Overlapping cycles all read the same "close order is gone"
+// state before any of them finished re-arming the level, so each one
+// booked the SAME grid cycle again: one real fill showed up 2-3 times in
+// the app's Trades table and total P&L. Only one cycle may run at a time.
+let tradingBotsCycleBusy = false;
 async function runTradingBotsCycle(){
+  if(tradingBotsCycleBusy) return;
+  tradingBotsCycleBusy = true;
+  try{ await runTradingBotsCycleUnlocked(); }
+  finally{ tradingBotsCycleBusy = false; }
+}
+
+async function runTradingBotsCycleUnlocked(){
   const f = fu();
   rollTradingBotsDay(Date.now());
   // Paused bots (Smart Bots' individual Pause) keep status 'active' —
@@ -4006,8 +4032,22 @@ function fmtBotDateTime(ms){
 // This bot's own closed cycles — appendPersistentTrade tags every record
 // with gridId: bot.id, so filtering the shared log by that is the real
 // per-bot order/history feed, not a separate store to keep in sync.
+// Drops copies of the same grid cycle that were booked more than once
+// (see tradingBotsCycleBusy above — same level, entry, exit and qty,
+// logged within seconds of each other). Real repeat cycles on one level
+// are always minutes apart, so this never removes a genuine trade.
+function dedupeTradeRecords(records){
+  const kept = []; let dupNetUsd = 0;
+  for(const r of records){
+    const dup = kept.some(k => k.gridLevel === r.gridLevel && k.side === r.side && k.entry === r.entry && k.exit === r.exit && k.qty === r.qty && Math.abs((k.closedAtMs || 0) - (r.closedAtMs || 0)) < 5000);
+    if(dup){ dupNetUsd += (r.netUsd || 0); continue; }
+    kept.push(r);
+  }
+  return { kept, dupCount: records.length - kept.length, dupNetUsd };
+}
+
 function getBotTradeRecords(bot){
-  return loadPersistentTradeLog().filter(t => t.gridId === bot.id);
+  return dedupeTradeRecords(loadPersistentTradeLog().filter(t => t.gridId === bot.id)).kept;
 }
 
 function computeBotMetrics(bot){
@@ -4293,6 +4333,7 @@ function sbState(){
     // fills, more often. Same total capital either way; this is a
     // trade-off dial, not a "make it more profitable" knob.
     levelCount: 8,
+    targetPerGrid: '', // optional: the net $ per completed grid the person is aiming for — only drives the suggestions in the estimate panel
     // Recovery / averaging — off by default. See applyGridRecovery's
     // header comment for exactly what this does and why it's riskier
     // than a plain grid, not a free upgrade to it.
@@ -4379,6 +4420,10 @@ async function sbCheckRegime(symbol){
   const regime = classifyRegime(snap.h1, snap.m15);
   const label = sbRegimeLabel(regime);
   f.sbRegimeSuggestion = label ? { symbol, ...label } : null;
+  f.sbLastSnap = { symbol, exchange, snap, regime, atMs: Date.now() }; // feeds the pre-deploy estimate panel
+  // This re-render lands asynchronously, possibly while the person is
+  // mid-edit — capture whatever is typed first so it isn't wiped.
+  if(document.getElementById('sbLeverage')) readSmartBotFormNumbers();
   renderSmartBotsCreate();
 }
 
@@ -4462,6 +4507,127 @@ function renderSmartBotsList(){
       </div>
     </div>`;
   }).join('') + createBtnHtml;
+}
+
+// -------------------------------------------------------------
+// Pre-deploy estimate for a Grid Smart Bot. Uses the SAME pieces the bot
+// itself uses when it deploys and books a cycle — suggestGridRange for
+// the range, buildManualGridPlan for the level prices, the same
+// qty-per-level formula, netCycleProfit (maker fees + spread) for each
+// level's close against its adjacent level — so what's shown here is
+// the bot's own maths run ahead of time, not a separate approximation.
+// It is still an ESTIMATE: the live range is recomputed at the moment
+// Create is clicked, and real fills (as Bybit's own Closed P&L showed)
+// land off the planned prices, so single cycles will differ.
+// -------------------------------------------------------------
+function estimateGridPreview({ snap, regime, fundingUsd, leverage, levelCount, exchange, scanGuard }){
+  const range = suggestGridRange(snap, regime);
+  const plan = buildManualGridPlan({ symbol: '', direction: 'NEUTRAL', upper: range.upper, lower: range.lower, levelCount, leverage, investmentUsd: fundingUsd });
+  if(!plan) return null;
+  const perLevelUsd = fundingUsd / levelCount;
+  const slippagePct = (snap.meta && snap.meta.spreadPct) || 0;
+  const nets = [];
+  let worstLegLoss = 0;
+  plan.levels.forEach((price, i) => {
+    const isLong = price <= plan.mid;
+    const target = plan.levels[isLong ? i + 1 : i - 1];
+    if(target == null) return;
+    const qty = (perLevelUsd * leverage) / price;
+    const pnl = netCycleProfit({ entryPrice: price, exitPrice: target, qty, direction: isLong ? 'LONG' : 'SHORT', exchange, holdMinutes: 0, fundingRatePct: 0, slippagePct });
+    nets.push(pnl.netUsd);
+    const edge = isLong ? plan.lower : plan.upper;
+    worstLegLoss = Math.max(worstLegLoss, Math.abs(price - edge) * qty);
+  });
+  if(!nets.length) return null;
+  const trip = GRID_DEFAULTS.liquidationBufferRatio * 0.35; // the bot flattens itself when liquidation is closer than this multiple of a leg's worst-case move
+  const guardRatio = (lev) => {
+    let worst = Infinity;
+    plan.levels.forEach(price => {
+      const isLong = price <= plan.mid;
+      const edge = isLong ? plan.lower : plan.upper;
+      const excursion = Math.abs(price - edge);
+      if(!(excursion > 0)) return;
+      const liq = estimateLiquidationPrice({ entryPrice: price, leverage: lev, side: isLong ? 'LONG' : 'SHORT', maintenanceMarginRate: RISK_DEFAULTS.maintenanceMarginRate });
+      const beyondEdge = isLong ? (edge - liq) : (liq - edge); // room left past the range edge before liquidation
+      worst = Math.min(worst, Math.max(0, beyondEdge) / excursion);
+    });
+    return worst;
+  };
+  let maxGuardLeverage = null;
+  if(scanGuard){
+    for(let lev = 1; lev <= 50; lev++){ if(guardRatio(lev) >= trip) maxGuardLeverage = lev; else break; }
+  }
+  const liqPx = estimateLiquidationPrice({ entryPrice: snap.price, leverage, side: 'LONG', maintenanceMarginRate: RISK_DEFAULTS.maintenanceMarginRate });
+  return {
+    range, plan, spacingPct: plan.spacingPct, rangePct: ((range.upper - range.lower) / plan.mid) * 100,
+    perLevelNotional: perLevelUsd * leverage,
+    avgNet: nets.reduce((a, b) => a + b, 0) / nets.length,
+    minNet: Math.min(...nets), maxNet: Math.max(...nets),
+    sweepNet: nets.reduce((a, b) => a + b, 0), cycles: nets.length,
+    worstLegLoss, liqPct: Math.abs(snap.price - liqPx) / snap.price * 100,
+    guardOk: guardRatio(leverage) >= trip, maxGuardLeverage,
+  };
+}
+
+function sbPreviewHtml(){
+  const f = sbState();
+  const cfg = f.sbGridForm;
+  const last = f.sbLastSnap;
+  if(!f.sbCreateSymbol) return '<div style="font-size:11.5px;color:var(--dim);">Pick a pair to see the estimated profit per grid before you deploy.</div>';
+  if(!last || last.symbol !== f.sbCreateSymbol) return '<div style="font-size:11.5px;color:var(--dim);">Reading live price and volatility for the estimate…</div>';
+  const exchange = f.sbCreateExchange || 'bybit';
+  const pctMode = cfg.fundingMode === 'pct';
+  const fundingUsd = pctMode ? 100 : (cfg.fundingUsd || 0);
+  const levelCount = cfg.levelCount || 8;
+  const leverage = cfg.leverage || 1;
+  if(!(fundingUsd > 0)) return '<div style="font-size:11.5px;color:var(--dim);">Enter a margin amount to see the estimate.</div>';
+  const est = estimateGridPreview({ snap: last.snap, regime: last.regime, fundingUsd, leverage, levelCount, exchange, scanGuard: true });
+  if(!est) return '<div style="font-size:11.5px;color:var(--dim);">Could not build a grid from current market data for this pair.</div>';
+  const row = (label, value) => '<div style="display:flex;justify-content:space-between;gap:12px;padding:2px 0;"><span style="color:var(--dim);">' + label + '</span><span style="color:var(--ink);text-align:right;">' + value + '</span></div>';
+  let html = '<div class="ov-block" style="padding:10px 12px;background:var(--panel2);font-size:11.5px;line-height:1.5;">';
+  html += '<div class="tb-params-head" style="margin-bottom:6px;">Estimate before you deploy</div>';
+  if(pctMode) html += '<div style="color:var(--dim);margin-bottom:6px;">Based on $100 of margin — your real amount is resolved from free balance when you click Create.</div>';
+  html += row('Position per level', fmtUsd(est.perLevelNotional));
+  html += row('Range / spacing', est.rangePct.toFixed(2) + '% wide · ' + est.spacingPct.toFixed(2) + '% per level');
+  html += row('Net profit per grid', '<strong style="color:var(--green);">~' + fmtUsd(est.avgNet) + '</strong> <span style="color:var(--dim);">(' + fmtUsd(est.minNet) + ' – ' + fmtUsd(est.maxNet) + ')</span>');
+  html += row('All ' + est.cycles + ' levels cycled once', '~' + fmtUsd(est.sweepNet));
+  html += row('Loss on one leg if price runs to the range edge', 'up to ~' + fmtUsd(est.worstLegLoss));
+  html += row('Liquidation distance', '~' + est.liqPct.toFixed(1) + '% from entry');
+  html += row('Bot liquidation guard', est.guardOk ? '<span style="color:var(--green);">OK</span>' : '<span style="color:var(--red);">would flatten the bot early</span>');
+  if(est.maxGuardLeverage != null) html += row('Highest leverage the guard allows here', '~' + est.maxGuardLeverage + 'x');
+  html += '<div style="color:var(--dim);margin-top:6px;">After maker fees and spread. Real fills land off the planned prices, so single cycles will differ, and the range is recalculated live when you click Create.</div>';
+
+  html += '<div style="margin-top:10px;"><label style="color:var(--dim);">Target net profit per grid (USDT)';
+  html += '<input id="sbTargetPerGrid" type="number" min="0" step="any" value="' + (cfg.targetPerGrid === '' || cfg.targetPerGrid == null ? '' : cfg.targetPerGrid) + '" placeholder="e.g. 1" style="display:block;margin-top:3px;min-width:110px;"></label></div>';
+  const target = parseFloat(cfg.targetPerGrid);
+  if(target > 0){
+    const netAt = (n, lev) => { const e = estimateGridPreview({ snap: last.snap, regime: last.regime, fundingUsd, leverage: lev, levelCount: n, exchange, scanGuard: false }); return e ? e.avgNet : -Infinity; };
+    const maxLev = est.maxGuardLeverage || 1;
+    let needLev = null;
+    for(let lev = 1; lev <= maxLev; lev++){ if(netAt(levelCount, lev) >= target){ needLev = lev; break; } }
+    let needLevels = null;
+    for(let n = 20; n >= 3; n--){ if(netAt(n, leverage) >= target){ needLevels = n; break; } }
+    html += '<div style="margin-top:8px;">To net about ' + fmtUsd(target) + ' per grid:</div>';
+    if(needLev != null){
+      html += '<div style="margin-top:4px;">• Keep ' + levelCount + ' levels → about <strong>' + needLev + 'x</strong> leverage ' + (needLev === leverage ? '(already set)' : '<button type="button" class="primary ghost sb-apply-suggest" data-levels="' + levelCount + '" data-lev="' + needLev + '" style="font-size:10.5px;padding:2px 8px;margin-left:6px;">Apply</button>') + '</div>';
+    } else {
+      html += '<div style="margin-top:4px;color:var(--dim);">• Not reachable with ' + levelCount + ' levels inside the liquidation guard (max ~' + maxLev + 'x gives ~' + fmtUsd(netAt(levelCount, maxLev)) + ').</div>';
+    }
+    if(needLevels != null){
+      html += '<div style="margin-top:4px;">• Keep ' + leverage + 'x → <strong>' + needLevels + ' levels</strong> ' + (needLevels === levelCount ? '(already set)' : '<button type="button" class="primary ghost sb-apply-suggest" data-levels="' + needLevels + '" data-lev="' + leverage + '" style="font-size:10.5px;padding:2px 8px;margin-left:6px;">Apply</button>') + '</div>';
+    } else {
+      html += '<div style="margin-top:4px;color:var(--dim);">• Not reachable at ' + leverage + 'x even with 3 levels.</div>';
+    }
+    html += '<div style="color:var(--dim);margin-top:6px;">Fewer levels means fewer, larger fills; more leverage means a bigger loss on every leg that goes against you.</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function updateSbPreview(){
+  const host = document.getElementById('sbPreview');
+  if(!host) return;
+  host.innerHTML = (sbState().sbCreateType === 'grid') ? sbPreviewHtml() : '';
 }
 
 // Renders one search-result row for the pair dropdown — shows which of
@@ -4570,6 +4736,7 @@ function renderSmartBotsCreate(){
       <div style="font-size:11px;color:var(--dim);margin:0 0 10px;line-height:1.5;">
         Fewer levels over the same auto-suggested range = wider steps = bigger $ per fill, less often. More levels = smaller fills, more often. Same margin committed either way — this trades fill size against fill frequency, it doesn't create extra profit on its own.
       </div>
+      <div id="sbPreview" style="margin:0 0 12px;"></div>
       <div class="ov-block" style="padding:10px 12px;margin-bottom:12px;background:var(--panel2);">
         <label class="toggle-check" style="font-size:12px;">
           <input id="sbRecoveryToggle" type="checkbox" ${cfg.recoveryMode ? 'checked' : ''}>
@@ -4602,6 +4769,7 @@ function renderSmartBotsCreate(){
       <button type="button" id="sbCreateBtn" class="primary" style="font-size:12px;padding:6px 16px;">Create Bot</button>
     </div>
   `;
+  updateSbPreview();
   if(f.sbCreateSymbol && !suggestion) sbCheckRegime(f.sbCreateSymbol);
 }
 
@@ -4622,6 +4790,7 @@ function readSmartBotFormNumbers(){
   const tp = document.getElementById('sbTakeProfit'); if(tp) cfg.takeProfitPct = tp.value === '' ? '' : parseFloat(tp.value);
   const sl = document.getElementById('sbStopLoss'); if(sl) cfg.stopLossPct = sl.value === '' ? null : parseFloat(sl.value);
   if(type === 'grid'){
+    const tgt = document.getElementById('sbTargetPerGrid'); if(tgt) cfg.targetPerGrid = tgt.value === '' ? '' : parseFloat(tgt.value);
     const lvl = document.getElementById('sbLevelCount'); if(lvl) cfg.levelCount = Math.max(3, Math.min(20, parseInt(lvl.value, 10) || cfg.levelCount));
     const recTrigger = document.getElementById('sbRecoveryTrigger'); if(recTrigger) cfg.recoveryTriggerPct = Math.max(0.5, parseFloat(recTrigger.value) || cfg.recoveryTriggerPct);
     const recMax = document.getElementById('sbRecoveryMaxAdds'); if(recMax) cfg.maxRecoveryAdds = Math.max(1, Math.min(6, parseInt(recMax.value, 10) || cfg.maxRecoveryAdds));
@@ -4841,6 +5010,35 @@ function renderSmartBotChart(bot, range){
     </div>`;
 }
 
+// Compares what the app booked for this bot with what Bybit itself
+// booked (Closed P&L is net of fees). Counts every close on this symbol
+// since the bot was created, so trades made by hand or by another bot on
+// the same pair in that window are included too.
+async function verifyBotWithExchange(id){
+  const bot = fu().tradingBots.find(b => b.id === id);
+  if(!bot) return;
+  const cred = liveCred(bot.exchange, bot.mode);
+  if(!cred){ bot.exchangeCheck = { status: 'error', message: 'No verified credential for this exchange.' }; renderSmartBotsPanel(); return; }
+  bot.exchangeCheck = { status: 'reading' }; renderSmartBotsPanel();
+  const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
+  const resp = await callProxy('/api/futures/grid/closed-pnl', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  if(!resp.ok){ bot.exchangeCheck = { status: 'error', message: resp.message || 'The server did not accept the request — redeploy the updated server.js on Render first.' }; renderSmartBotsPanel(); return; }
+  const rows = (resp.list || []).filter(r => r.createdTime >= bot.createdAtMs - 60_000);
+  const sumUsd = rows.reduce((a, r) => a + (r.closedPnl || 0), 0);
+  bot.exchangeCheck = { status: 'ok', atMs: Date.now(), count: rows.length, sumUsd };
+  renderSmartBotsPanel();
+}
+
+function exchangeCheckHtml(bot){
+  const c = bot.exchangeCheck;
+  if(!c) return '';
+  if(c.status === 'reading') return 'Reading closed P&amp;L from the exchange…';
+  if(c.status === 'error') return `<span style="color:var(--red);">Could not verify: ${c.message}</span>`;
+  const m = computeBotMetrics(bot);
+  const diff = (bot.realizedUsd || 0) - c.sumUsd;
+  return `${EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange} booked <strong style="color:var(--ink);">${fmtUsd(c.sumUsd)}</strong> across ${c.count} closes since this bot started (net of fees). The app shows <strong style="color:var(--ink);">${fmtUsd(bot.realizedUsd || 0)}</strong> across ${m.records.length} — difference ${fmtUsd(diff)}. Any trades made by hand or by another bot on this pair in that window are counted on the exchange side too.`;
+}
+
 function renderSmartBotDetail(id){
   if(!els.sbDetailHost) return;
   const f = fu();
@@ -4872,6 +5070,14 @@ function renderSmartBotDetail(id){
       <div class="tb-stat"><span class="l">Uptime</span><span class="n">${fmtBotUptime(bot.createdAtMs)}</span></div>
       <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length}</span></div>
     </div>
+    <div class="tb-params-head">Exchange check</div>
+    <div style="font-size:11.5px;color:var(--dim);line-height:1.5;margin-bottom:8px;">
+      ${bot.exchange === 'bybit'
+        ? `The per-cycle profit above is the app's own estimate from its grid prices and standard maker fees. Bybit realizes each close against the position's average entry, so single rows can differ from it even when the totals agree.`
+        : 'Exchange-verified P&amp;L is only wired up for Bybit right now.'}
+    </div>
+    ${bot.exchange === 'bybit' ? `<button type="button" class="primary ghost sb-verify-btn" data-id="${bot.id}" style="font-size:11px;padding:4px 10px;">Verify with Bybit</button>` : ''}
+    <div style="font-size:11.5px;color:var(--dim);line-height:1.5;margin:8px 0 14px;">${exchangeCheckHtml(bot)}</div>
     <div class="tb-params-head">Trades</div>
     <div class="table-scroll">
       <table class="tb-orders-table">
@@ -4946,6 +5152,15 @@ function initSmartBots(){
     // before the input's blur, so a click still registers the pick.
     let sbSearchDebounce = null;
     els.sbCreateHost.addEventListener('input', (e) => {
+      if(['sbLevelCount', 'sbLeverage', 'sbFundingUsd', 'sbTargetPerGrid'].includes(e.target.id)){
+        // Live-update just the estimate panel — not the whole form, which
+        // would steal focus from the field being typed in.
+        readSmartBotFormNumbers();
+        const preview = document.getElementById('sbPreview');
+        if(preview && e.target.id !== 'sbTargetPerGrid') { updateSbPreview(); }
+        else if(preview){ const focusId = e.target.id; const pos = e.target.selectionStart; updateSbPreview(); const again = document.getElementById(focusId); if(again){ again.focus(); try{ again.setSelectionRange(pos, pos); }catch(err){} } }
+        return;
+      }
       if(e.target.id !== 'sbSymbolInput') return;
       const f = sbState();
       f.sbSymbolQuery = e.target.value;
@@ -4976,6 +5191,13 @@ function initSmartBots(){
     });
     els.sbCreateHost.addEventListener('click', async (e) => {
       if(e.target.classList.contains('sb-back-btn')){ fu().sbView = 'list'; renderSmartBotsPanel(); return; }
+      if(e.target.classList.contains('sb-apply-suggest')){
+        const f = sbState(); readSmartBotFormNumbers();
+        f.sbGridForm.levelCount = Math.max(3, Math.min(20, parseInt(e.target.dataset.levels, 10) || f.sbGridForm.levelCount));
+        f.sbGridForm.leverage = Math.max(1, parseInt(e.target.dataset.lev, 10) || f.sbGridForm.leverage);
+        renderSmartBotsCreate();
+        return;
+      }
       if(e.target.id === 'sbApplySuggestionBtn'){
         const f = sbState();
         if(f.sbRegimeSuggestion){
@@ -5012,6 +5234,7 @@ function initSmartBots(){
       else if(e.target.classList.contains('sb-delete-btn')){ deleteTradingBot(id); fu().sbView = 'list'; renderSmartBotsPanel(); }
       else if(e.target.classList.contains('sb-copy-btn')) copySmartBot(id);
       else if(e.target.classList.contains('sb-rename-btn')) renameSmartBot(id);
+      else if(e.target.classList.contains('sb-verify-btn')) await verifyBotWithExchange(id);
     });
   }
 }
