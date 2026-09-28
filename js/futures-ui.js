@@ -4586,7 +4586,18 @@ function renderSmartBotsPanel(){
   if(els.sbCreateView) els.sbCreateView.style.display = f.sbView === 'create' ? '' : 'none';
   if(els.sbDetailView) els.sbDetailView.style.display = f.sbView === 'detail' ? '' : 'none';
   if(els.fuSmartBotsBadge) els.fuSmartBotsBadge.textContent = `${smartBots().filter(b => b.status === 'active' && !b.paused).length} active`;
-  if(f.sbView === 'create') renderSmartBotsCreate();
+  // This is the one shared hook fired after essentially every bot
+  // mutation, INCLUDING purely background ones (the management cycle's
+  // periodic renderTradingBotsList(), a balance refresh, etc.) that have
+  // nothing to do with whatever the person is doing on screen. If the
+  // Create view happens to be open, re-rendering it from state alone
+  // would stomp on inputs mid-edit — capture the live DOM values first
+  // (same guarded pattern sbCheckRegime already uses for its own async
+  // re-render) so a background refresh can never wipe what's been typed.
+  if(f.sbView === 'create'){
+    if(document.getElementById('sbLeverage')) readSmartBotFormNumbers();
+    renderSmartBotsCreate();
+  }
   else if(f.sbView === 'detail') renderSmartBotDetail(f.sbDetailId);
   else renderSmartBotsList();
 }
