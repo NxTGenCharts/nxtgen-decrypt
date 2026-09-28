@@ -1,6 +1,6 @@
 // landing.js — behaviour for the public landing page (index.html).
 // Deliberately standalone: no imports from the terminal, no network requests.
-// Everything on this page that looks like market data is static demo content.
+// Everything on this page that looks like market data is static sample content.
 (function(){
   'use strict';
   var d = document, root = d.documentElement;
@@ -54,9 +54,9 @@
     });
   });
 
-  // Hero terminal: subtle DEMO number movement. Static values, no data source.
-  var rows = Array.prototype.slice.call(d.querySelectorAll('[data-demo-row]'));
-  var cyc = d.getElementById('demoCycles');
+  // Hero terminal: subtle sample-number movement. Static values, no data source.
+  var rows = Array.prototype.slice.call(d.querySelectorAll('[data-row]'));
+  var cyc = d.getElementById('cycCount');
   if(rows.length && !reduce){
     var base = rows.map(function(r){ return parseFloat(r.querySelector('.pct').dataset.v); });
     var cycles = 122, timer = null, visible = true;
