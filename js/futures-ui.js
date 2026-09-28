@@ -4570,7 +4570,6 @@ function renderSmartBotsCreate(){
       <div style="font-size:11px;color:var(--dim);margin:0 0 10px;line-height:1.5;">
         Fewer levels over the same auto-suggested range = wider steps = bigger $ per fill, less often. More levels = smaller fills, more often. Same margin committed either way — this trades fill size against fill frequency, it doesn't create extra profit on its own.
       </div>
-      ${type === 'grid' ? `
       <div class="ov-block" style="padding:10px 12px;margin-bottom:12px;background:var(--panel2);">
         <label class="toggle-check" style="font-size:12px;">
           <input id="sbRecoveryToggle" type="checkbox" ${cfg.recoveryMode ? 'checked' : ''}>
