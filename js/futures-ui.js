@@ -4601,20 +4601,20 @@ function sbPreviewHtml(){
   const f = sbState();
   const cfg = f.sbGridForm;
   const last = f.sbLastSnap;
-  if(!f.sbCreateSymbol) return '<div style="font-size:11.5px;color:var(--dim);">Pick a pair to see the estimated profit per grid before you deploy.</div>';
-  if(!last || last.symbol !== f.sbCreateSymbol) return '<div style="font-size:11.5px;color:var(--dim);">Reading live price and volatility for the estimate…</div>';
+  if(!f.sbCreateSymbol) return '<div class="sbf-card sbf-note sbf-note--block">Pick a pair to see the estimated profit per grid before you deploy.</div>';
+  if(!last || last.symbol !== f.sbCreateSymbol) return '<div class="sbf-card sbf-note sbf-note--block">Reading live price and volatility for the estimate…</div>';
   const exchange = f.sbCreateExchange || 'bybit';
   const pctMode = cfg.fundingMode === 'pct';
   const fundingUsd = pctMode ? 100 : (cfg.fundingUsd || 0);
   const levelCount = cfg.levelCount || 8;
   const leverage = cfg.leverage || 1;
-  if(!(fundingUsd > 0)) return '<div style="font-size:11.5px;color:var(--dim);">Enter a margin amount to see the estimate.</div>';
+  if(!(fundingUsd > 0)) return '<div class="sbf-card sbf-note sbf-note--block">Enter a margin amount to see the estimate.</div>';
   const est = estimateGridPreview({ snap: last.snap, regime: last.regime, fundingUsd, leverage, levelCount, exchange, scanGuard: true });
-  if(!est) return '<div style="font-size:11.5px;color:var(--dim);">Could not build a grid from current market data for this pair.</div>';
-  const row = (label, value) => '<div style="display:flex;justify-content:space-between;gap:12px;padding:2px 0;"><span style="color:var(--dim);">' + label + '</span><span style="color:var(--ink);text-align:right;">' + value + '</span></div>';
-  let html = '<div class="ov-block" style="padding:10px 12px;background:var(--panel2);font-size:11.5px;line-height:1.5;">';
-  html += '<div class="tb-params-head" style="margin-bottom:6px;">Estimate before you deploy</div>';
-  if(pctMode) html += '<div style="color:var(--dim);margin-bottom:6px;">Based on $100 of margin — your real amount is resolved from free balance when you click Create.</div>';
+  if(!est) return '<div class="sbf-card sbf-note sbf-note--block">Could not build a grid from current market data for this pair.</div>';
+  const row = (label, value) => '<div class="sbf-est-row"><span class="sbf-est-k">' + label + '</span><span class="sbf-est-v">' + value + '</span></div>';
+  let html = '<div class="sbf-card sbf-est">';
+  html += '<h4 class="sbf-sec">Estimate before you deploy</h4>';
+  if(pctMode) html += '<div class="sbf-hint" style="margin-bottom:8px;">Based on $100 of margin — your real amount is resolved from free balance when you click Create.</div>';
   html += row('Position per level', fmtUsd(est.perLevelNotional));
   html += row('Range / spacing', est.rangePct.toFixed(2) + '% wide · ' + est.spacingPct.toFixed(2) + '% per level');
   html += row('Net profit per grid', '<strong style="color:var(--green);">~' + fmtUsd(est.avgNet) + '</strong> <span style="color:var(--dim);">(' + fmtUsd(est.minNet) + ' – ' + fmtUsd(est.maxNet) + ')</span>');
@@ -4623,10 +4623,10 @@ function sbPreviewHtml(){
   html += row('Liquidation distance', '~' + est.liqPct.toFixed(1) + '% from entry');
   html += row('Bot liquidation guard', est.guardOk ? '<span style="color:var(--green);">OK</span>' : '<span style="color:var(--red);">would flatten the bot early</span>');
   if(est.maxGuardLeverage != null) html += row('Highest leverage the guard allows here', '~' + est.maxGuardLeverage + 'x');
-  html += '<div style="color:var(--dim);margin-top:6px;">After maker fees and spread. Real fills land off the planned prices, so single cycles will differ, and the range is recalculated live when you click Create.</div>';
+  html += '<div class="sbf-hint" style="margin-top:8px;">After maker fees and spread. Real fills land off the planned prices, so single cycles will differ, and the range is recalculated live when you click Create.</div>';
 
-  html += '<div style="margin-top:10px;"><label style="color:var(--dim);">Target net profit per grid (USDT)';
-  html += '<input id="sbTargetPerGrid" type="number" min="0" step="any" value="' + (cfg.targetPerGrid === '' || cfg.targetPerGrid == null ? '' : cfg.targetPerGrid) + '" placeholder="e.g. 1" style="display:block;margin-top:3px;min-width:110px;"></label></div>';
+  html += '<div class="sbf-field" style="margin-top:14px;max-width:320px;"><label class="sbf-label" for="sbTargetPerGrid"><span>Target net profit per grid</span></label>';
+  html += '<div class="sbf-input"><input id="sbTargetPerGrid" type="number" inputmode="decimal" min="0" step="any" value="' + (cfg.targetPerGrid === '' || cfg.targetPerGrid == null ? '' : cfg.targetPerGrid) + '" placeholder="e.g. 1"><span class="sbf-unit" aria-hidden="true">USDT</span></div></div>';
   const target = parseFloat(cfg.targetPerGrid);
   if(target > 0){
     const netAt = (n, lev) => { const e = estimateGridPreview({ snap: last.snap, regime: last.regime, fundingUsd, leverage: lev, levelCount: n, exchange, scanGuard: false }); return e ? e.avgNet : -Infinity; };
@@ -4635,18 +4635,18 @@ function sbPreviewHtml(){
     for(let lev = 1; lev <= maxLev; lev++){ if(netAt(levelCount, lev) >= target){ needLev = lev; break; } }
     let needLevels = null;
     for(let n = 20; n >= 3; n--){ if(netAt(n, leverage) >= target){ needLevels = n; break; } }
-    html += '<div style="margin-top:8px;">To net about ' + fmtUsd(target) + ' per grid:</div>';
+    html += '<div class="sbf-est-line" style="margin-top:12px;">To net about ' + fmtUsd(target) + ' per grid:</div>';
     if(needLev != null){
-      html += '<div style="margin-top:4px;">• Keep ' + levelCount + ' levels → about <strong>' + needLev + 'x</strong> leverage ' + (needLev === leverage ? '(already set)' : '<button type="button" class="primary ghost sb-apply-suggest" data-levels="' + levelCount + '" data-lev="' + needLev + '" style="font-size:10.5px;padding:2px 8px;margin-left:6px;">Apply</button>') + '</div>';
+      html += '<div class="sbf-est-line">• Keep ' + levelCount + ' levels → about <strong>' + needLev + 'x</strong> leverage ' + (needLev === leverage ? '(already set)' : '<button type="button" class="primary ghost sb-apply-suggest sbf-mini-btn" data-levels="' + levelCount + '" data-lev="' + needLev + '">Apply</button>') + '</div>';
     } else {
-      html += '<div style="margin-top:4px;color:var(--dim);">• Not reachable with ' + levelCount + ' levels inside the liquidation guard (max ~' + maxLev + 'x gives ~' + fmtUsd(netAt(levelCount, maxLev)) + ').</div>';
+      html += '<div class="sbf-est-line sbf-hint">• Not reachable with ' + levelCount + ' levels inside the liquidation guard (max ~' + maxLev + 'x gives ~' + fmtUsd(netAt(levelCount, maxLev)) + ').</div>';
     }
     if(needLevels != null){
-      html += '<div style="margin-top:4px;">• Keep ' + leverage + 'x → <strong>' + needLevels + ' levels</strong> ' + (needLevels === levelCount ? '(already set)' : '<button type="button" class="primary ghost sb-apply-suggest" data-levels="' + needLevels + '" data-lev="' + leverage + '" style="font-size:10.5px;padding:2px 8px;margin-left:6px;">Apply</button>') + '</div>';
+      html += '<div class="sbf-est-line">• Keep ' + leverage + 'x → <strong>' + needLevels + ' levels</strong> ' + (needLevels === levelCount ? '(already set)' : '<button type="button" class="primary ghost sb-apply-suggest sbf-mini-btn" data-levels="' + needLevels + '" data-lev="' + leverage + '">Apply</button>') + '</div>';
     } else {
-      html += '<div style="margin-top:4px;color:var(--dim);">• Not reachable at ' + leverage + 'x even with 3 levels.</div>';
+      html += '<div class="sbf-est-line sbf-hint">• Not reachable at ' + leverage + 'x even with 3 levels.</div>';
     }
-    html += '<div style="color:var(--dim);margin-top:6px;">Fewer levels means fewer, larger fills; more leverage means a bigger loss on every leg that goes against you.</div>';
+    html += '<div class="sbf-hint" style="margin-top:8px;">Fewer levels means fewer, larger fills; more leverage means a bigger loss on every leg that goes against you.</div>';
   }
   html += '</div>';
   return html;
@@ -4687,16 +4687,43 @@ const SB_BALANCE_REFRESH_TTL_MS = 15_000; // balance moves as bots trade, but th
 // block a deployment that doesn't fit, surfaced BEFORE the person picks
 // Fixed USDT or % of balance, since both need to know what's actually
 // free on the selected Exchange/Network to size sensibly.
+// Formats the Available Margin readout. Display only — the number itself
+// still comes from f.sbBalanceCache (checkAvailableMarginFor), unchanged.
+function sbFmtBalance(n){
+  return '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 function sbBalanceInfoHtml(){
   const f = sbState();
   const exchange = f.sbCreateExchange || 'bybit';
   const mode = f.liveModeByExchange[exchange] || 'live';
-  const label = `${EXCHANGE_DISPLAY_NAMES[exchange] || exchange} ${mode === 'demo' ? 'Demo' : 'Live'}`;
+  const exName = EXCHANGE_DISPLAY_NAMES[exchange] || exchange;
+  const modeLabel = mode === 'demo' ? 'Demo' : 'Live';
   const c = f.sbBalanceCache[`${exchange}:${mode}`];
-  if(!c || c.status === 'loading') return `Free margin on ${label}: reading…`;
-  if(c.status === 'nocred') return `Free margin on ${label}: <span style="color:var(--red);">no verified API key for this exchange/network — add one under API Keys.</span>`;
-  if(c.status === 'error') return `Free margin on ${label}: <span style="color:var(--red);">couldn't read balance.</span> <button type="button" id="sbBalanceRetry" class="primary ghost" style="font-size:10px;padding:1px 7px;margin-left:4px;">Retry</button>`;
-  return `Free margin on ${label}: <strong style="color:var(--ink);">${fmtUsd(c.available || 0)}</strong> available <button type="button" id="sbBalanceRetry" class="primary ghost" style="font-size:10px;padding:1px 7px;margin-left:6px;" title="Refresh">&#8635;</button>`;
+  let state, value, statusText, statusIcon, note = '';
+  if(!c || c.status === 'loading'){ state = 'loading'; value = '&mdash;'; statusText = 'Reading&hellip;'; statusIcon = 'refresh-cw'; }
+  else if(c.status === 'nocred'){ state = 'nocred'; value = '&mdash;'; statusText = 'No API key'; statusIcon = 'triangle-alert'; note = 'No verified API key for this exchange/network &mdash; add one under API Keys.'; }
+  else if(c.status === 'error'){ state = 'error'; value = '&mdash;'; statusText = 'Unavailable'; statusIcon = 'triangle-alert'; note = 'Couldn&rsquo;t read balance.'; }
+  else { state = 'ok'; value = sbFmtBalance(c.available); statusText = 'Connected'; statusIcon = 'circle-check'; }
+  const refreshLabel = state === 'error' ? 'Retry reading available margin' : 'Refresh available margin';
+  const refreshBtn = state === 'nocred' ? '' : `<button type="button" id="sbBalanceRetry" class="sbf-icon-btn" aria-label="${refreshLabel}" title="${state === 'error' ? 'Retry' : 'Refresh'}" ${state === 'loading' ? 'disabled' : ''}>${icon('refresh-cw')}</button>`;
+  return `
+    <div class="sbf-acct" data-state="${state}" data-mode="${mode}" role="group" aria-label="Account status">
+      <div class="sbf-acct-id">
+        <span class="sbf-eyebrow">Account status</span>
+        <span class="sbf-acct-name">${exName}<span class="sbf-env sbf-env--${mode}">${modeLabel}</span></span>
+        <span class="sbf-acct-sub">${modeLabel} account</span>
+      </div>
+      <div class="sbf-acct-bal" aria-live="polite">
+        <span class="sbf-eyebrow">Available margin</span>
+        <span class="sbf-acct-value">${value}</span>
+        ${note ? `<span class="sbf-acct-note">${note}</span>` : ''}
+      </div>
+      <div class="sbf-acct-status">
+        <span class="sbf-chip sbf-chip--${state}">${icon(statusIcon)}<span>${statusText}</span></span>
+        ${refreshBtn}
+      </div>
+    </div>`;
 }
 
 // Patches just the #sbBalanceInfo node rather than re-rendering the whole
@@ -4728,122 +4755,202 @@ async function ensureSbBalanceLoaded(exchange, mode, force){
   updateSbBalanceInfoDom();
 }
 
+// ---- Smart Bots create-form view helpers (presentation only) ----
+// Every control keeps the exact id / class the delegated handlers in
+// initSmartBots key off (sbExchange, sb-mode-btn, sbSymbolInput, sbType,
+// sb-dca-direction, sb-fundmode, sbFundingUsd, sbFundingPct(Range),
+// sbLeverage, sbTakeProfit, sbStopLoss, sbLevelCount, sbRecovery*,
+// sbCreateBtn) — only the markup/classes around them changed.
+function sbfNumberField({ id, label, value, unit, min, max, step, tag, tagClass, hint, required }){
+  return `
+    <div class="sbf-field">
+      <label class="sbf-label" for="${id}"><span>${label}</span>${tag ? `<span class="sbf-tag ${tagClass || ''}">${tag}</span>` : ''}</label>
+      <div class="sbf-input">
+        <input id="${id}" type="number" inputmode="decimal" ${min != null ? `min="${min}"` : ''} ${max != null ? `max="${max}"` : ''} step="${step || 'any'}" value="${value}" ${required ? 'required' : ''}>
+        ${unit ? `<span class="sbf-unit" aria-hidden="true">${unit}</span>` : ''}
+      </div>
+      ${hint ? `<span class="sbf-hint">${hint}</span>` : ''}
+    </div>`;
+}
+
+function sbfSegBtn({ cls, data, pressed, label, iconName }){
+  return `<button type="button" class="sbf-seg-btn ${cls}" ${data} aria-pressed="${pressed ? 'true' : 'false'}">${icon('check')}${iconName ? icon(iconName) : ''}<span>${label}</span></button>`;
+}
+
+function sbfRulesHtml(type){
+  const li = (ic, title, text) => `<li><span class="sbf-rule-ic">${icon(ic)}</span><span><strong>${title}</strong> ${text}</span></li>`;
+  const how = type === 'grid'
+    ? [
+        li('rows', 'How it trades.', 'A neutral range of resting orders around the current price &mdash; the range is auto-suggested from live data the moment you click Create &mdash; that cycles as price moves within it.'),
+        li('target', 'When it exits.', 'Stops (flattens) the instant Stop Loss or Take Profit is hit.'),
+      ]
+    : [
+        li('rows', 'How it trades.', 'A base order now, plus a laddered set of resting safety orders that average into the position if price moves against it, with one take-profit off the blended average entry.'),
+        li('target', 'When it exits.', 'Stops (position flat, orders cancelled) the instant Take Profit or Stop Loss is hit.'),
+      ];
+  return how.join('') +
+    li('triangle-alert', 'No guarantees.', 'Neither bot type can promise a win rate or guaranteed profit &mdash; set Stop Loss/Take Profit at levels you&rsquo;re actually comfortable with.') +
+    li('pause', 'Pause vs Stop.', 'Both cancel every pending order and close any open position at market immediately, regardless of profit or loss &mdash; Pause then sleeps (Resume redeploys fresh at current market), Stop ends the bot for good.');
+}
+
 function renderSmartBotsCreate(){
   if(!els.sbCreateHost) return;
   const f = sbState();
   const exchange = f.sbCreateExchange || 'bybit';
   const mode = f.liveModeByExchange[exchange] || 'live';
   const type = f.sbCreateType || 'dca';
-  const cfg = type === 'grid' ? f.sbGridForm : f.sbDcaForm;
+  const isGrid = type === 'grid';
+  const cfg = isGrid ? f.sbGridForm : f.sbDcaForm;
   const suggestion = f.sbRegimeSuggestion && f.sbRegimeSuggestion.symbol === f.sbCreateSymbol ? f.sbRegimeSuggestion : null;
+  const pairEntry = f.sbCreateSymbol ? (f.sbLastSearchResults || []).find(r => r.symbol === f.sbCreateSymbol) : null;
+  const pairMeta = (/USDT$/.test(f.sbCreateSymbol || '') ? 'USDT Perpetual' : 'Perpetual')
+    + (pairEntry ? ' &middot; ' + pairEntry.exchanges.map(x => EXCHANGE_DISPLAY_NAMES[x] || x).join(', ') : '');
+  const pctMode = cfg.fundingMode === 'pct';
+
+  const regimeNote = suggestion
+    ? `${f.sbCreateSymbol} right now: <strong>${suggestion.text}</strong> &mdash; suggested type: <strong class="sbf-accent">${SMART_BOT_TYPES[suggestion.suggestedType]}</strong>${suggestion.suggestedType !== type ? ` <button type="button" id="sbApplySuggestionBtn" class="primary ghost sbf-mini-btn">Use this</button>` : ' (already selected below)'}`
+    : (f.sbCreateSymbol ? 'Checking current regime for this pair&hellip;' : 'Search or pick a pair to see its current regime and a suggested bot type.');
 
   els.sbCreateHost.innerHTML = `
-    <button type="button" class="primary ghost sb-back-btn" style="font-size:11px;padding:4px 10px;margin-bottom:12px;">&larr; Back to My Bots</button>
-    <div class="ov-block" style="padding:12px;">
-      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:10px;">
-        <label style="font-size:11px;color:var(--dim);">Exchange
-          <select id="sbExchange" style="display:block;margin-top:3px;min-width:110px;">
-            ${GRID_LIVE_EXCHANGES.map(x => `<option value="${x}" ${exchange === x ? 'selected' : ''}>${EXCHANGE_DISPLAY_NAMES[x] || x}</option>`).join('')}
-          </select>
-        </label>
-        <div style="align-self:flex-end;">
-          <div style="font-size:11px;color:var(--dim);margin-bottom:3px;">Network</div>
-          <div class="mode-toggle" role="group" aria-label="${exchange} network">
-            <button type="button" class="mode-btn sb-mode-btn ${mode === 'live' ? 'active' : ''}" data-mode="live">Live</button>
-            <button type="button" class="mode-btn sb-mode-btn ${mode === 'demo' ? 'active' : ''}" data-mode="demo">Demo</button>
+    <div class="sbf">
+      <div class="sbf-head">
+        <button type="button" class="primary ghost sb-back-btn sbf-back"><svg class="icon" aria-hidden="true" focusable="false" style="transform:rotate(180deg)"><use href="/assets/icons.svg#i-chevron-right"/></svg> Back to My Bots</button>
+        <h3 class="sbf-title">Create Smart Bot</h3>
+      </div>
+
+      <div id="sbBalanceInfo" class="sbf-card sbf-card--acct">${sbBalanceInfoHtml()}</div>
+
+      <div class="sbf-grid">
+        <section class="sbf-card sbf-c-account" aria-labelledby="sbfSecAccount">
+          <h4 class="sbf-sec" id="sbfSecAccount">Account</h4>
+          <div class="sbf-stack">
+            <div class="sbf-field">
+              <label class="sbf-label" for="sbExchange"><span>Exchange</span></label>
+              <div class="sbf-select">
+                <select id="sbExchange">
+                  ${GRID_LIVE_EXCHANGES.map(x => `<option value="${x}" ${exchange === x ? 'selected' : ''}>${EXCHANGE_DISPLAY_NAMES[x] || x}</option>`).join('')}
+                </select>
+                ${icon('chevron-down')}
+              </div>
+            </div>
+            <div class="sbf-field">
+              <span class="sbf-label" id="sbfLblEnv"><span>Environment</span><span class="sbf-tag">Network</span></span>
+              <div class="sbf-seg" role="group" aria-labelledby="sbfLblEnv">
+                ${sbfSegBtn({ cls: 'sb-mode-btn', data: 'data-mode="live"', pressed: mode === 'live', label: 'Live' })}
+                ${sbfSegBtn({ cls: 'sb-mode-btn', data: 'data-mode="demo"', pressed: mode === 'demo', label: 'Demo' })}
+              </div>
+            </div>
           </div>
-        </div>
-        <label style="font-size:11px;color:var(--dim);position:relative;">Pair (search Bybit &amp; Binance)
-          <input id="sbSymbolInput" type="text" autocomplete="off" placeholder="e.g. FLOKIUSDT" value="${f.sbCreateSymbol || ''}" style="display:block;margin-top:3px;min-width:200px;text-transform:uppercase;">
-          <div id="sbSymbolResults" class="sb-symbol-results" style="display:none;"></div>
-        </label>
-      </div>
-      <div id="sbRegimeNote" style="font-size:11.5px;color:var(--dim);margin-bottom:12px;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel2);">
-        ${suggestion
-          ? `${f.sbCreateSymbol} right now: <strong style="color:var(--ink);">${suggestion.text}</strong> — suggested type: <strong style="color:var(--amber);">${SMART_BOT_TYPES[suggestion.suggestedType]}</strong>${suggestion.suggestedType !== type ? ` <button type="button" id="sbApplySuggestionBtn" class="primary ghost" style="font-size:10.5px;padding:2px 8px;margin-left:6px;">Use this</button>` : ' (already selected below)'}`
-          : (f.sbCreateSymbol ? 'Checking current regime for this pair…' : 'Search or pick a pair to see its current regime and a suggested bot type.')}
-      </div>
-      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
-        <label style="font-size:11px;color:var(--dim);">Bot Type
-          <select id="sbType" style="display:block;margin-top:3px;min-width:180px;">
-            ${Object.entries(SMART_BOT_TYPES).map(([k, v]) => `<option value="${k}" ${type === k ? 'selected' : ''}>${v}</option>`).join('')}
-          </select>
-        </label>
-        ${type === 'dca' ? `
-        <div style="align-self:flex-end;">
-          <div style="font-size:11px;color:var(--dim);margin-bottom:3px;">Direction</div>
-          <div class="mode-toggle">
-            ${['LONG', 'SHORT'].map(d => `<button type="button" class="mode-btn sb-dca-direction ${cfg.direction === d ? 'active' : ''}" data-dir="${d}">${d === 'LONG' ? 'Long' : 'Short'}</button>`).join('')}
+        </section>
+
+        <section class="sbf-card sbf-c-market" aria-labelledby="sbfSecMarket">
+          <h4 class="sbf-sec" id="sbfSecMarket">Market</h4>
+          <div class="sbf-stack">
+            <div class="sbf-field">
+              <label class="sbf-label" for="sbSymbolInput"><span>Trading pair</span><span class="sbf-tag">Search Bybit &amp; Binance</span></label>
+              <div class="sbf-search">
+                <div class="sbf-input">
+                  ${icon('search', 'sbf-input-ic')}
+                  <input id="sbSymbolInput" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" role="combobox" aria-autocomplete="list" aria-controls="sbSymbolResults" placeholder="Search pair, e.g. FLOKIUSDT" value="${f.sbCreateSymbol || ''}" style="text-transform:uppercase;">
+                </div>
+                <div id="sbSymbolResults" class="sb-symbol-results" role="listbox" style="display:none;"></div>
+              </div>
+            </div>
+            ${f.sbCreateSymbol ? `
+            <div class="sbf-pair-card">
+              <span class="sbf-pair-sym">${f.sbCreateSymbol}</span>
+              <span class="sbf-pair-meta">${pairMeta}</span>
+            </div>` : ''}
+            <div id="sbRegimeNote" class="sbf-note" role="status">${icon('info')}<span>${regimeNote}</span></div>
           </div>
-        </div>` : ''}
-      </div>
-      <div id="sbBalanceInfo" style="font-size:11.5px;color:var(--dim);margin:0 0 10px;">${sbBalanceInfoHtml()}</div>
-      <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
-        <label style="font-size:11px;color:var(--dim);">Sizing
-          <div style="display:flex;gap:6px;margin-top:3px;">
-            <button type="button" class="mode-btn sb-fundmode ${cfg.fundingMode !== 'pct' ? 'active' : ''}" data-mode="usdt">Fixed USDT</button>
-            <button type="button" class="mode-btn sb-fundmode ${cfg.fundingMode === 'pct' ? 'active' : ''}" data-mode="pct">% of balance</button>
+        </section>
+
+        <section class="sbf-card sbf-c-strategy" aria-labelledby="sbfSecStrategy">
+          <h4 class="sbf-sec" id="sbfSecStrategy">Strategy</h4>
+          <div class="sbf-stack">
+            <div class="sbf-field">
+              <label class="sbf-label" for="sbType"><span>Bot strategy</span></label>
+              <div class="sbf-select">
+                <select id="sbType">
+                  ${Object.entries(SMART_BOT_TYPES).map(([k, v]) => `<option value="${k}" ${type === k ? 'selected' : ''}>${v}</option>`).join('')}
+                </select>
+                ${icon('chevron-down')}
+              </div>
+            </div>
+            ${type === 'dca' ? `
+            <div class="sbf-field">
+              <span class="sbf-label" id="sbfLblDir"><span>Direction</span></span>
+              <div class="sbf-seg" role="group" aria-labelledby="sbfLblDir">
+                ${sbfSegBtn({ cls: 'sb-dca-direction', data: 'data-dir="LONG"', pressed: cfg.direction === 'LONG', label: 'Long', iconName: 'arrow-up-right' })}
+                ${sbfSegBtn({ cls: 'sb-dca-direction', data: 'data-dir="SHORT"', pressed: cfg.direction === 'SHORT', label: 'Short', iconName: 'arrow-down' })}
+              </div>
+            </div>` : ''}
           </div>
-        </label>
-        ${cfg.fundingMode === 'pct' ? `
-        <label style="font-size:11px;color:var(--dim);">Margin (% of free balance)
-          <div style="display:flex;align-items:center;gap:8px;margin-top:3px;min-width:170px;">
-            <input id="sbFundingPctRange" type="range" min="1" max="95" step="1" value="${cfg.fundingPct}" style="flex:1;">
-            <input id="sbFundingPct" type="number" min="1" max="95" step="1" value="${cfg.fundingPct}" style="width:54px;">
+        </section>
+
+        <section class="sbf-card sbf-c-risk" aria-labelledby="sbfSecRisk">
+          <h4 class="sbf-sec" id="sbfSecRisk">Risk &amp; position</h4>
+          <div class="sbf-stack">
+            <div class="sbf-field">
+              <span class="sbf-label" id="sbfLblSize"><span>Position size</span></span>
+              <div class="sbf-seg" role="group" aria-labelledby="sbfLblSize">
+                ${sbfSegBtn({ cls: 'sb-fundmode', data: 'data-mode="usdt"', pressed: !pctMode, label: 'Fixed USDT' })}
+                ${sbfSegBtn({ cls: 'sb-fundmode', data: 'data-mode="pct"', pressed: pctMode, label: '% Balance' })}
+              </div>
+            </div>
+            <div class="sbf-fields">
+              ${pctMode ? `
+              <div class="sbf-field sbf-field--wide">
+                <label class="sbf-label" for="sbFundingPct"><span>Margin</span><span class="sbf-tag">% of free balance</span></label>
+                <div class="sbf-pct">
+                  <input id="sbFundingPctRange" class="sbf-range" type="range" min="1" max="95" step="1" value="${cfg.fundingPct}" aria-label="Margin as a percent of free balance">
+                  <div class="sbf-input sbf-input--pct">
+                    <input id="sbFundingPct" type="number" inputmode="numeric" min="1" max="95" step="1" value="${cfg.fundingPct}">
+                    <span class="sbf-unit" aria-hidden="true">%</span>
+                  </div>
+                </div>
+              </div>` : sbfNumberField({ id: 'sbFundingUsd', label: 'Margin', value: cfg.fundingUsd, unit: 'USDT', min: 1 })}
+              ${sbfNumberField({ id: 'sbLeverage', label: 'Leverage', value: cfg.leverage, unit: 'x', min: 1, max: 20, step: 1 })}
+              ${isGrid ? sbfNumberField({ id: 'sbLevelCount', label: 'Grid levels', value: cfg.levelCount, min: 3, max: 20, step: 1 }) : ''}
+            </div>
+            ${isGrid ? `<p class="sbf-hint">Fewer levels over the same auto-suggested range = wider steps = bigger $ per fill, less often. More levels = smaller fills, more often. Same margin committed either way &mdash; this trades fill size against fill frequency, it doesn&rsquo;t create extra profit on its own.</p>` : ''}
           </div>
-        </label>` : `
-        <label style="font-size:11px;color:var(--dim);">Margin (USDT)
-          <input id="sbFundingUsd" type="number" min="1" step="any" value="${cfg.fundingUsd}" style="display:block;margin-top:3px;min-width:110px;">
-        </label>`}
-        <label style="font-size:11px;color:var(--dim);">Leverage
-          <input id="sbLeverage" type="number" min="1" max="20" step="1" value="${cfg.leverage}" style="display:block;margin-top:3px;min-width:80px;">
-        </label>
-        <label style="font-size:11px;color:var(--dim);">Take Profit (%)
-          <input id="sbTakeProfit" type="number" min="0" step="any" value="${cfg.takeProfitPct}" style="display:block;margin-top:3px;min-width:90px;">
-        </label>
-        <label style="font-size:11px;color:var(--dim);">Stop Loss (%)${type === 'grid' ? ' — required' : ' — optional'}
-          <input id="sbStopLoss" type="number" min="0" step="any" value="${cfg.stopLossPct == null ? '' : cfg.stopLossPct}" style="display:block;margin-top:3px;min-width:90px;">
-        </label>
-        ${type === 'grid' ? `
-        <label style="font-size:11px;color:var(--dim);">Grid Levels
-          <input id="sbLevelCount" type="number" min="3" max="20" step="1" value="${cfg.levelCount}" style="display:block;margin-top:3px;min-width:70px;">
-        </label>` : ''}
+        </section>
+
+        <section class="sbf-card sbf-c-exit" aria-labelledby="sbfSecExit">
+          <h4 class="sbf-sec" id="sbfSecExit">Exit management</h4>
+          <div class="sbf-stack">
+            ${sbfNumberField({ id: 'sbTakeProfit', label: 'Take profit', value: cfg.takeProfitPct, unit: '%', min: 0 })}
+            ${sbfNumberField({ id: 'sbStopLoss', label: 'Stop loss', value: cfg.stopLossPct == null ? '' : cfg.stopLossPct, unit: '%', min: 0, tag: isGrid ? 'Required' : 'Optional', tagClass: isGrid ? 'sbf-tag--req' : '', required: isGrid })}
+          </div>
+        </section>
       </div>
-      ${type === 'grid' ? `
-      <div style="font-size:11px;color:var(--dim);margin:0 0 10px;line-height:1.5;">
-        Fewer levels over the same auto-suggested range = wider steps = bigger $ per fill, less often. More levels = smaller fills, more often. Same margin committed either way — this trades fill size against fill frequency, it doesn't create extra profit on its own.
-      </div>
-      <div id="sbPreview" style="margin:0 0 12px;"></div>
-      <div class="ov-block" style="padding:10px 12px;margin-bottom:12px;background:var(--panel2);">
-        <label class="toggle-check" style="font-size:12px;">
+
+      ${isGrid ? `
+      <div id="sbPreview"></div>
+      <section class="sbf-card sbf-recovery" aria-label="Recovery mode">
+        <label class="toggle-check">
           <input id="sbRecoveryToggle" type="checkbox" ${cfg.recoveryMode ? 'checked' : ''}>
-          <span>Recovery mode — add to the position on a drawdown, to try to average into a better exit instead of only waiting for the range/Stop Loss</span>
+          <span>Recovery mode &mdash; add to the position on a drawdown, to try to average into a better exit instead of only waiting for the range/Stop Loss</span>
         </label>
-        <div style="font-size:11px;color:var(--dim);margin:6px 0 ${cfg.recoveryMode ? '10px' : '0'};line-height:1.5;">
-          This is a martingale-style averaging add, same idea as DCA's safety orders bolted onto Grid — it INCREASES risk (more margin committed while already underwater) in exchange for a shot at a smaller/no loss instead of riding it to Stop Loss. Stop Loss above still fires as the hard backstop regardless.
-        </div>
+        <p class="sbf-hint">This is a martingale-style averaging add, same idea as DCA's safety orders bolted onto Grid &mdash; it INCREASES risk (more margin committed while already underwater) in exchange for a shot at a smaller/no loss instead of riding it to Stop Loss. Stop Loss above still fires as the hard backstop regardless.</p>
         ${cfg.recoveryMode ? `
-        <div style="display:flex;gap:16px;flex-wrap:wrap;">
-          <label style="font-size:11px;color:var(--dim);">Add trigger (% drawdown)
-            <input id="sbRecoveryTrigger" type="number" min="1" step="any" value="${cfg.recoveryTriggerPct}" style="display:block;margin-top:3px;min-width:80px;">
-          </label>
-          <label style="font-size:11px;color:var(--dim);">Max adds
-            <input id="sbRecoveryMaxAdds" type="number" min="1" max="6" step="1" value="${cfg.maxRecoveryAdds}" style="display:block;margin-top:3px;min-width:70px;">
-          </label>
-          <label style="font-size:11px;color:var(--dim);">Size multiplier per add
-            <input id="sbRecoveryMult" type="number" min="1" step="0.1" value="${cfg.recoverySizeMult}" style="display:block;margin-top:3px;min-width:80px;">
-          </label>
+        <div class="sbf-fields">
+          ${sbfNumberField({ id: 'sbRecoveryTrigger', label: 'Add trigger', value: cfg.recoveryTriggerPct, unit: '% drawdown', min: 1 })}
+          ${sbfNumberField({ id: 'sbRecoveryMaxAdds', label: 'Max adds', value: cfg.maxRecoveryAdds, min: 1, max: 6, step: 1 })}
+          ${sbfNumberField({ id: 'sbRecoveryMult', label: 'Size multiplier per add', value: cfg.recoverySizeMult, unit: 'x', min: 1, step: 0.1 })}
         </div>` : ''}
-      </div>` : ''}
-      <div style="font-size:11px;color:var(--dim);margin:8px 0 12px;line-height:1.5;">
-        ${type === 'grid'
-          ? 'Grid Bot: a neutral range of resting orders around the current price — range auto-suggested from live data the moment you click Create — that cycles as price moves within it. Stops (flattens) the instant Stop Loss or Take Profit is hit.'
-          : 'DCA Bot: a base order now plus a laddered set of resting safety orders that average into the position if price moves against it, with one take-profit off the blended average entry. Stops (position flat, orders cancelled) the instant Take Profit or Stop Loss is hit.'}
-        Neither can promise a win rate or guaranteed profit — set Stop Loss/Take Profit at levels you're actually comfortable with.
-        Pause and Stop both cancel every pending order and close any open position at market immediately, regardless of profit or loss — Pause then sleeps (Resume redeploys fresh at current market), Stop ends the bot for good.
+      </section>` : ''}
+
+      <section class="sbf-card sbf-rules" aria-labelledby="sbfSecRules">
+        <h4 class="sbf-sec" id="sbfSecRules">How this bot works</h4>
+        <ul>${sbfRulesHtml(type)}</ul>
+      </section>
+
+      <div class="sbf-actions">
+        <div id="sbCreateStatus" class="sbf-status" role="status" aria-live="polite"></div>
+        <button type="button" id="sbCreateBtn" class="primary sbf-cta">${icon('plus')}<span>Create Bot</span><span class="btn-spinner" aria-hidden="true"></span></button>
       </div>
-      <div id="sbCreateStatus" style="font-size:11.5px;color:var(--dim);margin-bottom:8px;"></div>
-      <button type="button" id="sbCreateBtn" class="primary" style="font-size:12px;padding:6px 16px;">Create Bot</button>
     </div>
   `;
   updateSbPreview();
@@ -4851,9 +4958,20 @@ function renderSmartBotsCreate(){
   ensureSbBalanceLoaded(exchange, mode);
 }
 
+// Shows progress/error text under the form. The message is "busy" (not an
+// error) only while createSmartBotFromForm is still reading margin /
+// fetching the snapshot — the button is disabled for exactly that window so
+// a double-click can't submit twice. Everything else about creation is unchanged.
 function sbCreateStatus(msg, isError){
   const host = document.getElementById('sbCreateStatus');
-  if(host){ host.textContent = msg; host.style.color = isError ? 'var(--red)' : ''; }
+  if(host){ host.textContent = msg; host.dataset.state = msg ? (isError ? 'error' : 'busy') : ''; }
+  const btn = els.sbCreateHost && els.sbCreateHost.querySelector('#sbCreateBtn');
+  if(btn){
+    const busy = !!msg && !isError;
+    btn.disabled = busy;
+    btn.classList.toggle('is-scanning', busy);
+    btn.setAttribute('aria-busy', busy ? 'true' : 'false');
+  }
 }
 
 function readSmartBotFormNumbers(){
