@@ -4942,10 +4942,10 @@ function renderSmartBotsCreate(){
         </div>` : ''}
       </section>` : ''}
 
-      <section class="sbf-card sbf-rules" aria-labelledby="sbfSecRules">
-        <h4 class="sbf-sec" id="sbfSecRules">How this bot works</h4>
+      <details class="sbf-card sbf-rules">
+        <summary class="sbf-sec">How this bot works</summary>
         <ul>${sbfRulesHtml(type)}</ul>
-      </section>
+      </details>
 
       <div class="sbf-actions">
         <div id="sbCreateStatus" class="sbf-status" role="status" aria-live="polite"></div>

@@ -450,7 +450,7 @@
    ===================================================================== */
 .sb-intro{ font-size:13px; line-height:1.65; color:var(--dim); max-width:82ch; margin:0 0 16px; }
 
-.sbf{ --sbf-gap:14px; width:100%; max-width:1180px; margin-inline:auto; display:flex; flex-direction:column; gap:var(--sbf-gap); min-width:0; }
+.sbf{ --sbf-gap:14px; width:100%; max-width:100%; display:flex; flex-direction:column; gap:var(--sbf-gap); min-width:0; }
 .sbf *, .sbf *::before, .sbf *::after{ box-sizing:border-box; }
 .sbf button > *{ pointer-events:none; }   /* delegated handlers read e.target — keep it the <button> itself */
 
@@ -636,8 +636,25 @@
 .sbf-recovery .sbf-fields{ margin-top:14px; }
 
 /* ---- strategy rules ---- */
-.sbf-rules{ background:var(--panel); }
-.sbf-rules ul{ list-style:none; margin:0; padding:0; display:grid; gap:12px; max-width:78ch; }
+/* ---- strategy rules — collapsible so it doesn't eat vertical space by
+   default; same disclosure language as details.ov-block elsewhere. ---- */
+.sbf-rules{ background:var(--panel); padding:0; }
+.sbf-rules > summary.sbf-sec{
+  cursor:pointer; list-style:none; user-select:none; padding:16px; margin:0;
+  transition:background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.sbf-rules > summary.sbf-sec::-webkit-details-marker{ display:none; }
+.sbf-rules > summary.sbf-sec::after{
+  content:''; display:inline-block; width:12px; height:12px; margin-left:auto; background-color:var(--dim);
+  -webkit-mask:var(--mask-chevron-right) center/contain no-repeat; mask:var(--mask-chevron-right) center/contain no-repeat;
+  transition:transform var(--dur) var(--ease), background-color var(--dur) var(--ease);
+}
+.sbf-rules > summary.sbf-sec:hover{ background:rgba(255,255,255,.03); color:var(--ink); }
+.sbf-rules > summary.sbf-sec:hover::after{ background-color:var(--amber); }
+.sbf-rules > summary.sbf-sec:focus-visible{ outline:none; box-shadow:var(--focus-ring); border-radius:var(--r-lg); }
+.sbf-rules[open] > summary.sbf-sec::after{ transform:rotate(90deg); background-color:var(--amber); }
+.sbf-rules[open] > summary.sbf-sec{ margin-bottom:0; border-bottom:1px solid var(--line-soft); }
+.sbf-rules ul{ list-style:none; margin:0; padding:16px; display:grid; gap:12px; max-width:78ch; }
 .sbf-rules li{ display:grid; grid-template-columns:auto minmax(0,1fr); gap:10px; font-size:13.5px; line-height:1.65; color:var(--ink-dim); }
 .sbf-rules li strong{ color:var(--ink); font-weight:600; }
 .sbf-rule-ic{ margin-top:.2em; color:var(--amber); font-size:15px; }

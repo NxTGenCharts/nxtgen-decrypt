@@ -68,8 +68,7 @@
     <nav class="term-subnav" role="tablist" aria-label="Utilities and Tools sub-tabs">
       <a class="navtab subnavtab active" id="tabPaperBtn" href="#paper-trading" role="tab" aria-selected="true"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-clipboard-list"/></svg></span>Paper Trading</a>
       <a class="navtab subnavtab" id="tabBacktestBtn" href="#backtesting" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-history"/></svg></span>Backtesting</a>
-      <a class="navtab subnavtab" id="tabBotsBtn" href="#trading-bots" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-bot"/></svg></span>Trading Bots</a>
-      <a class="navtab subnavtab" id="tabSmartBotsBtn" href="#smart-bots" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-cpu"/></svg></span>Smart Bots</a>
+      <a class="navtab subnavtab" id="tabSmartBotsBtn" href="#trading-bots" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-bot"/></svg></span>Trading Bots</a>
     </nav>
 
   <div class="panel active" id="panelPaper">
@@ -324,27 +323,10 @@
 
   </div>
 
-  <div class="panel" id="panelBots">
-
-    <div class="ov-block fu-strategies" id="fuTradingBotsDetails" style="margin-bottom:18px;">
-      <div class="ov-block-title">Trading Bots <span class="fu-strategies-badge" id="fuTradingBotsBadge"></span></div>
-      <div style="font-size:12px;color:var(--dim);margin-bottom:10px;line-height:1.5;">
-        User-created bots — you set the parameters (price range, investment, safety orders, etc.) directly, like a manual grid or DCA bot creator, rather than an auto-scanning strategy. Binance or Bybit, Live or Demo, real orders — pick the network in the form below. Separate from the auto-scored NxTGen Grid strategy.
-      </div>
-      <div id="fuTradingBotsCreate"></div>
-      <div style="display:flex;align-items:center;gap:10px;margin:4px 0 10px;">
-        <button type="button" id="tbFlattenAllBtn" class="primary ghost" style="font-size:12px;padding:6px 14px;border-color:var(--red);color:var(--red);">Flatten All Grids</button>
-        <span id="tbFlattenAllStatus" style="font-size:11.5px;color:var(--dim);"></span>
-      </div>
-      <div id="fuTradingBotsList"></div>
-    </div>
-
-  </div>
-
   <div class="panel" id="panelSmartBots">
 
     <div class="ov-block fu-strategies" id="fuSmartBotsDetails" style="margin-bottom:18px;">
-      <div class="ov-block-title">Smart Bots <span class="fu-strategies-badge" id="fuSmartBotsBadge"></span></div>
+      <div class="ov-block-title">Trading Bots <span class="fu-strategies-badge" id="fuSmartBotsBadge"></span></div>
       <div id="sbListView">
         <div id="sbSummaryHost"></div>
         <div id="sbTabsHost"></div>
@@ -370,9 +352,9 @@
    lives in js/ui.js (SUBTAB_GROUPS) - keep these slugs in sync with it. */
 (function(){
   var h = (location.hash || '').replace(/^#/, '').toLowerCase();
-  var map = { 'backtesting': 'backtest', 'backtest': 'backtest', 'trading-bots': 'bots', 'bots': 'bots', 'smart-bots': 'smartbots', 'smartbots': 'smartbots' };
+  var map = { 'backtesting': 'backtest', 'backtest': 'backtest', 'trading-bots': 'smartbots', 'bots': 'smartbots', 'smart-bots': 'smartbots', 'smartbots': 'smartbots' };
   var which = map[h]; if(!which) return;
-  var ids = { paper: ['tabPaperBtn', 'panelPaper'], backtest: ['tabBacktestBtn', 'panelBacktest'], bots: ['tabBotsBtn', 'panelBots'], smartbots: ['tabSmartBotsBtn', 'panelSmartBots'] };
+  var ids = { paper: ['tabPaperBtn', 'panelPaper'], backtest: ['tabBacktestBtn', 'panelBacktest'], smartbots: ['tabSmartBotsBtn', 'panelSmartBots'] };
   Object.keys(ids).forEach(function(k){
     var on = k === which, b = document.getElementById(ids[k][0]), p = document.getElementById(ids[k][1]);
     if(b){ b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); }

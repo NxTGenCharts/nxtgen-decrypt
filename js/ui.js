@@ -117,13 +117,13 @@ const SUBTAB_GROUPS = [
   },
   {
     defaultKey: 'paper',
-    btn: { paper: 'tabPaperBtn', backtest: 'tabBacktestBtn', bots: 'tabBotsBtn', smartbots: 'tabSmartBotsBtn' },
-    panel: { paper: 'panelPaper', backtest: 'panelBacktest', bots: 'panelBots', smartbots: 'panelSmartBots' },
-    slug: { paper: 'paper-trading', backtest: 'backtesting', bots: 'trading-bots', smartbots: 'smart-bots' },
+    btn: { paper: 'tabPaperBtn', backtest: 'tabBacktestBtn', smartbots: 'tabSmartBotsBtn' },
+    panel: { paper: 'panelPaper', backtest: 'panelBacktest', smartbots: 'panelSmartBots' },
+    slug: { paper: 'paper-trading', backtest: 'backtesting', smartbots: 'trading-bots' },
     alias: {
       'paper-trading': 'paper', 'paper': 'paper',
       'backtesting': 'backtest', 'backtest': 'backtest',
-      'trading-bots': 'bots', 'bots': 'bots',
+      'trading-bots': 'smartbots', 'bots': 'smartbots',
       'smart-bots': 'smartbots', 'smartbots': 'smartbots',
     },
   },

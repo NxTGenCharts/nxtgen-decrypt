@@ -207,7 +207,7 @@ document.addEventListener('click', (e) => {
 });
 
 // ---------- Trade page deep links: #auto  #futures ----------
-// (Utilities & Tools sub-tabs — #paper-trading, #backtesting, #trading-bots, #smart-bots — are routed by ui.js.)
+// (Utilities & Tools sub-tabs — #paper-trading, #backtesting, #trading-bots (formerly #smart-bots) — are routed by ui.js.)
 function routeHash() {
   const h = location.hash.replace('#', '');
   if (!h) return;
