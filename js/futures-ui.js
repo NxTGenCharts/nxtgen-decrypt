@@ -4216,6 +4216,26 @@ function tbBaseAsset(symbol){ return (symbol || '').replace(/USDT$/i, '') || (sy
 // inside the existing 34x34 .tb-icon frame.
 function tbCoinIconHtml(symbol){ return coinIconHtml(tbBaseAsset(symbol), 26); }
 function tbTypeBadgeLabel(bot){ return bot.type === 'grid' ? 'Futures Grid Bot' : 'DCA Bot'; }
+
+// Profit Target progress — only meaningful for Grid, where realizedUsd
+// accumulates across many re-armed cycles against one standing target
+// (bot.config.profitTargetPct of bot.investmentUsd, the same figure
+// manageGridBotInstance checks every tick to decide when to flatten).
+// DCA's takeProfitPct is a single position's exit price, not a running
+// total, so a progress readout there wouldn't reflect anything real —
+// callers get null and should just skip showing it for DCA bots.
+function sbProfitTargetProgress(bot){
+  const profitTargetPct = bot.type === 'grid' ? parseFloat(bot.config?.profitTargetPct) : NaN;
+  if(!Number.isFinite(profitTargetPct) || profitTargetPct <= 0 || !(bot.investmentUsd > 0)) return null;
+  const targetUsd = bot.investmentUsd * (profitTargetPct / 100);
+  const realizedUsd = bot.realizedUsd || 0;
+  const remainingUsd = Math.max(0, targetUsd - realizedUsd);
+  const realizedPct = (realizedUsd / bot.investmentUsd) * 100;
+  const remainingPct = Math.max(0, profitTargetPct - realizedPct);
+  const progressPct = Math.max(0, Math.min(100, (realizedUsd / targetUsd) * 100));
+  return { profitTargetPct, targetUsd, realizedUsd, remainingUsd, realizedPct, remainingPct, progressPct, reached: realizedUsd >= targetUsd };
+}
+
 function tbDirBadgeLabel(bot){ return `${bot.direction === 'NEUTRAL' ? 'Neutral' : bot.direction === 'LONG' ? 'Long' : 'Short'} ${bot.leverage}x`; }
 
 function renderTradingBotsList(){
@@ -4638,6 +4658,7 @@ function renderSmartBotsList(){
     const label = bot.nickname || `${bot.symbol} ${bot.type === 'grid' ? 'Grid Bot' : 'DCA Bot'}`;
     const isLiveAndRunning = bot.status === 'active' && !bot.paused;
     const statusColor = isLiveAndRunning ? 'var(--green)' : bot.status === 'error' ? 'var(--red)' : 'var(--dim)';
+    const tgt = sbProfitTargetProgress(bot);
     return `
     <div class="tb-card sb-card" data-id="${bot.id}" style="cursor:pointer;">
       <div class="tb-card-head">
@@ -4661,6 +4682,10 @@ function renderSmartBotsList(){
         <div class="tb-stat"><span class="l">Total P/L</span><span class="n">${pnlSpan(m.totalPnl, m.pctOfInvestment)}</span></div>
         <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length} · ${fmtBotUptime(bot.createdAtMs)}</span></div>
       </div>
+      ${tgt ? `<div class="progress-wrap" style="margin-top:10px;margin-bottom:0;">
+        <div class="progress-track"><div class="progress-bar${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div></div>
+        <div class="progress-label" style="text-align:left;">${tgt.reached ? `Profit Target (${tgt.profitTargetPct}%) reached` : `${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%) left of ${tgt.profitTargetPct}% target`}</div>
+      </div>` : ''}
     </div>`;
   }).join('') + createBtnHtml;
 }
@@ -5371,6 +5396,13 @@ function renderSmartBotDetail(id){
   const m = computeBotMetrics(bot);
   const label = bot.nickname || `${bot.symbol} ${bot.type === 'grid' ? 'Grid Bot' : 'DCA Bot'}`;
   const range = f.sbChartRange || 'all';
+  const tgt = sbProfitTargetProgress(bot);
+  const targetProgressHtml = tgt ? `
+    <div class="tb-params-head">Profit Target</div>
+    <div class="progress-wrap" style="margin-bottom:14px;">
+      <div class="progress-track"><div class="progress-bar${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div></div>
+      <div class="progress-label">${fmtUsd(tgt.realizedUsd)} of ${fmtUsd(tgt.targetUsd)} (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — ${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%) left`}</div>
+    </div>` : '';
   els.sbDetailHost.innerHTML = `
     <button type="button" class="primary ghost sb-back-btn" style="font-size:11px;padding:4px 10px;margin-bottom:14px;">&larr; Back to My Bots</button>
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
@@ -5394,6 +5426,7 @@ function renderSmartBotDetail(id){
       <div class="tb-stat"><span class="l">Uptime</span><span class="n">${fmtBotUptime(bot.createdAtMs)}</span></div>
       <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length}</span></div>
     </div>
+    ${targetProgressHtml}
     <div class="tb-params-head">Trades</div>
     <div class="table-scroll">
       <table class="tb-orders-table">
