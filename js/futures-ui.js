@@ -3401,6 +3401,29 @@ async function applyGridRecovery(bot, plan, snap, proxyArgs){
   tradingBotLog(bot, `Recovery add #${addsUsed}/${maxAdds} — added ~${fmtUsd(addUsd)} ${direction} at market (floating drawdown was ${drawdownPct.toFixed(1)}%). Investment now ${fmtUsd(bot.investmentUsd)}.`, false);
 }
 
+// Resolves ONE closed grid cycle's real net P&L from Bybit itself,
+// instead of trusting grid.js's netCycleProfit() estimate. The estimate
+// only ever modeled THIS level's own entry/exit against an assumed
+// maker/maker fee pair — Bybit nets a hedge-mode close against the
+// position's AVERAGE entry and whatever fee tier the fill actually got,
+// so the two numbers can diverge per-row even when their totals agree
+// (see exchangeCheckHtml). This looks the just-filled close order up by
+// its exact orderId in Bybit's own closed-P&L list (already net of real
+// fees) and uses THAT as netUsd when found. Only Bybit is wired up
+// (getBinanceClosedPnlUnsupported server-side covers the rest) and the
+// lookup can occasionally miss if Bybit hasn't indexed the fill yet the
+// instant this runs — both cases fall back to the estimate, clearly
+// tagged via pnlSource so the UI/log can show which one a row got.
+async function resolveGridCyclePnl(proxyArgs, orderId, estimate){
+  if(proxyArgs.exchange !== 'bybit') return { ...estimate, pnlSource: 'estimate' };
+  const resp = await callProxy('/api/futures/grid/closed-pnl', proxyArgs).catch(() => null);
+  const row = resp && resp.ok ? (resp.list || []).find(r => String(r.orderId) === String(orderId)) : null;
+  if(!row) return { ...estimate, pnlSource: 'estimate' };
+  // Bybit's closedPnl is already net of both real fees — don't also
+  // subtract the estimate's modeled fees/slippage/funding on top of it.
+  return { grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: row.closedPnl, avgEntryPrice: row.avgEntryPrice || null, avgExitPrice: row.avgExitPrice || null, pnlSource: 'exchange' };
+}
+
 async function manageGridBotInstance(bot, cred, nowMs){
   const plan = bot.plan;
   const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
@@ -3496,13 +3519,17 @@ async function manageGridBotInstance(bot, cred, nowMs){
     } else if(level.status === 'PENDING_CLOSE' && level.closeOrderId != null && !openIds.has(String(level.closeOrderId))){
       const perLevelUsd = plan.allocationUsd / plan.levelCount;
       const qty = (perLevelUsd * plan.leverage) / level.entryPrice;
-      const pnl = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: level.targetPrice, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
+      const estimate = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: level.targetPrice, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
+      const pnl = await resolveGridCyclePnl(proxyArgs, level.closeOrderId, estimate);
       bot.realizedUsd += pnl.netUsd;
       addTradingBotsRealized(pnl.netUsd);
+      tradingBotLog(bot, `Level ${level.levelIndex} cycle closed — ${fmtUsd(pnl.netUsd)} (${pnl.pnlSource === 'exchange' ? 'Bybit-verified' : 'estimated — Bybit closed P&L not available for this close yet'}).`, false);
       const record = {
         closedAtMs: nowMs, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
         entry: level.entryPrice, exit: level.targetPrice, qty, leverage: plan.leverage,
-        grossUsd: pnl.grossUsd, feesUsd: pnl.feesUsd, fundingUsd: pnl.fundingUsd, slippageUsd: pnl.slippageUsd, netUsd: pnl.netUsd,
+        grossUsd: pnl.grossUsd != null ? pnl.grossUsd : estimate.grossUsd, feesUsd: pnl.feesUsd != null ? pnl.feesUsd : estimate.feesUsd,
+        fundingUsd: pnl.fundingUsd != null ? pnl.fundingUsd : estimate.fundingUsd, slippageUsd: pnl.slippageUsd != null ? pnl.slippageUsd : estimate.slippageUsd,
+        netUsd: pnl.netUsd, pnlSource: pnl.pnlSource,
         confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_CYCLE_TP', durationMin: Math.round((nowMs - level.openedAt) / 60_000),
         gridId: bot.id, gridLevel: level.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
       };
@@ -5073,8 +5100,8 @@ function renderSmartBotDetail(id){
     <div class="tb-params-head">Exchange check</div>
     <div style="font-size:11.5px;color:var(--dim);line-height:1.5;margin-bottom:8px;">
       ${bot.exchange === 'bybit'
-        ? `The per-cycle profit above is the app's own estimate from its grid prices and standard maker fees. Bybit realizes each close against the position's average entry, so single rows can differ from it even when the totals agree.`
-        : 'Exchange-verified P&amp;L is only wired up for Bybit right now.'}
+        ? `Net P&amp;L rows marked <strong style="color:var(--ink);">✓</strong> are Bybit's own realized P&amp;L for that exact close (already net of real fees) — pulled the moment the cycle closes, not modeled. Rows marked <strong style="color:var(--ink);">≈</strong> fall back to the app's fee estimate, which only happens on the rare close Bybit's own closed-P&amp;L feed didn't have indexed yet at that instant.`
+        : 'Exchange-verified P&amp;L is only wired up for Bybit right now — Net P&amp;L above is the app\'s fee-model estimate.'}
     </div>
     ${bot.exchange === 'bybit' ? `<button type="button" class="primary ghost sb-verify-btn" data-id="${bot.id}" style="font-size:11px;padding:4px 10px;">Verify with Bybit</button>` : ''}
     <div style="font-size:11.5px;color:var(--dim);line-height:1.5;margin:8px 0 14px;">${exchangeCheckHtml(bot)}</div>
@@ -5091,7 +5118,7 @@ function renderSmartBotDetail(id){
               <td>${r.exit != null ? r.exit : '—'}</td>
               <td>${r.qty != null ? (+r.qty).toFixed(6) : '—'}</td>
               <td>${r.leverage != null ? r.leverage + 'x' : '—'}</td>
-              <td style="color:${(r.netUsd || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(r.netUsd || 0)}</td>
+              <td style="color:${(r.netUsd || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(r.netUsd || 0)}${r.pnlSource === 'exchange' ? ' <span style="color:var(--dim);font-size:10px;" title="Bybit\'s own realized P&L for this close">✓</span>' : r.pnlSource === 'estimate' ? ' <span style="color:var(--dim);font-size:10px;" title="App fee-model estimate — exchange figure wasn\'t available yet">≈</span>' : ''}</td>
               <td>${r.durationMin != null ? r.durationMin + 'm' : '—'}</td>
               <td>${r.exitReason || (bot.type === 'dca' ? 'TP/SL' : '—')}</td>
             </tr>`).join('') : `<tr><td colspan="9" style="color:var(--dim);text-align:center;padding:14px 0;">No closed trades yet.</td></tr>`}
