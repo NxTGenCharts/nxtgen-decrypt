@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Documentation — NxTGen DeCrypt</title>
+<meta name="description" content="How NxTGen DeCrypt works: scanners, exchanges, API keys, Autotrade and Futures.">
+<link rel="canonical" href="https://nxtgendecrypt.site/docs/">
+<meta name="theme-color" content="#08090a">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap">
+<link rel="stylesheet" href="/css/landing.css">
+</head>
+<body>
+<header class="nav solid"><div class="wrap">
+  <a class="brand" href="/" aria-label="NxTGen DeCrypt — home"><img src="/assets/logo.png" alt="NxTGen DeCrypt" width="98" height="30"></a>
+  <div class="nav-cta"><a class="btn btn-sm btn-signin" href="/">Home</a><a class="btn btn-primary btn-sm" href="/overview/">Launch Terminal</a></div>
+</div></header>
+<main class="page"><div class="wrap">
+<h1>Documentation</h1>
+
+<p class="meta">Last updated September 28, 2026</p>
+<p class="lead">A practical guide to what each part of the terminal does and how results are calculated.</p>
+<h2>Overview</h2>
+<p>The Overview page shows market status (exchanges connected, markets loaded, cycles checked, profitable opportunities, best opportunity and scanner state), a live ticker and market movers. <strong>Run Full Scan</strong> runs the triangular and cross-exchange scanners together. A scan also runs automatically when the page loads.</p>
+<h2>Supported exchanges</h2>
+<p>Bitget, Binance, Bybit, MEXC and Gate.io. Public market data for all five is fetched through the app's market-data backend, which returns one merged, briefly cached response. If that backend is unreachable, the app falls back to calling exchanges directly from your browser.</p>
+<h2>Triangular Arbitrage</h2>
+<p>Finds three-leg cycles on one exchange that start and end in the same anchor currency (USDT by default; USDC, BTC, ETH, BNB or all are available). Controls include exchange, anchor currency, taker fee per leg (default 0.10%), minimum profit filter, minimum 24h volume, number of results and a live-scan interval. By default the scan uses live bid/ask prices and subtracts your fee assumption. A "Theoretical (CLI-style)" option uses last price with no fee, which is not realistic and shows larger numbers.</p>
+<h2>Cross-Exchange</h2>
+<p>Compares the same asset across exchanges and lists the buy venue, sell venue, estimated final amount for your chosen notional, how long the gap has been open, liquidity level and net profit after the taker fee. Advanced filters cover minimum volume, liquidity, window, quote asset, per-exchange toggles and a Bitget deposit/withdraw confirmation filter.</p>
+<h2>Autotrade &amp; Futures</h2>
+<p>Includes the AI Futures Engine with Live/Demo, Paper and Backtest modes and several strategies. Live and Demo trading run from your browser tab while it is open and place orders only after you connect keys with trading permission and explicitly start them. Paper and Backtest do not place orders.</p>
+<h2>Utilities &amp; Tools</h2>
+<p>Paper trading and trading bots for testing ideas without risking capital.</p>
+<h2>API Keys</h2>
+<p>Add exchange API keys on the <a href="/api-keys/">API Keys</a> page. Connecting runs a read-only balance check through the verification proxy. Bitget additionally needs the API passphrase. Keys are stored in your browser's local storage on your device. For signing, they are sent to the proxy, which by its documentation holds them in memory for a single request and does not persist or log them.</p>
+<div class="callout"><p><strong>Recommended key setup:</strong> enable only the permissions you need, never enable withdrawals, and use your exchange's IP allow-list where available. Exchange IP restrictions can block orders routed through a hosted proxy.</p></div>
+<h2>Limits</h2>
+<p>Displayed spreads and returns are estimates at the moment of a scan. Prices move, orders can slip and fees apply. Nothing here is financial advice.</p>
+
+</div></main>
+<footer class="foot"><div class="wrap">
+  <div class="foot-grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">
+    <div><h4>Product</h4><ul><li><a href="/">Overview</a></li><li><a href="/overview/">Terminal</a></li><li><a href="/docs/">Documentation</a></li></ul></div>
+    <div><h4>Follow</h4><ul><li><a class="social" href="https://x.com/nxtgen_decrypt" target="_blank" rel="noopener noreferrer" aria-label="NxTGen DeCrypt on X (opens in a new tab)"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false" style="fill:currentColor;stroke:none;width:16px;height:16px;margin:0"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg><span>@nxtgen_decrypt</span></a></li></ul></div>
+    <div><h4>Company</h4><ul><li><a href="/about/">About</a></li><li><a href="/contact/">Contact</a></li><li><a href="/terms/">Terms</a></li><li><a href="/privacy/">Privacy</a></li></ul></div>
+  </div>
+  <div class="legal"><span>© 2026 NxTGen DeCrypt. All rights reserved.</span><span>Market data and opportunity calculations are informational and do not constitute financial advice.</span></div>
+</div></footer>
+</body>
+</html>

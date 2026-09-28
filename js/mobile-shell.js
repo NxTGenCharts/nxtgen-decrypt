@@ -34,7 +34,7 @@ const icon = (name) => `<svg class="m-ic" viewBox="0 0 24 24" aria-hidden="true"
 
 // Order here is the bottom-bar order (Trade sits in the raised centre slot).
 const TABS = [
-  { label: 'Home',       href: '/',                     icon: 'home' },
+  { label: 'Home',       href: '/overview/',                  icon: 'home' },
   { label: 'Triangular', href: '/triangular-arbitrage/', icon: 'triangle' },
   { label: 'Trade',      href: '/autotrade-futures/',   icon: 'bolt', center: true },
   { label: 'Cross',      href: '/cross-arbitrage/',     icon: 'swap' },

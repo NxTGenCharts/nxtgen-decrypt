@@ -3,7 +3,7 @@
   "short_name": "NxTGen",
   "description": "Real-time cross-market arbitrage scanner, autotrade and AI futures engine.",
   "id": "/",
-  "start_url": "/?source=pwa",
+  "start_url": "/overview/?source=pwa",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",

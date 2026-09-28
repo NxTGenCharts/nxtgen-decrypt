@@ -1,278 +1,188 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="no-js">
 <head>
-<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<title>NxTGen DeCrypt — Arbitrage Terminal</title>
+<title>NxTGen DeCrypt — Real-Time Crypto Arbitrage Intelligence</title>
+<meta name="description" content="Scan crypto markets, identify arbitrage opportunities and analyze cross-exchange price discrepancies with NxTGen DeCrypt.">
+<link rel="canonical" href="https://nxtgendecrypt.site/">
+<meta name="theme-color" content="#08090a">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="NxTGen DeCrypt">
+<meta property="og:title" content="NxTGen DeCrypt — Real-Time Crypto Arbitrage Intelligence">
+<meta property="og:description" content="Scan crypto markets, identify arbitrage opportunities and analyze cross-exchange price discrepancies.">
+<meta property="og:url" content="https://nxtgendecrypt.site/">
+<meta property="og:image" content="https://nxtgendecrypt.site/icon-512.png">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="NxTGen DeCrypt — Real-Time Crypto Arbitrage Intelligence">
+<meta name="twitter:description" content="Scan crypto markets, identify arbitrage opportunities and analyze cross-exchange price discrepancies.">
+<meta name="twitter:image" content="https://nxtgendecrypt.site/icon-512.png">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/favicon.ico" sizes="any">
-<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
-<link rel="icon" href="/favicon-16.png" type="image/png" sizes="16x16">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192">
-<link rel="icon" href="/icon-512.png" type="image/png" sizes="512x512">
-<meta name="theme-color" content="#f0b429">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="NxTGen">
-<meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="stylesheet" href="/css/main.css">
-<link rel="stylesheet" href="/css/components.css">
-<link rel="stylesheet" href="/css/responsive.css">
-<link rel="stylesheet" href="/css/futures.css">
-<link rel="stylesheet" href="/css/mobile-app.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap">
+<link rel="stylesheet" href="/css/landing.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"SoftwareApplication","name":"NxTGen DeCrypt","applicationCategory":"FinanceApplication","operatingSystem":"Web","url":"https://nxtgendecrypt.site/","description":"Real-time cross-market crypto arbitrage scanner."},{"@type":"FAQPage","mainEntity":[{"@type":"Question","name":"What is NxTGen DeCrypt?","acceptedAnswer":{"@type":"Answer","text":"NxTGen DeCrypt is a browser-based arbitrage terminal. It loads market data from supported exchanges, scans for triangular and cross-exchange price discrepancies, and shows the numbers behind each opportunity. It also includes an Autotrade & Futures section and utilities such as paper trading."}},{"@type":"Question","name":"What is crypto arbitrage?","acceptedAnswer":{"@type":"Answer","text":"Arbitrage means looking for the same asset, or a closed loop of assets, priced inconsistently across markets. Any gap has to be large enough to cover trading fees, slippage and latency to be worth acting on, and gaps can close quickly."}},{"@type":"Question","name":"How does triangular arbitrage work?","acceptedAnswer":{"@type":"Answer","text":"A triangular cycle starts and ends in the same currency and passes through three trading pairs on one exchange, for example USDT → BTC → ETH → USDT. If multiplying the three rates, after fees, returns more than you started with, the cycle shows a positive result on paper."}},{"@type":"Question","name":"What is cross-exchange arbitrage?","acceptedAnswer":{"@type":"Answer","text":"It compares the price of the same pair on different exchanges and highlights the spread between them. Acting on it involves real-world constraints such as balances on each exchange, transfer time, and withdrawal and trading fees."}},{"@type":"Question","name":"Which exchanges are supported?","acceptedAnswer":{"@type":"Answer","text":"Bitget, Binance, Bybit, MEXC and Gate.io. Public market data is loaded from all five. Connecting your own API keys is available per exchange from the API Keys page; Bitget also requires an API passphrase."}},{"@type":"Question","name":"Does DeCrypt execute trades automatically?","acceptedAnswer":{"@type":"Answer","text":"Scanning and opportunity display are informational and never place orders. Autotrade & Futures can place orders, but only after you connect keys with trading permission and explicitly start it, and it runs from your open browser tab. You can also review opportunities and trade manually."}},{"@type":"Question","name":"Do I need exchange API keys?","acceptedAnswer":{"@type":"Answer","text":"Not to scan markets; public market data does not require keys. Keys are only needed for features that read your balance or place orders."}},{"@type":"Question","name":"Can I use read-only API keys?","acceptedAnswer":{"@type":"Answer","text":"Yes for connecting and verifying an account, which only reads your balance. To place orders through Autotrade or Futures, the key needs trading permission. Withdrawal permission is never needed, so leave it off."}},{"@type":"Question","name":"Does DeCrypt guarantee profits?","acceptedAnswer":{"@type":"Answer","text":"No. Displayed spreads and returns are estimates from the data at the moment of the scan. Prices move, orders can slip, and fees apply. Nothing here is financial advice."}},{"@type":"Question","name":"How are arbitrage opportunities calculated?","acceptedAnswer":{"@type":"Answer","text":"Triangular cycles chain the three legs using live bid and ask prices, then subtract a taker fee per leg (0.10% by default, adjustable in the scanner). Cross-exchange results compare quotes for the same pair across exchanges and show the spread. Treat every result as an estimate to verify before acting."}}]}]}</script>
 </head>
 <body>
-<div class="wrap">
-
-  <header class="term-header">
-    <button class="nav-toggle" id="navToggleBtn" type="button" aria-expanded="false" aria-controls="termNav" aria-label="Toggle navigation menu"><span class="bar"></span></button>
-    <div class="brand-block">
-      <img class="logo-img" alt="NxTGen DeCrypt" src="/assets/logo.png">
-      <div class="brand-copy">
-        <div class="brand-row">
-          <span class="product-name">Arbitrage Terminal</span>
-        </div>
-        <div class="sub">Real-time cross-market intelligence</div>
-      </div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-tri" viewBox="0 0 24 24"><path d="M12 5l8 13H4z"/><circle cx="12" cy="5" r="1.6"/><circle cx="20" cy="18" r="1.6"/><circle cx="4" cy="18" r="1.6"/></symbol>
+<symbol id="i-swap" viewBox="0 0 24 24"><path d="M7 7h13M16 3l4 4-4 4M17 17H4M8 13l-4 4 4 4"/></symbol>
+<symbol id="i-scan" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><path d="M12 12l6-6"/></symbol>
+<symbol id="i-bars" viewBox="0 0 24 24"><path d="M4 20v-6M10 20V6M16 20v-10M22 20H2"/></symbol>
+<symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></symbol>
+<symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></symbol>
+<symbol id="i-wrench" viewBox="0 0 24 24"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12l5 5 9-10"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></symbol>
+<symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></symbol>
+<symbol id="i-hand" viewBox="0 0 24 24"><path d="M12 3v10M5 9l7 7 7-7M5 21h14"/></symbol>
+</defs></svg>
+<header class="nav" id="nav">
+  <div class="wrap">
+    <a class="brand" href="#overview" aria-label="NxTGen DeCrypt — home"><img src="/assets/logo.png" alt="NxTGen DeCrypt" width="98" height="30"></a>
+    <nav aria-label="Primary"><ul class="nav-links" id="navLinks"><li><a href="#overview">Overview</a></li><li><a href="#features">Features</a></li><li><a href="#how-it-works">How It Works</a></li><li><a href="#arbitrage">Arbitrage</a></li><li><a href="#exchanges">Exchanges</a></li><li><a href="#faq">FAQ</a></li></ul></nav>
+    <div class="nav-cta">
+      <a class="btn btn-primary btn-sm" href="/overview/">Launch Terminal</a>
+      <button class="burger" id="burger" type="button" aria-expanded="false" aria-controls="navLinks" aria-label="Toggle navigation menu"><span></span></button>
     </div>
-    <div class="status-cluster">
-      <div class="live-pill">
-        <span class="dot live" id="statusDot"></span>
-        <span id="statusText">connected</span>
-      </div>
-      <div class="exchange-badges" role="group" aria-label="Exchange connection status">
-        <span class="xbadge" id="badgeBitget" data-state="idle" title="Updates after each scan that queries Bitget"><span class="xbadge-dot"></span>BITGET</span>
-        <span class="xbadge" id="badgeBinance" data-state="idle" title="Updates after each scan that queries Binance"><span class="xbadge-dot"></span>BINANCE</span>
-        <span class="xbadge" id="badgeBybit" data-state="idle" title="Updates after each scan that queries Bybit"><span class="xbadge-dot"></span>BYBIT</span>
-        <span class="xbadge" id="badgeMexc" data-state="idle" title="Updates after each scan that queries MEXC"><span class="xbadge-dot"></span>MEXC</span>
-        <span class="xbadge" id="badgeGateio" data-state="idle" title="Updates after each scan that queries Gate.io"><span class="xbadge-dot"></span>GATE.IO</span>
-      </div>
-      <span class="last-update" id="lastUpdate">Last update — awaiting first scan</span>
-    </div>
-  </header>
-
-  <nav class="term-nav" id="termNav">
-    <a class="navtab active" href="/" aria-current="page"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-layout-dashboard"/></svg></span>Overview</a>
-    <a class="navtab" href="/triangular-arbitrage/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-triangle-nodes"/></svg></span>Triangular Arbitrage</a>
-    <a class="navtab" href="/cross-arbitrage/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-arrow-left-right"/></svg></span>Cross-Exchange</a>
-    <a class="navtab" href="/autotrade-futures/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-zap"/></svg></span>Autotrade &amp; Futures</a>
-    <a class="navtab" href="/utilities-tools/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-wrench"/></svg></span>Utilities &amp; Tools</a>
-    <a class="navtab" href="/api-keys/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-key"/></svg></span>API Keys</a>
-  </nav>
-
-<div class="panel active" id="panelOverview">
-    <div class="ov-head">
-      <h2>Market Status</h2>
-      <button class="primary ghost" id="ovRunBtn"><span class="btn-spinner"></span><span class="btn-label">Run Full Scan</span></button>
-    </div>
-    <div class="ov-grid">
-      <div class="ov-card"><span class="ov-label">Exchanges Connected</span><span class="ov-value" id="ovExchanges">0 / 3</span></div>
-      <div class="ov-card"><span class="ov-label">Markets Loaded</span><span class="ov-value" id="ovMarkets">—</span></div>
-      <div class="ov-card"><span class="ov-label">Cycles Checked</span><span class="ov-value" id="ovCycles">—</span></div>
-      <div class="ov-card"><span class="ov-label">Profitable Opportunities</span><span class="ov-value" id="ovProfitable">—</span></div>
-      <div class="ov-card ov-highlight"><span class="ov-label">Best Opportunity</span><span class="ov-value" id="ovBest">—</span></div>
-      <div class="ov-card"><span class="ov-label">Scanner Status</span><span class="ov-value" id="ovStatus">IDLE</span></div>
-    </div>
-    <!-- Mobile-only Home widgets (hidden on desktop; see css/mobile-app.css).
-         Icons are filled in by js/mobile-shell.js from the data-icon names. -->
-    <div class="m-only m-quick" role="navigation" aria-label="Quick actions">
-      <a class="m-qa" href="/triangular-arbitrage/"><span class="m-qa-ic" data-icon="triangle"></span><span>Triangular</span></a>
-      <a class="m-qa" href="/cross-arbitrage/"><span class="m-qa-ic" data-icon="swap"></span><span>Cross-Exchange</span></a>
-      <a class="m-qa" href="/autotrade-futures/#auto"><span class="m-qa-ic" data-icon="wallet"></span><span>Autotrade</span></a>
-      <a class="m-qa" href="/autotrade-futures/#futures"><span class="m-qa-ic" data-icon="diamond"></span><span>Futures Engine</span></a>
-      <a class="m-qa" href="/utilities-tools/#trading-bots"><span class="m-qa-ic" data-icon="bot"></span><span>Trading Bots</span></a>
-      <a class="m-qa" href="/api-keys/"><span class="m-qa-ic" data-icon="key"></span><span>API Keys</span></a>
-      <button class="m-qa is-green" type="button" data-m-action="scan"><span class="m-qa-ic" data-icon="refresh"></span><span>Run Scan</span></button>
-      <button class="m-qa" type="button" data-m-install><span class="m-qa-ic" data-icon="download"></span><span>Install App</span></button>
-    </div>
-    <div class="m-ticker" id="mTicker" hidden aria-label="Market ticker"><div class="m-ticker-track" id="mTickerTrack"></div></div>
-
-    <div class="ov-summary">
-      <div class="ov-block">
-        <div class="ov-block-title">Triangular Arbitrage</div>
-        <div class="ov-block-body" id="ovTriSummary">Waiting for the first scan — this runs automatically on page load.</div>
-      </div>
-      <div class="ov-block">
-        <div class="ov-block-title">Cross-Exchange</div>
-        <div class="ov-block-body" id="ovXSummary">No scan run yet. Open the Cross-Exchange tab and click Scan Markets, or use Run Full Scan above.</div>
-      </div>
-    </div>
-    <section class="m-movers" id="mMovers" aria-label="Market movers">
-      <div class="m-movers-head"><h3>Market Movers</h3><small>Spot · 24h · live</small></div>
-      <div id="mMoversList"><div class="m-skel"></div><div class="m-skel"></div><div class="m-skel"></div><div class="m-skel"></div><div class="m-skel"></div><div class="m-skel"></div><div class="m-skel"></div><div class="m-skel"></div></div>
-    </section>
   </div>
+</header>
 
-  <!-- Hidden helper copies: not shown, but give runScan()/runXScan() the
-       input fields and output containers they expect so Overview's
-       dashboard (and Run Full Scan / auto-scan-on-load) work without
-       duplicating scan logic. See js/app.js. -->
-<div class="panel" id="panelTri">
-    <div class="controls">
-      <div class="field">
-        <label for="exchange">Exchange</label>
-        <select id="exchange" title="Which exchange's order book to scan">
-          <option value="ALL">All 5 (best across books)</option>
-          <option value="bitget">Bitget</option>
-          <option value="binance">Binance</option>
-          <option selected value="bybit">Bybit</option>
-          <option value="mexc">MEXC</option>
-          <option value="gateio">Gate.io</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="anchor">Start / anchor currency</label>
-        <select id="anchor" title="The currency each cycle starts and ends in">
-          <option value="ALL">All currencies</option>
-          <option selected value="USDT">USDT</option>
-          <option value="USDC">USDC</option>
-          <option value="BTC">BTC</option>
-          <option value="ETH">ETH</option>
-          <option value="BNB">BNB</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="fee">Taker fee / leg (%)</label>
-        <input id="fee" type="number" min="0" max="1" step="0.01" value="0.10" title="Taker fee charged per leg by your exchange tier">
-      </div>
-      <div class="field">
-        <label for="cliMode" title="Reproduces the CLI scanner's math exactly: one last-traded price used for both legs (no bid/ask spread), and no fee subtracted. This is why that script shows bigger positive numbers — it isn't a more realistic scan, it's ignoring two real costs. Off (default), the app uses live bid/ask plus your fee assumption above, which is the realistic read.">
-          Theoretical (CLI-style)
-        </label>
-        <label class="toggle-check">
-          <input id="cliMode" type="checkbox" checked>
-          <span>last price, no fee</span>
-        </label>
-      </div>
-      <div class="field">
-        <label for="minProfit">Min profit filter (%)</label>
-        <input id="minProfit" type="number" min="-5" max="5" step="0.01" value="0.05" title="Only show cycles at or above this net profit">
-      </div>
-      <div class="field">
-        <label for="minVolume">Min 24h volume (quote ccy)</label>
-        <input id="minVolume" type="number" min="0" step="1000" value="10000" title="Filters out any leg whose 24h quote-currency volume is below this. Thin markets can show a spread that looks profitable on paper but can't really be filled — same filter the CLI scanner uses.">
-      </div>
-      <div class="field">
-        <label for="resultsLimit">Results to show</label>
-        <input id="resultsLimit" type="number" min="5" max="50" step="1" value="20" title="How many cycles to list, best first. 5–50.">
-      </div>
-      <div class="field">
-        <label for="scanInterval">Live interval (s)</label>
-        <input id="scanInterval" type="number" min="5" max="300" step="1" value="20" title="How often Live Scan re-scans while running">
-      </div>
-      <div class="btn-row">
-        <button class="primary" id="scanBtn"><span class="btn-spinner"></span><span class="btn-label">Scan Markets</span></button>
-        <button class="primary ghost live-toggle" id="liveBtn" title="Continuously re-scan and track which cycles are newly opened, still open, or have closed since the last pass — same NEW/OPEN/CLOSED tracking as the CLI scanner">
-          <span class="dot"></span><span class="btn-label">Start Live Scan</span>
-        </button>
-      </div>
-      <div class="stats-row">
-        <div class="stat"><span class="n" id="statPairs">—</span><span class="l">Pairs loaded</span></div>
-        <div class="stat"><span class="n" id="statCycles">—</span><span class="l">Cycles checked</span></div>
-        <div class="stat"><span class="n" id="statHits">—</span><span class="l">Profitable</span></div>
-      </div>
+<main>
+<section class="hero" id="overview">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow">Real-time cross-market intelligence</p>
+      <h1>Find the spread.<br><span>Capture the opportunity.</span></h1>
+      <p class="lead">NxTGen DeCrypt continuously scans cryptocurrency markets to identify pricing inefficiencies, arbitrage opportunities and cross-market discrepancies before they disappear.</p>
+      <div class="cta-row"><a class="btn btn-primary" href="/overview/">Launch Terminal <span class="arr" aria-hidden="true">→</span></a><a class="btn" href="#features">Explore Features</a></div>
+      <div class="live"><span class="pulse" aria-hidden="true"></span><span><b>TERMINAL PREVIEW</b> · illustrative demo values</span></div>
     </div>
-
-    <div id="messages"></div>
-    <div class="closed-strip" id="closedStrip"></div>
-    <div class="grid" id="results">
-      <div class="skeleton-row"></div>
-      <div class="skeleton-row"></div>
-      <div class="skeleton-row"></div>
+    <div class="term reveal" id="heroTerm" role="img" aria-label="Preview of the arbitrage terminal showing demo opportunities">
+      <div class="term-scan" aria-hidden="true"></div>
+      <div class="term-bar"><span class="l"><span class="pulse"></span>Scanner · running</span><span class="tag demo">Demo data</span></div>
+      <div class="stats"><div class="stat"><small>Markets</small><strong>530</strong></div><div class="stat"><small>Cycles</small><strong id="demoCycles">122</strong></div><div class="stat"><small>Opportunities</small><strong>43</strong></div><div class="stat"><small>Best</small><strong class="up">+0.67%</strong></div></div>
+      <div class="rows"><div class="row hd"><span>Pair</span><span>Route</span><span>Profit</span><span>Volume</span><span>Status</span></div><div class="row" data-demo-row><span class="pair">BTC/USDT</span><span class="route">Binance → Bybit</span><span class="pct" data-v="0.42">+0.42%</span><span class="dim">$48.2M</span><span class="chip">READY</span></div><div class="row" data-demo-row><span class="pair">SOL/USDT</span><span class="route">MEXC → Binance</span><span class="pct" data-v="0.67">+0.67%</span><span class="dim">$9.6M</span><span class="chip">READY</span></div><div class="row" data-demo-row><span class="pair">ETH/USDT</span><span class="route">Bybit → Gate.io</span><span class="pct" data-v="0.31">+0.31%</span><span class="dim">$22.1M</span><span class="chip">READY</span></div><div class="row" data-demo-row><span class="pair">XRP/USDT</span><span class="route">Bitget → Bybit</span><span class="pct" data-v="0.18">+0.18%</span><span class="dim">$6.4M</span><span class="chip watch">WATCH</span></div></div>
     </div>
-
   </div>
-<div class="panel" id="panelX">
-    <div class="controls">
-      <div class="field">
-        <label for="xAmount">Amount (USDT)</label>
-        <input id="xAmount" type="number" min="1" step="10" value="100" title="Notional amount used to size the final-amount column">
-      </div>
-      <div class="field">
-        <label for="xFee">Taker fee / leg (%)</label>
-        <input id="xFee" type="number" min="0" max="1" step="0.01" value="0.10" title="Taker fee charged per leg by your exchange tier">
-      </div>
-      <div class="field">
-        <label for="xMinProfit">Profit threshold (%)</label>
-        <input id="xMinProfit" type="number" min="-5" max="10" step="0.01" value="0.10" title="Only show assets at or above this net spread">
-      </div>
-      <div class="field">
-        <label for="xResultsLimit">Results to show</label>
-        <input id="xResultsLimit" type="number" min="5" max="50" step="1" value="20" title="How many gaps to list, best first. 5–50.">
-      </div>
-      <div class="btn-row">
-        <button class="primary" id="xScanBtn"><span class="btn-spinner"></span><span class="btn-label">Scan Markets</span></button>
-      </div>
-      <div class="stats-row">
-        <div class="stat"><span class="n" id="xStatAssets">—</span><span class="l">Assets compared</span></div>
-        <div class="stat"><span class="n" id="xStatBest">—</span><span class="l">Best profit</span></div>
-        <div class="stat"><span class="n" id="xStatAvg">—</span><span class="l">Avg profit</span></div>
-      </div>
-    </div>
+</section>
 
-    <div class="xfilters-row">
-      <button class="primary ghost" id="xFiltersToggleBtn" type="button" aria-expanded="false" aria-controls="xFiltersPanel">Advanced Filters <svg class="icon btn-chev" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-chevron-down"/></svg></button>
-      <span class="xfilters-summary" id="xFiltersSummary"></span>
-    </div>
-    <div class="xfilters" id="xFiltersPanel" hidden>
-      <div class="field">
-        <label for="xFilterMinVolume">Min 24h volume (quote ccy)</label>
-        <input id="xFilterMinVolume" type="number" min="0" step="1000" value="20000" title="Drops any match where either leg's 24h quote volume is below this — the usual reason a huge % gap turns out to be unfillable noise on a thin market">
-      </div>
-      <div class="field">
-        <label for="xFilterLiquidity">Min liquidity</label>
-        <select id="xFilterLiquidity" title="Only show rows at or above this liquidity level">
-          <option value="any">Any</option>
-          <option value="medium">Medium &amp; above</option>
-          <option value="high">High only</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="xFilterWindow">Window</label>
-        <select id="xFilterWindow" title="Filter by how long this session has continuously seen the gap">
-          <option value="any">Any</option>
-          <option value="fresh">Just opened only</option>
-          <option value="aged">Aged only</option>
-        </select>
-      </div>
-      <div class="field">
-        <label for="xFilterQuote">Quote asset</label>
-        <select id="xFilterQuote" title="Restrict to a specific quote currency">
-          <option value="any">Any</option>
-          <option value="usdt">USDT only</option>
-        </select>
-      </div>
-      <label class="toggle-check" title="Only show routes where Bitget's public data confirms withdraw is enabled on the buy exchange and deposit is enabled on the sell exchange">
-        <input type="checkbox" id="xFilterDwVerified"> D/W confirmed only
-      </label>
-      <label class="toggle-check"><input type="checkbox" id="xFilterExBitget" checked> Bitget</label>
-      <label class="toggle-check"><input type="checkbox" id="xFilterExBinance" checked> Binance</label>
-      <label class="toggle-check"><input type="checkbox" id="xFilterExBybit" checked> Bybit</label>
-      <label class="toggle-check"><input type="checkbox" id="xFilterExMexc" checked> MEXC</label>
-      <label class="toggle-check"><input type="checkbox" id="xFilterExGateio" checked> Gate.io</label>
-    </div>
+<div class="strip"><div class="wrap"><div><b>Real-time</b>market data</div><div><b>Multi-exchange</b>intelligence</div><div><b>Triangular</b>arbitrage</div><div><b>Cross-market</b>scanning</div><div><b>24/7</b>monitoring</div></div></div>
 
-    <div id="xMessages"></div>
-    <div class="xrow head">
-      <div></div><div>Asset</div><div>Buy on</div><div>Sell on</div><div>Final amount</div>
-      <div>Window</div><div>Liquidity</div><div style="text-align:right;">Profit</div>
-    </div>
-    <div class="xresults-wrap" id="xResults">
-      <div class="skeleton-row"></div>
-      <div class="skeleton-row"></div>
-      <div class="skeleton-row"></div>
-    </div>
-
+<section id="problem"><div class="wrap">
+  <div class="sec-head reveal"><p class="eyebrow">The problem</p><h2>Markets move fast.<br>Inefficiencies move faster.</h2>
+  <p class="lead">Crypto prices can temporarily diverge across exchanges, trading pairs and market routes. Manually monitoring hundreds of markets makes it hard to spot these gaps consistently. NxTGen DeCrypt automates the scanning so you can focus on evaluating opportunities rather than searching for them.</p></div>
+  <div class="grid g2 vs">
+    <div class="card before reveal"><span class="k">Before</span><h3>Manual monitoring</h3><ul><li><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-x"/></svg>Multiple exchanges</li><li><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-x"/></svg>Hundreds of pairs</li><li><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-x"/></svg>Constant refreshing</li><li><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-x"/></svg>Slow opportunity discovery</li><li><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-x"/></svg>Difficult route comparison</li></ul></div>
+    <div class="card after reveal"><span class="k">After</span><h3>NxTGen DeCrypt</h3><ul><li><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Automated scanning</li><li><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Cross-market analysis</li><li><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Real-time opportunities</li><li><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Profit and spread calculations</li><li><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-check"/></svg>Centralized terminal</li></ul></div>
   </div>
-</div>
+</div></section>
 
-<script type="module" src="/js/app.js"></script>
+<section id="features"><div class="wrap">
+  <div class="sec-head reveal"><p class="eyebrow">Platform</p><h2>One terminal.<br>Multiple arbitrage strategies.</h2></div>
+  <div class="grid g3"><article class="card reveal f-wide"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-tri"/></svg><h3>Triangular Arbitrage</h3><p>Identify potential price inefficiencies across three trading pairs within the same exchange.</p><div class="route-viz" aria-label="Example route"><span class="node">USDT</span><i>→</i><span class="node">BTC</span><i>→</i><span class="node">ETH</span><i>→</i><span class="node">USDT</span></div></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-swap"/></svg><h3>Cross-Exchange Arbitrage</h3><p>Compare prices for the same pair across exchanges and see the spread.</p><div class="quotes" aria-label="Example quotes (demo)"><div class="quote"><small>BINANCE · BTC/USDT</small><b>$83,000.00</b></div><div class="quote"><small>BYBIT · BTC/USDT</small><b>$83,420.00</b></div><div class="quote-spread">SPREAD +0.51% · DEMO</div></div></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-scan"/></svg><h3>Real-Time Market Scanning</h3><p>Scan loaded markets on demand or automatically on page load, and surface opportunities as prices change.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-bars"/></svg><h3>Opportunity Ranking</h3><p>Sort results by the metrics that matter: spread, estimated return after fees, volume and market availability.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chart"/></svg><h3>Market Intelligence</h3><p>Monitor price, 24h change and volume for the largest markets, with a live-updating ticker and market movers.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-bolt"/></svg><h3>Autotrade &amp; Futures</h3><p>An AI Futures Engine with Live/Demo, Paper and Backtest modes. Order placement requires your own exchange API keys and is only enabled when you start it.</p><p class="note">Runs from your browser tab while it is open.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-wrench"/></svg><h3>Utilities &amp; Tools</h3><p>Paper trading and trading bots alongside the scanners, so you can test ideas without risking capital.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-key"/></svg><h3>API Integration</h3><p>Connect exchange API keys, verify access with a read-only balance check, and manage credentials in one place. Optional, experimental AI signal provider check.</p></article></div>
+</div></section>
 
-<script type="module" src="/js/mobile-shell.js"></script>
+<section id="how-it-works"><div class="wrap">
+  <div class="sec-head reveal"><p class="eyebrow">How it works</p><h2>From market data to decision.</h2></div>
+  <div class="steps reveal">
+    <div class="step"><div class="n">01</div><h3>CONNECT</h3><p>Add exchange API keys to unlock balances and trading. Scanning public markets needs no keys.</p></div>
+    <div class="step"><div class="n">02</div><h3>SCAN</h3><p>NxTGen DeCrypt continuously analyzes available markets.</p></div>
+    <div class="step"><div class="n">03</div><h3>IDENTIFY</h3><p>Potential arbitrage routes and pricing discrepancies are surfaced.</p></div>
+    <div class="step"><div class="n">04</div><h3>EXECUTE</h3><p>Review the opportunity and execute manually or through supported automation.</p></div>
+  </div>
+</div></section>
 
+<section id="arbitrage"><div class="wrap">
+  <div class="sec-head reveal"><p class="eyebrow">Triangular arbitrage</p><h2>Three legs. One closed loop.</h2>
+  <p class="lead">Start and end in the same currency. If the loop returns more than it cost after fees, the cycle is flagged.</p></div>
+  <div class="arb">
+    <div class="card reveal"><span class="k">Route</span><div class="legs">
+      <div class="leg"><span class="n">1</span><span>BTC/USDT<br><em>Buy BTC with USDT</em></span><span class="dim">USDT → BTC</span></div>
+      <div class="leg"><span class="n">2</span><span>ETH/BTC<br><em>Buy ETH with BTC</em></span><span class="dim">BTC → ETH</span></div>
+      <div class="leg"><span class="n">3</span><span>ETH/USDT<br><em>Sell ETH for USDT</em></span><span class="dim">ETH → USDT</span></div></div></div>
+    <div class="card reveal"><span class="k">Estimate <span class="tag demo" style="margin-left:8px">Demo</span></span><div class="calc">
+      <div><span>Starting capital</span><span>$10,000.00</span></div>
+      <div><span>Gross cycle return (+0.62%)</span><span class="up">+$62.40</span></div>
+      <div><span>Fees (3 legs × 0.10% taker)</span><span class="down">−$30.00</span></div>
+      <div class="tot"><span>Net opportunity</span><span class="up">+$32.40</span></div></div>
+      <p class="note">Illustrative numbers only, using the scanner's default 0.10% taker fee per leg. Real results depend on live prices, liquidity, slippage and your fee tier. Not a promise of profit.</p></div>
+  </div>
+</div></section>
+
+<section id="cross"><div class="wrap">
+  <div class="sec-head reveal"><p class="eyebrow">Cross-exchange</p><h2>Identify price discrepancies across markets before they disappear.</h2></div>
+  <div class="card reveal" style="padding:0"><div class="scroll-x"><table class="xt"><caption class="tag demo" style="margin:14px 16px;caption-side:top;text-align:left">Demo prices</caption>
+    <thead><tr><th scope="col">Pair</th><th scope="col">Binance</th><th scope="col">Bybit</th><th scope="col">MEXC</th><th scope="col">Spread</th></tr></thead><tbody>
+    <tr><td>BTC/USDT</td><td class="lo">83,020</td><td class="hi">83,410</td><td>83,180</td><td class="sp">0.47%</td></tr>
+    <tr><td>ETH/USDT</td><td class="lo">2,645</td><td class="hi">2,659</td><td>2,651</td><td class="sp">0.53%</td></tr>
+    <tr><td>SOL/USDT</td><td class="lo">118.10</td><td class="hi">118.76</td><td>118.40</td><td class="sp">0.56%</td></tr></tbody></table></div></div>
+</div></section>
+
+<section id="terminal"><div class="wrap">
+  <div class="sec-head reveal"><p class="eyebrow">The product</p><h2>Your market intelligence terminal.</h2>
+  <p class="lead">The same layout you get inside the app: market status, scanner state and market movers in one view. Values below are a static sample.</p></div>
+  <div class="term term-lg reveal">
+    <div class="term-bar"><span class="l"><span class="pulse"></span>Arbitrage Terminal · Overview</span><span class="tag demo">Sample snapshot</span></div>
+    <div class="stats"><div class="stat"><small>Exchanges</small><strong>3 / 5</strong></div><div class="stat"><small>Markets loaded</small><strong>530</strong></div><div class="stat"><small>Cycles checked</small><strong>122</strong></div><div class="stat"><small>Profitable</small><strong>43</strong></div><div class="stat best"><small>Best opportunity</small><strong>+0.42%</strong></div><div class="stat"><small>Scanner</small><strong>IDLE</strong></div></div>
+    <div class="tp-ticker" aria-hidden="true"><div class="tp-track"><span><b>TRX</b>0.3335 <span class="up">+0.00%</span></span><span><b>LINK</b>13.698 <span class="down">-4.59%</span></span><span><b>DOGE</b>0.09277 <span class="down">-4.80%</span></span><span><b>SOL</b>118.31 <span class="down">-2.99%</span></span><span><b>DOT</b>1.215 <span class="down">-4.33%</span></span><span><b>AVAX</b>10.43 <span class="down">-6.58%</span></span><span><b>BTC</b>83,002.00 <span class="down">-1.84%</span></span><span><b>ETH</b>2,645.48 <span class="down">-2.36%</span></span><span><b>TRX</b>0.3335 <span class="up">+0.00%</span></span><span><b>LINK</b>13.698 <span class="down">-4.59%</span></span><span><b>DOGE</b>0.09277 <span class="down">-4.80%</span></span><span><b>SOL</b>118.31 <span class="down">-2.99%</span></span><span><b>DOT</b>1.215 <span class="down">-4.33%</span></span><span><b>AVAX</b>10.43 <span class="down">-6.58%</span></span><span><b>BTC</b>83,002.00 <span class="down">-1.84%</span></span><span><b>ETH</b>2,645.48 <span class="down">-2.36%</span></span></div></div>
+    <div class="movers" aria-label="Market movers (sample)"><div class="mv"><div><b>TRX/USDT</b><span>0.3335</span></div><small class="p">+0.00%</small></div><div class="mv"><div><b>BTC/USDT</b><span>83,002.00</span></div><small class="m">-1.84%</small></div><div class="mv"><div><b>BNB/USDT</b><span>761.18</span></div><small class="m">-2.04%</small></div><div class="mv"><div><b>ETH/USDT</b><span>2,645.48</span></div><small class="m">-2.36%</small></div><div class="mv"><div><b>SOL/USDT</b><span>118.31</span></div><small class="m">-2.99%</small></div><div class="mv"><div><b>XRP/USDT</b><span>1.4756</span></div><small class="m">-3.44%</small></div><div class="mv"><div><b>DOT/USDT</b><span>1.215</span></div><small class="m">-4.33%</small></div><div class="mv"><div><b>LINK/USDT</b><span>13.698</span></div><small class="m">-4.59%</small></div></div>
+  </div>
+  <p style="text-align:center;margin-top:32px"><a class="btn btn-primary" href="/overview/">Open DeCrypt Terminal <span class="arr" aria-hidden="true">→</span></a></p>
+</div></section>
+
+<section id="exchanges"><div class="wrap">
+  <div class="sec-head reveal"><p class="eyebrow">Supported markets</p><h2>Connect your markets.<br>Centralize your intelligence.</h2>
+  <p class="lead">Public market data is loaded from five exchanges. API-key connections are managed from the API Keys page.</p></div>
+  <div class="xchips reveal"><div class="xchip">BITGET</div><div class="xchip">BINANCE</div><div class="xchip">BYBIT</div><div class="xchip">MEXC</div><div class="xchip">GATE.IO</div></div>
+</div></section>
+
+<section id="why"><div class="wrap">
+  <div class="sec-head reveal"><p class="eyebrow">Why DeCrypt</p><h2>Built for traders who think in spreads.</h2></div>
+  <div class="grid g3"><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-scan"/></svg><h3>REAL-TIME</h3><p>Continuous market scanning.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-layers"/></svg><h3>MULTI-MARKET</h3><p>Analyze opportunities across markets.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-bars"/></svg><h3>DATA-FIRST</h3><p>See the numbers behind every opportunity.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chart"/></svg><h3>PROFESSIONAL</h3><p>Built as a trading terminal, not a marketing dashboard.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-sliders"/></svg><h3>CONTROL</h3><p>You decide when and how to execute.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-eye"/></svg><h3>TRANSPARENT</h3><p>Surface the calculations and market conditions behind opportunities.</p></article></div>
+</div></section>
+
+<section id="security"><div class="wrap">
+  <div class="sec-head reveal"><p class="eyebrow">Security &amp; API</p><h2>Your exchange access stays under your control.</h2>
+  <p class="lead">Create keys with the minimum permissions you need. Never enable withdrawals, and use your exchange's IP allow-list where available. Browser storage is convenient, not a vault, so only connect keys on a device you trust.</p></div>
+  <div class="grid g4"><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-key"/></svg><h3>Your keys, your call</h3><p>You enter your own exchange API keys. They are kept in your browser's local storage on your device.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-eye"/></svg><h3>Read-only verification</h3><p>Connecting an exchange only reads your balance. Verification places no orders and makes no withdrawals.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-bolt"/></svg><h3>Trading is opt-in</h3><p>Orders are only placed after you connect keys with trading permission and explicitly start Autotrade or Futures.</p></article><article class="card reveal "><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-lock"/></svg><h3>Signed, not stored</h3><p>Balance and order requests are signed by the app's backend proxy in memory for that single request. Per its documentation, keys are not written to disk, a database or logs.</p></article></div>
+</div></section>
+
+<section id="faq"><div class="wrap">
+  <div class="sec-head reveal" style="text-align:center;margin-inline:auto"><p class="eyebrow" style="justify-content:center">FAQ</p><h2>Frequently asked questions</h2></div>
+  <div class="faq reveal"><div class="q"><button type="button" aria-expanded="false" aria-controls="a0" id="q0"><span>What is NxTGen DeCrypt?</span><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chev"/></svg></button><div class="ans" id="a0" role="region" aria-labelledby="q0"><div><p>NxTGen DeCrypt is a browser-based arbitrage terminal. It loads market data from supported exchanges, scans for triangular and cross-exchange price discrepancies, and shows the numbers behind each opportunity. It also includes an Autotrade &amp; Futures section and utilities such as paper trading.</p></div></div></div><div class="q"><button type="button" aria-expanded="false" aria-controls="a1" id="q1"><span>What is crypto arbitrage?</span><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chev"/></svg></button><div class="ans" id="a1" role="region" aria-labelledby="q1"><div><p>Arbitrage means looking for the same asset, or a closed loop of assets, priced inconsistently across markets. Any gap has to be large enough to cover trading fees, slippage and latency to be worth acting on, and gaps can close quickly.</p></div></div></div><div class="q"><button type="button" aria-expanded="false" aria-controls="a2" id="q2"><span>How does triangular arbitrage work?</span><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chev"/></svg></button><div class="ans" id="a2" role="region" aria-labelledby="q2"><div><p>A triangular cycle starts and ends in the same currency and passes through three trading pairs on one exchange, for example USDT → BTC → ETH → USDT. If multiplying the three rates, after fees, returns more than you started with, the cycle shows a positive result on paper.</p></div></div></div><div class="q"><button type="button" aria-expanded="false" aria-controls="a3" id="q3"><span>What is cross-exchange arbitrage?</span><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chev"/></svg></button><div class="ans" id="a3" role="region" aria-labelledby="q3"><div><p>It compares the price of the same pair on different exchanges and highlights the spread between them. Acting on it involves real-world constraints such as balances on each exchange, transfer time, and withdrawal and trading fees.</p></div></div></div><div class="q"><button type="button" aria-expanded="false" aria-controls="a4" id="q4"><span>Which exchanges are supported?</span><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chev"/></svg></button><div class="ans" id="a4" role="region" aria-labelledby="q4"><div><p>Bitget, Binance, Bybit, MEXC and Gate.io. Public market data is loaded from all five. Connecting your own API keys is available per exchange from the API Keys page; Bitget also requires an API passphrase.</p></div></div></div><div class="q"><button type="button" aria-expanded="false" aria-controls="a5" id="q5"><span>Does DeCrypt execute trades automatically?</span><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chev"/></svg></button><div class="ans" id="a5" role="region" aria-labelledby="q5"><div><p>Scanning and opportunity display are informational and never place orders. Autotrade &amp; Futures can place orders, but only after you connect keys with trading permission and explicitly start it, and it runs from your open browser tab. You can also review opportunities and trade manually.</p></div></div></div><div class="q"><button type="button" aria-expanded="false" aria-controls="a6" id="q6"><span>Do I need exchange API keys?</span><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chev"/></svg></button><div class="ans" id="a6" role="region" aria-labelledby="q6"><div><p>Not to scan markets; public market data does not require keys. Keys are only needed for features that read your balance or place orders.</p></div></div></div><div class="q"><button type="button" aria-expanded="false" aria-controls="a7" id="q7"><span>Can I use read-only API keys?</span><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chev"/></svg></button><div class="ans" id="a7" role="region" aria-labelledby="q7"><div><p>Yes for connecting and verifying an account, which only reads your balance. To place orders through Autotrade or Futures, the key needs trading permission. Withdrawal permission is never needed, so leave it off.</p></div></div></div><div class="q"><button type="button" aria-expanded="false" aria-controls="a8" id="q8"><span>Does DeCrypt guarantee profits?</span><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chev"/></svg></button><div class="ans" id="a8" role="region" aria-labelledby="q8"><div><p>No. Displayed spreads and returns are estimates from the data at the moment of the scan. Prices move, orders can slip, and fees apply. Nothing here is financial advice.</p></div></div></div><div class="q"><button type="button" aria-expanded="false" aria-controls="a9" id="q9"><span>How are arbitrage opportunities calculated?</span><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-chev"/></svg></button><div class="ans" id="a9" role="region" aria-labelledby="q9"><div><p>Triangular cycles chain the three legs using live bid and ask prices, then subtract a taker fee per leg (0.10% by default, adjustable in the scanner). Cross-exchange results compare quotes for the same pair across exchanges and show the spread. Treat every result as an estimate to verify before acting.</p></div></div></div></div>
+</div></section>
+
+<section class="final" id="start"><div class="wrap reveal">
+  <h2 style="font-size:clamp(34px,6vw,64px)">Stop searching.<br>Start scanning.</h2>
+  <p class="lead">Turn fragmented crypto market data into actionable cross-market intelligence.</p>
+  <div class="cta-row"><a class="btn btn-primary" href="/overview/">Launch DeCrypt Terminal <span class="arr" aria-hidden="true">→</span></a><a class="btn" href="#features">Explore the Platform</a></div>
+</div></section>
+</main>
+
+<footer class="foot"><div class="wrap">
+  <div class="foot-grid">
+    <div><a class="brand" href="#overview"><img src="/assets/logo.png" alt="NxTGen DeCrypt" width="91" height="28" loading="lazy"></a><p class="dim" style="margin:0;max-width:30ch">Real-time cross-market intelligence.</p>
+    <a class="social" href="https://x.com/nxtgen_decrypt" target="_blank" rel="noopener noreferrer" aria-label="NxTGen DeCrypt on X (opens in a new tab)"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false" style="fill:currentColor;stroke:none;width:16px;height:16px;margin:0"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg><span>@nxtgen_decrypt</span></a></div>
+    <div><h4>Product</h4><ul><li><a href="#overview">Overview</a></li><li><a href="#features">Features</a></li><li><a href="#arbitrage">Arbitrage</a></li><li><a href="/overview/">Terminal</a></li></ul></div>
+    <div><h4>Terminal</h4><ul><li><a href="/triangular-arbitrage/">Triangular Arbitrage</a></li><li><a href="/cross-arbitrage/">Cross-Exchange</a></li><li><a href="/autotrade-futures/">Autotrade &amp; Futures</a></li><li><a href="/utilities-tools/">Utilities &amp; Tools</a></li></ul></div>
+    <div><h4>Resources</h4><ul><li><a href="/docs/">Documentation</a></li><li><a href="/api-keys/">API Keys</a></li><li><a href="#faq">FAQ</a></li></ul></div>
+    <div><h4>Company</h4><ul><li><a href="/about/">About</a></li><li><a href="/contact/">Contact</a></li><li><a href="/terms/">Terms</a></li><li><a href="/privacy/">Privacy</a></li></ul></div>
+  </div>
+  </div>
+  <div class="legal"><span>© 2026 NxTGen DeCrypt. All rights reserved.</span><span>Market data and opportunity calculations are informational and do not constitute financial advice.</span></div>
+</div></footer>
+<script src="/js/landing.js" defer></script>
 </body>
 </html>
