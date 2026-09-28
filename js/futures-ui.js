@@ -3401,6 +3401,29 @@ async function applyGridRecovery(bot, plan, snap, proxyArgs){
   tradingBotLog(bot, `Recovery add #${addsUsed}/${maxAdds} — added ~${fmtUsd(addUsd)} ${direction} at market (floating drawdown was ${drawdownPct.toFixed(1)}%). Investment now ${fmtUsd(bot.investmentUsd)}.`, false);
 }
 
+// Resolves ONE closed grid cycle's real net P&L from Bybit itself,
+// instead of trusting grid.js's netCycleProfit() estimate. The estimate
+// only ever modeled THIS level's own entry/exit against an assumed
+// maker/maker fee pair — Bybit nets a hedge-mode close against the
+// position's AVERAGE entry and whatever fee tier the fill actually got,
+// so the two numbers can diverge per-row even when their totals agree
+// (see exchangeCheckHtml). This looks the just-filled close order up by
+// its exact orderId in Bybit's own closed-P&L list (already net of real
+// fees) and uses THAT as netUsd when found. Only Bybit is wired up
+// (getBinanceClosedPnlUnsupported server-side covers the rest) and the
+// lookup can occasionally miss if Bybit hasn't indexed the fill yet the
+// instant this runs — both cases fall back to the estimate, clearly
+// tagged via pnlSource so the UI/log can show which one a row got.
+async function resolveGridCyclePnl(proxyArgs, orderId, estimate){
+  if(proxyArgs.exchange !== 'bybit') return { ...estimate, pnlSource: 'estimate' };
+  const resp = await callProxy('/api/futures/grid/closed-pnl', proxyArgs).catch(() => null);
+  const row = resp && resp.ok ? (resp.list || []).find(r => String(r.orderId) === String(orderId)) : null;
+  if(!row) return { ...estimate, pnlSource: 'estimate' };
+  // Bybit's closedPnl is already net of both real fees — don't also
+  // subtract the estimate's modeled fees/slippage/funding on top of it.
+  return { grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: row.closedPnl, avgEntryPrice: row.avgEntryPrice || null, avgExitPrice: row.avgExitPrice || null, pnlSource: 'exchange' };
+}
+
 async function manageGridBotInstance(bot, cred, nowMs){
   const plan = bot.plan;
   const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
@@ -3496,13 +3519,17 @@ async function manageGridBotInstance(bot, cred, nowMs){
     } else if(level.status === 'PENDING_CLOSE' && level.closeOrderId != null && !openIds.has(String(level.closeOrderId))){
       const perLevelUsd = plan.allocationUsd / plan.levelCount;
       const qty = (perLevelUsd * plan.leverage) / level.entryPrice;
-      const pnl = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: level.targetPrice, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
+      const estimate = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: level.targetPrice, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
+      const pnl = await resolveGridCyclePnl(proxyArgs, level.closeOrderId, estimate);
       bot.realizedUsd += pnl.netUsd;
       addTradingBotsRealized(pnl.netUsd);
+      tradingBotLog(bot, `Level ${level.levelIndex} cycle closed — ${fmtUsd(pnl.netUsd)} (${pnl.pnlSource === 'exchange' ? 'Bybit-verified' : 'estimated — Bybit closed P&L not available for this close yet'}).`, false);
       const record = {
         closedAtMs: nowMs, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
         entry: level.entryPrice, exit: level.targetPrice, qty, leverage: plan.leverage,
-        grossUsd: pnl.grossUsd, feesUsd: pnl.feesUsd, fundingUsd: pnl.fundingUsd, slippageUsd: pnl.slippageUsd, netUsd: pnl.netUsd,
+        grossUsd: pnl.grossUsd != null ? pnl.grossUsd : estimate.grossUsd, feesUsd: pnl.feesUsd != null ? pnl.feesUsd : estimate.feesUsd,
+        fundingUsd: pnl.fundingUsd != null ? pnl.fundingUsd : estimate.fundingUsd, slippageUsd: pnl.slippageUsd != null ? pnl.slippageUsd : estimate.slippageUsd,
+        netUsd: pnl.netUsd, pnlSource: pnl.pnlSource,
         confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_CYCLE_TP', durationMin: Math.round((nowMs - level.openedAt) / 60_000),
         gridId: bot.id, gridLevel: level.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
       };
@@ -4340,6 +4367,7 @@ function sbState(){
     recoveryMode: false, recoveryTriggerPct: 15, maxRecoveryAdds: 3, recoverySizeMult: 1.5,
   };
   if(!f.sbDcaForm) f.sbDcaForm = { fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 3, takeProfitPct: 2, stopLossPct: 15, direction: 'LONG' };
+  if(!f.sbBalanceCache) f.sbBalanceCache = {}; // keyed "exchange:mode" — see ensureSbBalanceLoaded
   return f;
 }
 
@@ -4652,6 +4680,54 @@ async function sbRunSymbolSearch(query){
   host.style.display = '';
 }
 
+const SB_BALANCE_REFRESH_TTL_MS = 15_000; // balance moves as bots trade, but this is a "before you commit" readout, not a ticker — no need to hit the exchange on every re-render
+
+// Builds the "Free margin on X: $Y available" line shown above Sizing —
+// same real free-margin read checkAvailableMarginFor already uses to
+// block a deployment that doesn't fit, surfaced BEFORE the person picks
+// Fixed USDT or % of balance, since both need to know what's actually
+// free on the selected Exchange/Network to size sensibly.
+function sbBalanceInfoHtml(){
+  const f = sbState();
+  const exchange = f.sbCreateExchange || 'bybit';
+  const mode = f.liveModeByExchange[exchange] || 'live';
+  const label = `${EXCHANGE_DISPLAY_NAMES[exchange] || exchange} ${mode === 'demo' ? 'Demo' : 'Live'}`;
+  const c = f.sbBalanceCache[`${exchange}:${mode}`];
+  if(!c || c.status === 'loading') return `Free margin on ${label}: reading…`;
+  if(c.status === 'nocred') return `Free margin on ${label}: <span style="color:var(--red);">no verified API key for this exchange/network — add one under API Keys.</span>`;
+  if(c.status === 'error') return `Free margin on ${label}: <span style="color:var(--red);">couldn't read balance.</span> <button type="button" id="sbBalanceRetry" class="primary ghost" style="font-size:10px;padding:1px 7px;margin-left:4px;">Retry</button>`;
+  return `Free margin on ${label}: <strong style="color:var(--ink);">${fmtUsd(c.available || 0)}</strong> available <button type="button" id="sbBalanceRetry" class="primary ghost" style="font-size:10px;padding:1px 7px;margin-left:6px;" title="Refresh">&#8635;</button>`;
+}
+
+// Patches just the #sbBalanceInfo node rather than re-rendering the whole
+// form — this fires after an async fetch resolves, possibly while the
+// person is mid-typing in Margin/Leverage/etc., and a full re-render
+// would steal focus out from under them.
+function updateSbBalanceInfoDom(){
+  const host = document.getElementById('sbBalanceInfo');
+  if(host) host.innerHTML = sbBalanceInfoHtml();
+}
+
+// Reads real, current free margin for exchange+mode and caches it a
+// short while — called at the end of every renderSmartBotsCreate(), so
+// switching Exchange or Network (a fresh cache key) fetches immediately
+// while repeat re-renders for unrelated form changes (type, recovery
+// toggle, etc.) don't hammer the API for a balance that hasn't gone
+// stale yet. force=true (the Retry/refresh button) bypasses the TTL.
+async function ensureSbBalanceLoaded(exchange, mode, force){
+  const f = sbState();
+  const key = `${exchange}:${mode}`;
+  const cached = f.sbBalanceCache[key];
+  if(!force && cached && (cached.status === 'loading' || (cached.status !== 'error' && Date.now() - cached.atMs < SB_BALANCE_REFRESH_TTL_MS))) return;
+  f.sbBalanceCache[key] = { status: 'loading', atMs: Date.now() };
+  updateSbBalanceInfoDom();
+  const cred = liveCred(exchange, mode);
+  if(!cred){ f.sbBalanceCache[key] = { status: 'nocred', atMs: Date.now() }; updateSbBalanceInfoDom(); return; }
+  const result = await checkAvailableMarginFor({ exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase }, 0).catch(() => ({ available: null }));
+  f.sbBalanceCache[key] = { status: result.available == null ? 'error' : 'ok', available: result.available, atMs: Date.now() };
+  updateSbBalanceInfoDom();
+}
+
 function renderSmartBotsCreate(){
   if(!els.sbCreateHost) return;
   const f = sbState();
@@ -4701,6 +4777,7 @@ function renderSmartBotsCreate(){
           </div>
         </div>` : ''}
       </div>
+      <div id="sbBalanceInfo" style="font-size:11.5px;color:var(--dim);margin:0 0 10px;">${sbBalanceInfoHtml()}</div>
       <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
         <label style="font-size:11px;color:var(--dim);">Sizing
           <div style="display:flex;gap:6px;margin-top:3px;">
@@ -4771,6 +4848,7 @@ function renderSmartBotsCreate(){
   `;
   updateSbPreview();
   if(f.sbCreateSymbol && !suggestion) sbCheckRegime(f.sbCreateSymbol);
+  ensureSbBalanceLoaded(exchange, mode);
 }
 
 function sbCreateStatus(msg, isError){
@@ -5073,8 +5151,8 @@ function renderSmartBotDetail(id){
     <div class="tb-params-head">Exchange check</div>
     <div style="font-size:11.5px;color:var(--dim);line-height:1.5;margin-bottom:8px;">
       ${bot.exchange === 'bybit'
-        ? `The per-cycle profit above is the app's own estimate from its grid prices and standard maker fees. Bybit realizes each close against the position's average entry, so single rows can differ from it even when the totals agree.`
-        : 'Exchange-verified P&amp;L is only wired up for Bybit right now.'}
+        ? `Net P&amp;L rows marked <strong style="color:var(--ink);">✓</strong> are Bybit's own realized P&amp;L for that exact close (already net of real fees) — pulled the moment the cycle closes, not modeled. Rows marked <strong style="color:var(--ink);">≈</strong> fall back to the app's fee estimate, which only happens on the rare close Bybit's own closed-P&amp;L feed didn't have indexed yet at that instant.`
+        : 'Exchange-verified P&amp;L is only wired up for Bybit right now — Net P&amp;L above is the app\'s fee-model estimate.'}
     </div>
     ${bot.exchange === 'bybit' ? `<button type="button" class="primary ghost sb-verify-btn" data-id="${bot.id}" style="font-size:11px;padding:4px 10px;">Verify with Bybit</button>` : ''}
     <div style="font-size:11.5px;color:var(--dim);line-height:1.5;margin:8px 0 14px;">${exchangeCheckHtml(bot)}</div>
@@ -5091,7 +5169,7 @@ function renderSmartBotDetail(id){
               <td>${r.exit != null ? r.exit : '—'}</td>
               <td>${r.qty != null ? (+r.qty).toFixed(6) : '—'}</td>
               <td>${r.leverage != null ? r.leverage + 'x' : '—'}</td>
-              <td style="color:${(r.netUsd || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(r.netUsd || 0)}</td>
+              <td style="color:${(r.netUsd || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(r.netUsd || 0)}${r.pnlSource === 'exchange' ? ' <span style="color:var(--dim);font-size:10px;" title="Bybit\'s own realized P&L for this close">✓</span>' : r.pnlSource === 'estimate' ? ' <span style="color:var(--dim);font-size:10px;" title="App fee-model estimate — exchange figure wasn\'t available yet">≈</span>' : ''}</td>
               <td>${r.durationMin != null ? r.durationMin + 'm' : '—'}</td>
               <td>${r.exitReason || (bot.type === 'dca' ? 'TP/SL' : '—')}</td>
             </tr>`).join('') : `<tr><td colspan="9" style="color:var(--dim);text-align:center;padding:14px 0;">No closed trades yet.</td></tr>`}
@@ -5211,6 +5289,10 @@ function initSmartBots(){
         const f = sbState(); readSmartBotFormNumbers();
         f.liveModeByExchange[f.sbCreateExchange || 'bybit'] = e.target.dataset.mode === 'demo' ? 'demo' : 'live';
         renderSmartBotsCreate(); return;
+      }
+      if(e.target.id === 'sbBalanceRetry'){
+        const f = sbState(); const exchange = f.sbCreateExchange || 'bybit'; const mode = f.liveModeByExchange[exchange] || 'live';
+        ensureSbBalanceLoaded(exchange, mode, true); return;
       }
       if(e.target.classList.contains('sb-dca-direction')){
         readSmartBotFormNumbers(); sbState().sbDcaForm.direction = e.target.dataset.dir; renderSmartBotsCreate(); return;
