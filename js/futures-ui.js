@@ -19,7 +19,7 @@
 //   Balances — nothing new to connect per exchange.
 // =============================================================
 import { els, state } from './state.js';
-import { fmtPct } from './utils.js';
+import { fmtPct, coinIconHtml } from './utils.js';
 import { icon } from './icons.js';
 import { runScanCycle, openPosition, managePositions, recomputeOpenRisk, EXCLUDED_FUTURES_SYMBOLS } from './futures/engine.js';
 import { mockMarket } from './futures/mockMarket.js';
@@ -4207,6 +4207,14 @@ function pnlSpan(usd, pct){
   return `<strong style="color:${color};">${fmtUsd(usd)}</strong>${pctBadge}`;
 }
 
+// Futures/perp symbols in this app are always USDT-margined (e.g. "ENAUSDT",
+// "QNTUSDT"), so the base asset is just the symbol with that suffix
+// stripped — same convention already used for grid session ids elsewhere.
+function tbBaseAsset(symbol){ return (symbol || '').replace(/USDT$/i, '') || (symbol || '?'); }
+// Real ticker logo (falls back to a colored monogram via coinIconHtml
+// itself) in place of the generic grid/refresh-cw glyph, sized to sit
+// inside the existing 34x34 .tb-icon frame.
+function tbCoinIconHtml(symbol){ return coinIconHtml(tbBaseAsset(symbol), 26); }
 function tbTypeBadgeLabel(bot){ return bot.type === 'grid' ? 'Futures Grid Bot' : 'DCA Bot'; }
 function tbDirBadgeLabel(bot){ return `${bot.direction === 'NEUTRAL' ? 'Neutral' : bot.direction === 'LONG' ? 'Long' : 'Short'} ${bot.leverage}x`; }
 
@@ -4233,7 +4241,7 @@ function renderTradingBotsList(){
       <div class="tb-card">
         <div class="tb-card-head">
           <div class="tb-card-id">
-            <div class="tb-icon">${icon(bot.type === 'grid' ? 'rows' : 'refresh-cw')}</div>
+            <div class="tb-icon">${tbCoinIconHtml(bot.symbol)}</div>
             <div>
               <div class="tb-card-title">
                 <strong>${bot.symbol}</strong>
@@ -4370,7 +4378,7 @@ function renderTradingBotDetailsModal(){
       <div class="tb-modal">
         <div class="tb-modal-head">
           <div class="tb-card-id">
-            <div class="tb-icon">${icon(isGrid ? 'rows' : 'refresh-cw')}</div>
+            <div class="tb-icon">${tbCoinIconHtml(bot.symbol)}</div>
             <div>
               <div class="tb-card-title">
                 <strong>${bot.symbol}</strong>
@@ -4623,7 +4631,7 @@ function renderSmartBotsList(){
     <div class="tb-card sb-card" data-id="${bot.id}" style="cursor:pointer;">
       <div class="tb-card-head">
         <div class="tb-card-id">
-          <div class="tb-icon">${icon(bot.type === 'grid' ? 'rows' : 'refresh-cw')}</div>
+          <div class="tb-icon">${tbCoinIconHtml(bot.symbol)}</div>
           <div>
             <div class="tb-card-title">
               <strong>${label}</strong>
