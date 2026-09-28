@@ -98,13 +98,13 @@ button.primary:disabled{
    Run Backtest, Smart Fill, Back, etc.), so this one change carries
    through the whole app. */
 button.primary.ghost{
-  background:linear-gradient(180deg, var(--panel-hi), var(--panel2));
-  color:var(--ink-dim); border:1px solid var(--line);
+  background:linear-gradient(180deg, #2a332c, #1f2621);
+  color:var(--ink); border:1px solid #5b6f60;
   box-shadow:var(--sh-1), var(--inset-hi);
 }
 button.primary.ghost:hover{
-  background:linear-gradient(180deg, #202721, var(--panel-hi));
-  color:var(--ink); border-color:#3a4a3e; box-shadow:var(--sh-2), var(--inset-hi); transform:translateY(-1px);
+  background:linear-gradient(180deg, #333e36, #2a332c);
+  color:#fff; border-color:var(--amber); box-shadow:var(--sh-2), var(--inset-hi); transform:translateY(-1px);
 }
 button.primary.ghost:active{ box-shadow:var(--inset-press); transform:translateY(0); background:var(--panel2); }
 button.primary.ghost:focus-visible{ outline:none; box-shadow:var(--sh-1), var(--inset-hi), var(--focus-ring); }
@@ -115,7 +115,7 @@ button.primary.ghost:disabled{
 /* TERTIARY — fully transparent, for the lowest-emphasis actions
    (opt-in via .primary.ghost.tertiary where a control shouldn't even
    read as a surface until hovered, e.g. inline "Apply"/"Use this" links). */
-button.primary.ghost.tertiary{ background:transparent; border-color:transparent; box-shadow:none; }
+button.primary.ghost.tertiary{ background:transparent; border-color:transparent; box-shadow:none; color:var(--ink-dim); }
 button.primary.ghost.tertiary:hover{ background:rgba(255,255,255,.05); border-color:var(--line); box-shadow:none; transform:none; }
 
 /* DANGER / SUCCESS — same elevated-surface language as SECONDARY, tinted. */
