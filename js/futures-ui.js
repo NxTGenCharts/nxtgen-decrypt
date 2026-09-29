@@ -4683,7 +4683,7 @@ function renderSmartBotsList(){
         <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length} · ${fmtBotUptime(bot.createdAtMs)}</span></div>
       </div>
       ${tgt ? `<div class="progress-wrap" style="margin-top:10px;margin-bottom:0;">
-        <div class="progress-track"><div class="progress-bar${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div></div>
+        <div class="progress-track"><div class="progress-bar progress-bar--green${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div></div>
         <div class="progress-label" style="text-align:left;">${tgt.reached ? `Profit Target (${tgt.profitTargetPct}%) reached` : `<strong class="progress-left">${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left of <strong class="progress-left">${tgt.profitTargetPct}% target</strong>`}</div>
       </div>` : ''}
     </div>`;
@@ -5404,7 +5404,7 @@ function renderSmartBotDetail(id){
   const targetProgressHtml = tgt ? `
     <div class="tb-params-head">Profit Target</div>
     <div class="progress-wrap" style="margin-bottom:14px;">
-      <div class="progress-track"><div class="progress-bar${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div></div>
+      <div class="progress-track"><div class="progress-bar progress-bar--green${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div></div>
       <div class="progress-label"><strong class="progress-left">${fmtUsd(tgt.realizedUsd)} of ${fmtUsd(tgt.targetUsd)}</strong> (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}</div>
     </div>` : '';
   // The management cycle re-renders this whole view every few seconds; without this the

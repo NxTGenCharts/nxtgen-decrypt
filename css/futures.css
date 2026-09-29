@@ -397,10 +397,10 @@
 
 /* Pill-shaped primary button for "+ Create New Bot" */
 /* Same look as the active "Trading Bots" sub-tab pill (flat amber, 999px radius, 12.5px type),
-   5px shorter (38px -> 33px). */
+   2px shorter than the tab (38px -> 36px). */
 button.primary.sb-pill-btn{
   background:var(--amber); color:var(--amber-ink); border:1px solid var(--amber); box-shadow:none;
-  border-radius:999px; font-size:12.5px; font-weight:600; padding:6px 15px; min-height:33px; line-height:1.2;
+  border-radius:999px; font-size:12.5px; font-weight:600; padding:6px 15px; min-height:36px; line-height:1.2;
 }
 button.primary.sb-pill-btn:hover{ background:var(--amber); filter:brightness(1.08); box-shadow:none; }
 
