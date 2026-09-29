@@ -4325,6 +4325,52 @@ app.get('/api/markets/bitget-coins', async (req, res) => {
 
 app.get('/api/health', (req, res) => res.json({ ok:true }));
 
+// ---- Coin icon lookup: GET /api/coin-icon/:sym  ->  302 to the coin's real logo ----
+// The front-end tries fixed logo CDNs first; this is the catch-all for coins those don't have.
+// It asks CoinGecko's free public search for the ticker, picks the exact-symbol match with the best
+// market-cap rank (tickers are reused by lots of tiny tokens, so rank breaks the tie), and redirects
+// the <img> to that image. Results are cached in memory (a week for hits, an hour for misses) and
+// lookups run one at a time, ~1.3s apart, so this stays well inside CoinGecko's free rate limit.
+// Public data only - no API keys involved.
+const COIN_ICON_HIT_TTL_MS = 7 * 24 * 3600_000;
+const COIN_ICON_MISS_TTL_MS = 3600_000;
+const coinIconCache = new Map();      // SYMBOL -> { url|null, exp }
+const coinIconInflight = new Map();   // SYMBOL -> Promise<url|null>
+let coinIconQueue = Promise.resolve();
+
+function lookupCoinIcon(sym){
+  if(coinIconInflight.has(sym)) return coinIconInflight.get(sym);
+  const job = coinIconQueue.then(async () => {
+    let url = null;
+    try{
+      const r = await fetch(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(sym)}`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(8000) });
+      if(r.ok){
+        const data = await r.json();
+        const exact = (data.coins || []).filter(c => String(c.symbol || '').toUpperCase() === sym && (c.large || c.thumb));
+        exact.sort((a, b) => (a.market_cap_rank || 1e9) - (b.market_cap_rank || 1e9));
+        if(exact[0]) url = exact[0].large || exact[0].thumb;
+      }
+    }catch(_){ /* leave url null; cached as a short-lived miss */ }
+    coinIconCache.set(sym, { url, exp: Date.now() + (url ? COIN_ICON_HIT_TTL_MS : COIN_ICON_MISS_TTL_MS) });
+    await new Promise(r => setTimeout(r, 1300));
+    return url;
+  });
+  coinIconQueue = job.catch(() => {});
+  coinIconInflight.set(sym, job);
+  job.finally(() => coinIconInflight.delete(sym));
+  return job;
+}
+
+app.get('/api/coin-icon/:sym', async (req, res) => {
+  const sym = String(req.params.sym || '').toUpperCase();
+  if(!/^[A-Z0-9]{1,20}$/.test(sym)) return res.status(400).end();
+  const hit = coinIconCache.get(sym);
+  const url = hit && hit.exp > Date.now() ? hit.url : await lookupCoinIcon(sym);
+  if(!url) return res.status(404).end();
+  res.set('Cache-Control', 'public, max-age=86400');
+  return res.redirect(302, url);
+});
+
 // ---- Actual current balance of ONE asset — ground truth for sizing any
 // leg after the first, and any unwind step. Never re-derive from a prior
 // order's reported fill; fees come out of the asset you just received and

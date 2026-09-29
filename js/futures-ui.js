@@ -5525,7 +5525,7 @@ function renderSbScanner(){
     const guard = r.guardOk ? '' : ' <span title="At this leverage the bot\'s liquidation guard would flatten it early" style="color:var(--red);">&#9888;</span>';
     return `<tr>
       <td>${i + 1}</td>
-      <td><strong>${r.symbol}</strong>${guard}</td>
+      <td><span style="display:inline-flex;align-items:center;gap:8px;white-space:nowrap;">${tbCoinIconHtml(r.symbol)}<strong>${r.symbol}</strong>${guard}</span></td>
       <td style="color:var(--green);font-weight:700;">~${fmtUsd(r.avgNet)}</td>
       <td style="color:var(--green);">~${fmtUsd(r.sweepNet)}</td>
       <td style="color:var(--red);">${fmtUsd(r.worstLegLoss)}</td>
