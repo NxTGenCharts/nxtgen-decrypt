@@ -4648,7 +4648,7 @@ function renderSmartBotsList(){
       </div>`;
   }
 
-  const createBtnHtml = `<button type="button" class="primary" id="sbCreateBtn" style="font-size:12px;padding:6px 16px;margin-top:10px;">+ Create New Bot</button>`;
+  const createBtnHtml = `<button type="button" class="primary sb-pill-btn" id="sbCreateBtn" style="font-size:12px;margin-top:10px;">+ Create New Bot</button>`;
   if(shown.length === 0){
     els.sbListHost.innerHTML = `<div style="font-size:12px;color:var(--dim);padding:8px 0;">No ${tab === 'active' ? 'active' : 'stopped'} Smart Bots ${tab === 'active' ? 'yet.' : '.'}</div>${tab === 'active' ? createBtnHtml : ''}`;
     return;
@@ -4684,7 +4684,7 @@ function renderSmartBotsList(){
       </div>
       ${tgt ? `<div class="progress-wrap" style="margin-top:10px;margin-bottom:0;">
         <div class="progress-track"><div class="progress-bar${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div></div>
-        <div class="progress-label" style="text-align:left;">${tgt.reached ? `Profit Target (${tgt.profitTargetPct}%) reached` : `<strong class="progress-left">${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left of ${tgt.profitTargetPct}% target`}</div>
+        <div class="progress-label" style="text-align:left;">${tgt.reached ? `Profit Target (${tgt.profitTargetPct}%) reached` : `<strong class="progress-left">${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left of <strong class="progress-left">${tgt.profitTargetPct}% target</strong>`}</div>
       </div>` : ''}
     </div>`;
   }).join('') + createBtnHtml;
@@ -5405,8 +5405,13 @@ function renderSmartBotDetail(id){
     <div class="tb-params-head">Profit Target</div>
     <div class="progress-wrap" style="margin-bottom:14px;">
       <div class="progress-track"><div class="progress-bar${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div></div>
-      <div class="progress-label">${fmtUsd(tgt.realizedUsd)} of ${fmtUsd(tgt.targetUsd)} (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}</div>
+      <div class="progress-label"><strong class="progress-left">${fmtUsd(tgt.realizedUsd)} of ${fmtUsd(tgt.targetUsd)}</strong> (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}</div>
     </div>` : '';
+  // The management cycle re-renders this whole view every few seconds; without this the
+  // trades table (horizontally scrollable on mobile) snaps back to its left edge each time.
+  const prevScroll = els.sbDetailHost.querySelector('.table-scroll');
+  const keepLeft = prevScroll ? prevScroll.scrollLeft : 0;
+  const keepTop = prevScroll ? prevScroll.scrollTop : 0;
   els.sbDetailHost.innerHTML = `
     <button type="button" class="primary ghost sb-back-btn" style="font-size:11px;padding:4px 10px;margin-bottom:14px;">&larr; Back to My Bots</button>
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
@@ -5461,6 +5466,8 @@ function renderSmartBotDetail(id){
       <button type="button" class="primary ghost sb-rename-btn" data-id="${bot.id}">Rename</button>
     </div>
   `;
+  const nextScroll = els.sbDetailHost.querySelector('.table-scroll');
+  if(nextScroll && (keepLeft || keepTop)){ nextScroll.scrollLeft = keepLeft; nextScroll.scrollTop = keepTop; }
   renderSmartBotChart(bot, range);
 }
 

@@ -390,7 +390,13 @@
 }
 .tb-orders-table{ width:100%; border-collapse:collapse; font-size:12px; }
 .tb-orders-table th{ text-align:left; color:var(--dim); font-weight:500; font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; padding:6px 8px; border-bottom:1px solid var(--line); }
-.tb-orders-table td{ padding:7px 8px; border-bottom:1px solid var(--line-soft); font-variant-numeric:tabular-nums; }
+/* Roomier columns: headers never wrap onto two rows (Net P&L etc.); the wrapper scrolls sideways instead. */
+.tb-orders-table th{ white-space:nowrap; padding:10px 14px; }
+.tb-orders-table td{ padding:12px 14px; }
+.tb-orders-table td:nth-child(1), .tb-orders-table td:nth-child(7){ white-space:nowrap; }
+
+/* Pill-shaped primary button for "+ Create New Bot" */
+button.sb-pill-btn{ border-radius:999px; padding:9px 22px; }
 
 @media (max-width:640px){
   .tb-card-actions{ width:100%; }
