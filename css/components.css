@@ -481,13 +481,13 @@ footer b{ color:#a9bfae; }
 .progress-bar{ height:100%; background:linear-gradient(90deg, var(--amber), #f0d17d); border-radius:var(--r-pill); transition:width .3s ease; }
 .progress-bar.done{ background:linear-gradient(90deg, var(--green), #8fd6ab); }
 .progress-track .progress-bar.progress-bar--green,
-.progress-track .progress-bar.progress-bar--green.done{ background:var(--green); }  /* one flat colour, no fade */
+.progress-track .progress-bar.progress-bar--green.done{ background:#33c98b; }  /* one flat colour, no fade. The +$ text is #3ddc97; a big flat fill reads lighter/neon than thin text on dark, so this is a touch deeper to look the same. */
 
 /* Taller bar with the completed % written inside it */
-.progress-track--tall{ position:relative; height:22px; }
+.progress-track--tall{ position:relative; height:28px; }
 .progress-track--tall .progress-pct{
   position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-  font-size:11.5px; font-weight:700; letter-spacing:.02em; color:#fff;
+  font-size:12.5px; font-weight:700; letter-spacing:.02em; color:#fff;
   text-shadow:0 1px 2px rgba(0,0,0,.65); pointer-events:none;
 }
 .progress-label{ margin-top:6px; font-size:11px; color:var(--dim); text-align:center; }
