@@ -4491,7 +4491,7 @@ const SMART_BOT_TYPES = { dca: 'DCA Bot (Trend)', grid: 'Grid Bot (Sideways)' };
 function sbState(){
   const f = fu();
   if(!f.sbGridForm) f.sbGridForm = {
-    fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 5, takeProfitPct: 10, stopLossPct: 10,
+    fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 6, takeProfitPct: 10, stopLossPct: 12,
     // Fewer levels over the SAME auto-suggested range means each one is
     // wider — bigger $ per fill, less often; more levels means smaller
     // fills, more often. Same total capital either way; this is a
@@ -4503,7 +4503,7 @@ function sbState(){
     // than a plain grid, not a free upgrade to it.
     recoveryMode: false, recoveryTriggerPct: 15, maxRecoveryAdds: 3, recoverySizeMult: 1.5,
   };
-  if(!f.sbDcaForm) f.sbDcaForm = { fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 3, takeProfitPct: 2, stopLossPct: 15, direction: 'LONG' };
+  if(!f.sbDcaForm) f.sbDcaForm = { fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 6, takeProfitPct: 10, stopLossPct: 12, direction: 'LONG' };
   if(!f.sbBalanceCache) f.sbBalanceCache = {}; // keyed "exchange:mode" — see ensureSbBalanceLoaded
   return f;
 }
@@ -5471,8 +5471,150 @@ function renderSmartBotDetail(id){
   renderSmartBotChart(bot, range);
 }
 
+// -------------------------------------------------------------
+// Grid Opportunities scanner  ranks the most-traded pairs by the ESTIMATED
+// profit of a 10-level Grid bot right now. It reuses the exact maths the
+// create form's "Estimate before you deploy" panel uses (estimateGridPreview:
+// suggestGridRange + buildManualGridPlan + netCycleProfit with maker fees and
+// spread), just run across many pairs instead of one. On-demand only (a Scan
+// button, never automatic) and gentle on the exchange: small sequential
+// batches over the top-N pairs by 24h volume, so it doesn't burn API weight.
+// It is an ESTIMATE from current volatility  not a promise of future profit.
+// -------------------------------------------------------------
+const SB_SCAN_LEVELS = 10;
+
+function sbScanState(){
+  const f = sbState();
+  if(!f.sbScan) f.sbScan = { exchange: 'bybit', margin: 100, leverage: 6, topN: 20, running: false, progress: '', results: null, skipped: 0, scannedAtMs: 0, open: false };
+  return f.sbScan;
+}
+
+function renderSbScanner(){
+  const host = document.getElementById('sbScannerHost');
+  if(!host) return;
+  const sc = sbScanState();
+  const opt = (v, label, cur) => `<option value="${v}"${String(cur) === String(v) ? ' selected' : ''}>${label}</option>`;
+  const rows = (sc.results || []).slice(0, 10).map((r, i) => {
+    const kindColor = r.kind === 'SIDEWAYS' ? 'var(--green)' : r.kind === 'TREND' ? 'var(--red)' : 'var(--amber)';
+    const guard = r.guardOk ? '' : ' <span title="At this leverage the bot\'s liquidation guard would flatten it early" style="color:var(--red);">&#9888;</span>';
+    return `<tr>
+      <td>${i + 1}</td>
+      <td><strong>${r.symbol}</strong>${guard}</td>
+      <td style="color:var(--green);font-weight:700;">~${fmtUsd(r.avgNet)}</td>
+      <td style="color:var(--green);">~${fmtUsd(r.sweepNet)}</td>
+      <td style="color:var(--red);">${fmtUsd(r.worstLegLoss)}</td>
+      <td>${r.rangePct.toFixed(1)}%</td>
+      <td><span style="color:${kindColor};">${r.regimeText}</span></td>
+      <td>${Math.round(r.score)}</td>
+      <td><button type="button" class="primary ghost sb-scan-use" data-symbol="${r.symbol}" style="font-size:11px;padding:4px 12px;min-height:auto;border-radius:999px;">Use</button></td>
+    </tr>`;
+  }).join('');
+  const table = sc.results
+    ? (sc.results.length ? `
+      <div class="table-scroll" style="margin-top:12px;">
+        <table class="tb-orders-table">
+          <thead><tr><th>#</th><th>Pair</th><th>Per grid</th><th>All ${SB_SCAN_LEVELS} levels</th><th>Worst leg</th><th>Range</th><th>Market</th><th>Score</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="sbf-hint" style="margin-top:8px;">Scanned ${new Date(sc.scannedAtMs).toLocaleTimeString()} &middot; ${sc.results.length} pairs ranked${sc.skipped ? `, ${sc.skipped} skipped (no data / rate limit)` : ''}. Ranked by estimated profit for one full cycle of all ${SB_SCAN_LEVELS} levels, after maker fees and spread. &#9888; = the liquidation guard would flatten the bot early at this leverage. Volatility changes constantly, so re-scan before deploying.</div>`
+      : `<div class="sbf-hint" style="margin-top:12px;">No pairs could be scanned right now${sc.skipped ? ` (${sc.skipped} skipped)` : ''}. Try again in a moment.</div>`)
+    : '';
+  host.innerHTML = `
+    <details class="sbf-card sbf-rules" id="sbScanDetails" style="margin-top:14px;"${sc.open ? ' open' : ''}>
+      <summary class="sbf-sec">Grid opportunities &middot; ${SB_SCAN_LEVELS} levels</summary>
+      <div class="sbf-collapse-body">
+        <div class="sbf-hint" style="margin:0 0 12px;">Scans the most-traded pairs and ranks them by the estimated profit of a ${SB_SCAN_LEVELS}-level Grid bot right now, using your margin and leverage.</div>
+        <div class="sbf-fields" style="grid-template-columns:repeat(2, minmax(0,1fr));gap:10px;">
+          <div class="sbf-field"><label class="sbf-label" for="sbScanExchange"><span>Exchange</span></label>
+            <div class="sbf-select"><select id="sbScanExchange">${opt('bybit', 'Bybit', sc.exchange)}${opt('binance', 'Binance', sc.exchange)}</select>${icon('chevron-down')}</div></div>
+          <div class="sbf-field"><label class="sbf-label" for="sbScanTopN"><span>Pairs to scan</span></label>
+            <div class="sbf-select"><select id="sbScanTopN">${opt(10, 'Top 10 by volume', sc.topN)}${opt(20, 'Top 20 by volume', sc.topN)}${opt(30, 'Top 30 by volume', sc.topN)}</select>${icon('chevron-down')}</div></div>
+          <div class="sbf-field"><label class="sbf-label" for="sbScanMargin"><span>Margin</span></label>
+            <div class="sbf-input"><input id="sbScanMargin" type="number" inputmode="decimal" min="1" step="any" value="${sc.margin}"><span class="sbf-unit">USDT</span></div></div>
+          <div class="sbf-field"><label class="sbf-label" for="sbScanLev"><span>Leverage</span></label>
+            <div class="sbf-input"><input id="sbScanLev" type="number" inputmode="numeric" min="1" max="50" step="1" value="${sc.leverage}"><span class="sbf-unit">x</span></div></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap;">
+          <button type="button" class="primary sb-pill-btn" id="sbScanBtn"${sc.running ? ' disabled' : ''}>${sc.running ? 'Scanning&hellip;' : (sc.results ? 'Re-scan' : 'Scan pairs')}</button>
+          <span class="sbf-hint" id="sbScanProgress" style="margin:0;">${sc.progress || ''}</span>
+        </div>
+        ${table}
+      </div>
+    </details>`;
+}
+
+async function runSbScan(){
+  const sc = sbScanState();
+  if(sc.running) return;
+  const exchange = document.getElementById('sbScanExchange')?.value || sc.exchange;
+  const topN = parseInt(document.getElementById('sbScanTopN')?.value, 10) || sc.topN;
+  const margin = parseFloat(document.getElementById('sbScanMargin')?.value);
+  const leverage = Math.max(1, Math.min(50, parseInt(document.getElementById('sbScanLev')?.value, 10) || 1));
+  Object.assign(sc, { exchange, topN, margin: margin > 0 ? margin : 100, leverage, running: true, progress: 'Loading pair list&hellip;', open: true });
+  renderSbScanner();
+  const setProgress = (t) => { sc.progress = t; const el = document.getElementById('sbScanProgress'); if(el) el.innerHTML = t; };
+  try{
+    const universe = await getFullFuturesUniverse(exchange);
+    const symbols = (universe || []).filter(e => e && /USDT$/.test(e.symbol || ''))
+      .sort((a, b) => (b.volume24hUsd || 0) - (a.volume24hUsd || 0)).slice(0, topN).map(e => e.symbol);
+    const out = []; let skipped = 0, done = 0;
+    const BATCH = 2;
+    for(let i = 0; i < symbols.length; i += BATCH){
+      const batch = symbols.slice(i, i + BATCH);
+      await Promise.all(batch.map(async (symbol) => {
+        try{
+          const snap = await fetchLiveSnapshot(exchange, symbol, '5m');
+          if(!snap) throw new Error('no snapshot');
+          const regime = classifyRegime(snap.h1, snap.m15);
+          const est = estimateGridPreview({ snap, regime, fundingUsd: sc.margin, leverage, levelCount: SB_SCAN_LEVELS, exchange, scanGuard: false });
+          if(!est) throw new Error('no grid');
+          const suit = scoreGridSuitability(snap, regime, GRID_DEFAULTS);
+          const label = sbRegimeLabel(regime) || { kind: 'VOLATILE', text: '' };
+          out.push({ symbol, avgNet: est.avgNet, sweepNet: est.sweepNet, worstLegLoss: est.worstLegLoss, rangePct: est.rangePct, guardOk: est.guardOk, kind: label.kind, regimeText: label.text, score: suit.score || 0 });
+        }catch(_){ skipped++; }
+        done++;
+        setProgress(`Scanning ${done}/${symbols.length}&hellip;`);
+      }));
+      await new Promise(r => setTimeout(r, 200)); // stay gentle on the exchange's per-IP weight limit
+    }
+    out.sort((a, b) => ((b.guardOk ? 1 : 0) - (a.guardOk ? 1 : 0)) || (b.sweepNet - a.sweepNet));
+    Object.assign(sc, { results: out, skipped, scannedAtMs: Date.now(), progress: '' });
+  }catch(err){
+    sc.progress = 'Scan failed: ' + (err && err.message ? err.message : 'unknown error');
+  }
+  sc.running = false;
+  renderSbScanner();
+}
+
+function sbUseScannedPair(symbol){
+  const f = sbState();
+  const sc = sbScanState();
+  f.sbCreateExchange = sc.exchange;
+  f.sbCreateSymbol = symbol;
+  f.sbCreateType = 'grid';
+  f.sbRegimeSuggestion = null;
+  f.sbGridForm = Object.assign({}, f.sbGridForm, { fundingUsd: sc.margin, fundingMode: 'usdt', leverage: sc.leverage, levelCount: SB_SCAN_LEVELS });
+  f.sbView = 'create';
+  renderSmartBotsPanel();
+}
+
+function initSbScanner(){
+  const host = document.getElementById('sbScannerHost');
+  if(!host) return;
+  renderSbScanner();
+  host.addEventListener('toggle', (e) => { if(e.target && e.target.id === 'sbScanDetails') sbScanState().open = e.target.open; }, true);
+  host.addEventListener('click', (e) => {
+    const t = e.target.closest ? e.target.closest('button') : null;
+    if(!t) return;
+    if(t.id === 'sbScanBtn') runSbScan();
+    else if(t.classList.contains('sb-scan-use')) sbUseScannedPair(t.dataset.symbol);
+  });
+}
+
 function initSmartBots(){
   renderSmartBotsPanel();
+  initSbScanner();
 
   if(els.sbListHost){
     els.sbListHost.addEventListener('click', (e) => {
