@@ -3519,6 +3519,18 @@ async function manageGridBotInstance(bot, cred, nowMs){
     return pnlRowsCache;
   };
   const claimRow = (orderId) => { claimed.add(String(orderId)); bot.runtime.claimedPnl.push(String(orderId)); if(bot.runtime.claimedPnl.length > 400) bot.runtime.claimedPnl.splice(0, 100); };
+  // Real exchange fill times (orderId -> ms), fetched at most once per cycle. This manager only runs
+  // while the page is open, so "when we noticed the fill" can be hours after the fill itself; using
+  // the exchange's own timestamps is what makes Duration = entry-fill -> close-fill. If the server
+  // hasn't been updated (or the call fails) this is just an empty map and we fall back to nowMs.
+  let fillTimesCache = null;
+  const getFillTimes = async () => {
+    if(fillTimesCache !== null) return fillTimesCache;
+    fillTimesCache = new Map();
+    const r = await callProxy('/api/futures/grid/fill-times', proxyArgs).catch(() => null);
+    if(r && r.ok) for(const o of (r.list || [])) fillTimesCache.set(String(o.orderId), o.filledAtMs);
+    return fillTimesCache;
+  };
 
   for(const level of bot.runtime.levels){
     if(level.status === 'PENDING_ENTRY' && level.entryOrderId != null && !openIds.has(String(level.entryOrderId))){
@@ -3528,7 +3540,8 @@ async function manageGridBotInstance(bot, cred, nowMs){
       const qty = (perLevelUsd * plan.leverage) / level.price;
       const closed = await callProxy('/api/futures/grid/place-close', { ...proxyArgs, direction: level.direction, price: targetPrice, qty, orderLinkTag: `${bot.id}-${level.levelIndex}` }).catch(err => ({ ok:false, message: err.message }));
       if(!closed.ok){ tradingBotLog(bot, `Level ${level.levelIndex} filled but its close order failed: ${closed.message}`, true); continue; }
-      level.status = 'PENDING_CLOSE'; level.closeOrderId = closed.orderId; level.entryPrice = level.price; level.targetPrice = targetPrice; level.openedAt = nowMs;
+      level.status = 'PENDING_CLOSE'; level.closeOrderId = closed.orderId; level.entryPrice = level.price; level.targetPrice = targetPrice;
+      level.openedAt = (await getFillTimes()).get(String(level.entryOrderId)) || nowMs; // exchange fill time, not detection time
       const stopField = level.direction === 'LONG' ? 'longStopSet' : 'shortStopSet';
       if(!bot.runtime[stopField]){
         const stopPrice = level.direction === 'LONG' ? plan.lower : plan.upper;
@@ -3565,7 +3578,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
         bot.realizedUsd += pnl.netUsd;
         addTradingBotsRealized(pnl.netUsd);
         tradingBotLog(bot, `Level ${level.levelIndex} cycle closed — ${fmtUsd(pnl.netUsd)} (${pnl.pnlSource === 'exchange' ? 'Bybit-verified' : 'estimated'}).`, false);
-        const closedAt = pnl.closedAtMs || nowMs;
+        const closedAt = pnl.closedAtMs || (await getFillTimes()).get(String(level.closeOrderId)) || nowMs;
         // Entry/exit/qty come from the SAME Bybit row as the P&L so a row's prices always reproduce its P&L
         // (Bybit realizes hedge-mode closes against the position's AVERAGE entry, not this level's own price).
         appendPersistentTrade({
@@ -3574,7 +3587,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
           grossUsd: pnl.grossUsd != null ? pnl.grossUsd : estimate.grossUsd, feesUsd: pnl.feesUsd != null ? pnl.feesUsd : estimate.feesUsd,
           fundingUsd: pnl.fundingUsd != null ? pnl.fundingUsd : estimate.fundingUsd, slippageUsd: pnl.slippageUsd != null ? pnl.slippageUsd : estimate.slippageUsd,
           netUsd: pnl.netUsd, pnlSource: pnl.pnlSource,
-          confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_CYCLE_TP', durationMin: Math.max(0, Math.round((closedAt - level.openedAt) / 60_000)),
+          confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_CYCLE_TP', durationMin: Math.max(0, Math.round((closedAt - level.openedAt) / 60_000)), durationSec: Math.max(0, Math.round((closedAt - level.openedAt) / 1000)),
           gridId: bot.id, gridLevel: level.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
         });
         level.missTicks = 0;
@@ -4156,6 +4169,19 @@ function fmtBotUptime(startMs){
   const totalMin = Math.floor(ms / 60000);
   const d = Math.floor(totalMin / 1440), h = Math.floor((totalMin % 1440) / 60), m = totalMin % 60;
   return `${d}D ${h}h ${m}m`;
+}
+
+// "45s", "12m", "3h 20m", "1d 4h". New records carry durationSec (exact); older ones only
+// have whole minutes, so fall back to that.
+function fmtTradeDuration(r){
+  const sec = r.durationSec != null ? r.durationSec : (r.durationMin != null ? r.durationMin * 60 : null);
+  if(sec == null) return '';
+  if(sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  if(m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if(h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
 function fmtBotDateTime(ms){
@@ -5450,7 +5476,7 @@ function renderSmartBotDetail(id){
               <td>${r.qty != null ? (+r.qty).toFixed(6) : '—'}</td>
               <td>${r.leverage != null ? r.leverage + 'x' : '—'}</td>
               <td style="color:${(r.netUsd || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(r.netUsd || 0)}${r.pnlSource === 'exchange' ? ' <span style="color:var(--dim);font-size:10px;" title="Bybit\'s own realized P&L for this close">✓</span>' : r.pnlSource === 'estimate' ? ' <span style="color:var(--dim);font-size:10px;" title="App fee-model estimate — exchange figure wasn\'t available yet">≈</span>' : ''}</td>
-              <td>${r.durationMin != null ? r.durationMin + 'm' : '—'}</td>
+              <td>${fmtTradeDuration(r) || '—'}</td>
               <td>${r.exitReason || (bot.type === 'dca' ? 'TP/SL' : '—')}</td>
             </tr>`).join('') : `<tr><td colspan="9" style="color:var(--dim);text-align:center;padding:14px 0;">No closed trades yet.</td></tr>`}
         </tbody>

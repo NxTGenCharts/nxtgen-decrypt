@@ -1085,6 +1085,18 @@ async function getBybitGridClosedPnlList(mode, apiKey, secretKey, symbol){
     closedPnl: parseFloat(r.closedPnl || '0'), createdTime: parseInt(r.createdTime || '0', 10),
   }));
 }
+// Real exchange fill times for recent FILLED orders on SYMBOL: { orderId, filledAtMs }.
+// The Trading Bots manager only runs while the page is open, so when it "notices" a filled
+// entry order it is usually later than the fill itself. Looking the fill time up here is what
+// lets a trade's Duration be entry-fill -> close-fill instead of "when the page noticed".
+async function getBybitGridFillTimes(mode, apiKey, secretKey, symbol){
+  const data = await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'GET', '/v5/order/history', `category=linear&symbol=${symbol}&orderStatus=Filled&limit=50`);
+  return (data.result?.list || []).map(o => ({ orderId: o.orderId, filledAtMs: parseInt(o.updatedTime || o.createdTime || '0', 10) })).filter(o => o.filledAtMs > 0);
+}
+async function getBinanceGridFillTimes(mode, apiKey, secretKey, symbol){
+  const list = await binanceFuturesSignedRequest('GET', '/fapi/v1/allOrders', { symbol, limit: '100' }, apiKey, secretKey, mode);
+  return (Array.isArray(list) ? list : []).filter(o => o.status === 'FILLED').map(o => ({ orderId: o.orderId, filledAtMs: parseInt(o.updateTime || o.time || '0', 10) })).filter(o => o.filledAtMs > 0);
+}
 async function getBinanceClosedPnlUnsupported(){
   throw new Error('exchange-verified P&L is only wired up for Bybit right now');
 }
@@ -3940,6 +3952,7 @@ const GRID_OPEN_ORDERS = { bybit: getBybitGridOpenOrders, binance: getBinanceGri
 const GRID_POSITIONS = { bybit: getBybitGridPositions, binance: getBinanceGridPositions };
 const GRID_FLATTEN = { bybit: flattenBybitGrid, binance: flattenBinanceGrid };
 const GRID_CLOSED_PNL = { bybit: getBybitGridClosedPnlList, binance: getBinanceClosedPnlUnsupported };
+const GRID_FILL_TIMES = { bybit: getBybitGridFillTimes, binance: getBinanceGridFillTimes };
 
 function gridRoute(path, table, argsFromBody){
   app.post(path, async (req, res) => {
@@ -3995,6 +4008,7 @@ gridSimpleRoute('/api/futures/grid/orders', GRID_OPEN_ORDERS);
 gridSimpleRoute('/api/futures/grid/positions', GRID_POSITIONS);
 gridSimpleRoute('/api/futures/grid/flatten', GRID_FLATTEN);
 gridSimpleRoute('/api/futures/grid/closed-pnl', GRID_CLOSED_PNL);
+gridSimpleRoute('/api/futures/grid/fill-times', GRID_FILL_TIMES);
 
 // =============================================================
 // Trading Bots — DCA routes. Same generic gridRoute/gridSimpleRoute
