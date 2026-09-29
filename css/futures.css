@@ -396,7 +396,13 @@
 .tb-orders-table td:nth-child(1), .tb-orders-table td:nth-child(7){ white-space:nowrap; }
 
 /* Pill-shaped primary button for "+ Create New Bot" */
-button.sb-pill-btn{ border-radius:999px; padding:9px 22px; }
+/* Same look as the active "Trading Bots" sub-tab pill (flat amber, 999px radius, 12.5px type),
+   5px shorter (38px -> 33px). */
+button.primary.sb-pill-btn{
+  background:var(--amber); color:var(--amber-ink); border:1px solid var(--amber); box-shadow:none;
+  border-radius:999px; font-size:12.5px; font-weight:600; padding:6px 15px; min-height:33px; line-height:1.2;
+}
+button.primary.sb-pill-btn:hover{ background:var(--amber); filter:brightness(1.08); box-shadow:none; }
 
 @media (max-width:640px){
   .tb-card-actions{ width:100%; }

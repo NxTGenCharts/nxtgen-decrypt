@@ -107,6 +107,9 @@
     overflow-x:auto; scrollbar-width:none;
   }
   .status-cluster::-webkit-scrollbar{ display:none; }
+  /* Hidden on mobile: the same statuses live in the 3-dot sheet (mobile-shell.js reads these
+     elements by id, so they stay in the DOM — just not shown). */
+  .status-cluster{ display:none; }
   .status-cluster .live-pill{ display:none; }        /* mirrored in the app bar */
   .exchange-badges{ flex-wrap:nowrap; flex:none; justify-content:flex-start; }
   .last-update{ flex:none; order:0; padding-left:4px; }

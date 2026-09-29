@@ -4648,7 +4648,7 @@ function renderSmartBotsList(){
       </div>`;
   }
 
-  const createBtnHtml = `<button type="button" class="primary sb-pill-btn" id="sbCreateBtn" style="font-size:12px;margin-top:10px;">+ Create New Bot</button>`;
+  const createBtnHtml = `<button type="button" class="primary sb-pill-btn" id="sbCreateBtn" style="margin-top:10px;">+ Create New Bot</button>`;
   if(shown.length === 0){
     els.sbListHost.innerHTML = `<div style="font-size:12px;color:var(--dim);padding:8px 0;">No ${tab === 'active' ? 'active' : 'stopped'} Smart Bots ${tab === 'active' ? 'yet.' : '.'}</div>${tab === 'active' ? createBtnHtml : ''}`;
     return;
