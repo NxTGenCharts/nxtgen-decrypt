@@ -4845,7 +4845,7 @@ function updateSbPreview(){
 function sbSymbolResultRow(entry){
   const exchNames = entry.exchanges.map(x => EXCHANGE_DISPLAY_NAMES[x] || x).join(', ');
   return `<div class="sb-symbol-result" data-symbol="${entry.symbol}" data-exchanges="${entry.exchanges.join(',')}">
-    <span>${entry.symbol}</span><span style="color:var(--dim);font-size:11px;">${exchNames}</span>
+    <span style="display:inline-flex;align-items:center;gap:10px;min-width:0;">${tbCoinIconHtml(entry.symbol)}<span>${entry.symbol}</span></span><span style="color:var(--dim);font-size:11px;">${exchNames}</span>
   </div>`;
 }
 
@@ -5038,7 +5038,7 @@ function renderSmartBotsCreate(){
             </div>
             ${f.sbCreateSymbol ? `
             <div class="sbf-pair-card">
-              <span class="sbf-pair-sym">${f.sbCreateSymbol}</span>
+              <span class="sbf-pair-sym" style="display:inline-flex;align-items:center;gap:10px;">${tbCoinIconHtml(f.sbCreateSymbol)}${f.sbCreateSymbol}</span>
               <span class="sbf-pair-meta">${pairMeta}</span>
             </div>` : ''}
             <div id="sbRegimeNote" class="sbf-note" role="status">${icon('info')}<span>${regimeNote}</span></div>
