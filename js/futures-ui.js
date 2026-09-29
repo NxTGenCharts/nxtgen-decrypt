@@ -5520,7 +5520,7 @@ function renderSbScanner(){
   if(!host) return;
   const sc = sbScanState();
   const opt = (v, label, cur) => `<option value="${v}"${String(cur) === String(v) ? ' selected' : ''}>${label}</option>`;
-  const rows = (sc.results || []).slice(0, 10).map((r, i) => {
+  const rows = (sc.results || []).map((r, i) => {
     const kindColor = r.kind === 'SIDEWAYS' ? 'var(--green)' : r.kind === 'TREND' ? 'var(--red)' : 'var(--amber)';
     const guard = r.guardOk ? '' : ' <span title="At this leverage the bot\'s liquidation guard would flatten it early" style="color:var(--red);">&#9888;</span>';
     return `<tr>
