@@ -480,7 +480,16 @@ footer b{ color:#a9bfae; }
 .progress-track{ background:var(--panel2); border:1px solid var(--line); border-radius:var(--r-pill); height:14px; overflow:hidden; }
 .progress-bar{ height:100%; background:linear-gradient(90deg, var(--amber), #f0d17d); border-radius:var(--r-pill); transition:width .3s ease; }
 .progress-bar.done{ background:linear-gradient(90deg, var(--green), #8fd6ab); }
-.progress-bar.progress-bar--green{ background:linear-gradient(90deg, var(--green), #8fd6ab); }
+.progress-track .progress-bar.progress-bar--green,
+.progress-track .progress-bar.progress-bar--green.done{ background:var(--green); }  /* one flat colour, no fade */
+
+/* Taller bar with the completed % written inside it */
+.progress-track--tall{ position:relative; height:22px; }
+.progress-track--tall .progress-pct{
+  position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  font-size:11.5px; font-weight:700; letter-spacing:.02em; color:#fff;
+  text-shadow:0 1px 2px rgba(0,0,0,.65); pointer-events:none;
+}
 .progress-label{ margin-top:6px; font-size:11px; color:var(--dim); text-align:center; }
 .progress-label .progress-left{ color:var(--ink); font-weight:700; }
 
