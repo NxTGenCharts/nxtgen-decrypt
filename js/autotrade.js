@@ -21,8 +21,8 @@
 // - Lets you connect an exchange: format-checks the key (and passphrase,
 //   for Bitget), then verifies it against the exchange and pulls your
 //   balance — all five exchanges now verify for real.
-// - Keeps saved keys across Disconnect — only "Remove" deletes them — with
-//   a SHOW/HIDE toggle to reveal a saved key, secret, or passphrase on demand.
+// - Keeps saved keys across Disconnect — only "Remove" deletes them. Saved
+//   keys, secrets and passphrases stay masked; there is no reveal toggle.
 // - Watches the selected exchange's live order books for triangular
 //   cycles, same math as the Triangular tab, and — when Autotrade is
 //   ON — paper-trades (simulates) the single highest-profit cycle that
@@ -361,16 +361,13 @@ function renderConnectRows(){
       ${modeToggle}
       <div class="kv-field">
         <input class="ck-key" type="${stored ? 'password' : 'text'}" placeholder="Enter ${placeholderPrefix}API key" value="${stored ? cred.apiKey : ''}" ${stored ? 'disabled' : ''}>
-        ${stored ? `<button type="button" class="reveal-btn" data-field="key" title="Show/hide">SHOW</button>` : ''}
       </div>
       <div class="kv-field">
         <input class="ck-secret" type="password" placeholder="Enter ${placeholderPrefix}secret key" value="${stored ? cred.secretKey : ''}" ${stored ? 'disabled' : ''}>
-        ${stored ? `<button type="button" class="reveal-btn" data-field="secret" title="Show/hide">SHOW</button>` : ''}
       </div>
       ${needsPass ? `
       <div class="kv-field">
         <input class="ck-passphrase" type="password" placeholder="Enter ${placeholderPrefix}passphrase" value="${stored ? cred.passphrase : ''}" ${stored ? 'disabled' : ''}>
-        ${stored ? `<button type="button" class="reveal-btn" data-field="passphrase" title="Show/hide">SHOW</button>` : ''}
       </div>` : ''}
       ${stored ? `
         <div class="connect-actions">
@@ -465,17 +462,6 @@ const BALANCE_REFRESH_INTERVAL_MS = 90 * 1000; // matches a "reasonably fresh wi
 // This module is imported on every page, but els.connectRows only exists on
 // the API Keys page — guard so import doesn't throw elsewhere.
 if(els.connectRows) els.connectRows.addEventListener('click', async (e) => {
-  const revealBtn = e.target.closest('.reveal-btn');
-  if(revealBtn){
-    const row = e.target.closest('.connect-row');
-    const fieldClass = revealBtn.dataset.field === 'key' ? '.ck-key' : revealBtn.dataset.field === 'passphrase' ? '.ck-passphrase' : '.ck-secret';
-    const input = row.querySelector(fieldClass);
-    const showing = input.type === 'text';
-    input.type = showing ? 'password' : 'text';
-    revealBtn.textContent = showing ? 'SHOW' : 'HIDE';
-    return;
-  }
-
   const modeBtn = e.target.closest('.mode-btn[data-mode]');
   if(modeBtn){
     const row = e.target.closest('.connect-row');
