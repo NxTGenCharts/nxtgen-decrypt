@@ -4943,6 +4943,7 @@ async function ensureSbBalanceLoaded(exchange, mode, force){
 // never touches liveModeByExchange (which decides where new bots deploy).
 // Read-only: it only calls /api/futures/account-summary.
 const SB_ACCT_TTL_MS = 15_000;
+const SB_ACCT_POLL_MS = 8_000; // background refresh while the tab is visible
 
 function sbAcctSel(){
   const f = sbState();
@@ -4974,7 +4975,7 @@ function sbAcctHtml(){
   const partial = ok && c.status === 'partial';
   const val = (n) => (ok && n != null) ? sbFmtBalance(n) : '&mdash;';
   const pct = (ok && !partial && c.total > 0) ? Math.min(100, Math.max(0, (c.inUse / c.total) * 100)) : null;
-  if(partial) note = 'Total and margin in use need the latest backend (new /api/futures/account-summary endpoint) \u2014 showing free margin only.';
+  if(partial) note = 'Total, floating PnL and margin in use need the latest backend (new /api/futures/account-summary endpoint) \u2014 showing free margin only.';
   const modeBtn = (m, label) => `<button type="button" class="mode-btn sb-acct-mode ${mode === m ? 'active' : ''}" data-mode="${m}" aria-pressed="${mode === m ? 'true' : 'false'}">${label}</button>`;
   const refreshBtn = state === 'nocred' ? '' : `<button type="button" class="sbf-icon-btn" id="sbAcctRefresh" aria-label="Refresh account balance" title="Refresh" ${state === 'loading' ? 'disabled' : ''}>${icon('refresh-cw')}</button>`;
   return `
@@ -4995,10 +4996,12 @@ function sbAcctHtml(){
         </div>
       </div>
       <div class="sb-acct-grid">
-        <div class="ov-card ov-highlight"><span class="ov-label">Total USDT balance</span><span class="ov-value">${val(c && c.total)}</span></div>
+        <div class="ov-card ov-highlight"><span class="ov-label">Total USDT balance <span style="text-transform:none;letter-spacing:0;opacity:.7;">(incl. floating PnL)</span></span><span class="ov-value">${val(c && c.total)}</span></div>
+        <div class="ov-card"><span class="ov-label">Floating PnL</span><span class="ov-value ${ok && !partial && c.unrealized > 0 ? 'sb-acct-pos' : ok && !partial && c.unrealized < 0 ? 'sb-acct-neg' : ''}">${ok && !partial && c.unrealized != null ? (c.unrealized > 0 ? '+' : c.unrealized < 0 ? '\u2212' : '') + sbFmtBalance(Math.abs(c.unrealized)) : '&mdash;'}</span></div>
         <div class="ov-card"><span class="ov-label">Margin in use</span><span class="ov-value">${val(c && c.inUse)}</span></div>
         <div class="ov-card"><span class="ov-label">Free margin</span><span class="ov-value sb-acct-free">${val(c && c.available)}</span></div>
       </div>
+      ${ok ? `<div class="sb-acct-barlabel">Updated ${new Date(c.atMs).toLocaleTimeString()} &middot; refreshes automatically</div>` : ''}
       ${pct != null ? `<div class="sb-acct-bar" role="img" aria-label="${pct.toFixed(1)}% of balance is in use as margin"><span style="width:${pct.toFixed(1)}%"></span></div><div class="sb-acct-barlabel">${pct.toFixed(1)}% of balance in use as margin</div>` : ''}
       ${note ? `<div class="sb-acct-note ${state === 'ok' ? 'sb-acct-note--info' : ''}">${note}</div>` : ''}
     </div>`;
@@ -5013,21 +5016,29 @@ function renderSbAcctBalance(){
   if(sbAcctPanelVisible()) ensureSbAcctLoaded(exchange, mode, false);
 }
 
-async function ensureSbAcctLoaded(exchange, mode, force){
+const sbAcctInflight = new Set();
+async function ensureSbAcctLoaded(exchange, mode, force, silent){
   const { f } = sbAcctSel();
   const key = `${exchange}:${mode}`;
   const cached = f.sbAcctCache[key];
+  if(sbAcctInflight.has(key)) return;
   if(!force && cached && (cached.status === 'loading' || (cached.status !== 'error' && cached.status !== 'nocred' && Date.now() - cached.atMs < SB_ACCT_TTL_MS))) return;
   const cred = liveCred(exchange, mode);
   if(!cred){ f.sbAcctCache[key] = { status: 'nocred', atMs: Date.now() }; sbAcctPatch(exchange, mode); return; }
-  f.sbAcctCache[key] = { status: 'loading', atMs: Date.now(), prev: cached && cached.status === 'ok' ? cached : null };
-  sbAcctPatch(exchange, mode);
+  // Silent (background poll) refreshes keep showing the last good numbers
+  // instead of flashing dashes every few seconds.
+  const hasGood = cached && (cached.status === 'ok' || cached.status === 'partial');
+  if(!(silent && hasGood)){
+    f.sbAcctCache[key] = { status: 'loading', atMs: Date.now() };
+    sbAcctPatch(exchange, mode);
+  }
+  sbAcctInflight.add(key);
   const args = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase };
   let next;
   try{
     const r = await callProxy('/api/futures/account-summary', args);
     if(r && r.ok && r.available != null){
-      next = { status: 'ok', total: r.total, available: r.available, inUse: r.inUse, atMs: Date.now() };
+      next = { status: 'ok', total: r.total, available: r.available, inUse: r.inUse, unrealized: r.unrealized, atMs: Date.now() };
     }else if(r && r.ok === false && r.message && !/Cannot POST|Not Found|No account-summary/i.test(r.message)){
       next = { status: 'error', message: r.message, atMs: Date.now() };
     }
@@ -5040,6 +5051,9 @@ async function ensureSbAcctLoaded(exchange, mode, force){
       ? { status: 'error', message: 'Couldn\u2019t read the account balance.', atMs: Date.now() }
       : { status: 'partial', total: null, inUse: null, available: m.available, atMs: Date.now() };
   }
+  sbAcctInflight.delete(key);
+  // A failed silent poll shouldn't wipe good numbers — keep them, just don't bump the timestamp.
+  if(silent && hasGood && next.status === 'error') return;
   f.sbAcctCache[key] = next;
   sbAcctPatch(exchange, mode);
 }
@@ -5068,6 +5082,14 @@ function initSbAcctBalance(){
   if(tabBtn) tabBtn.addEventListener('click', () => setTimeout(renderSbAcctBalance, 0));
   window.addEventListener('hashchange', () => setTimeout(renderSbAcctBalance, 0));
   setTimeout(renderSbAcctBalance, 0);
+  // Live refresh: while the Trading Bots tab is on screen and the browser
+  // tab is in the foreground, re-read the account every few seconds.
+  setInterval(() => {
+    if(document.hidden || !sbAcctPanelVisible()) return;
+    const { exchange, mode } = sbAcctSel();
+    ensureSbAcctLoaded(exchange, mode, true, true);
+  }, SB_ACCT_POLL_MS);
+  document.addEventListener('visibilitychange', () => { if(!document.hidden && sbAcctPanelVisible()){ const { exchange, mode } = sbAcctSel(); ensureSbAcctLoaded(exchange, mode, true, true); } });
 }
 
 // ---- Smart Bots create-form view helpers (presentation only) ----

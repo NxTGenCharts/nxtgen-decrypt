@@ -3705,30 +3705,47 @@ const numOrNull = (v) => {
   const n = parseFloat(v);
   return Number.isFinite(n) ? n : null;
 };
+// Each getter returns { total, available, unrealized }: total is EQUITY
+// (wallet balance + floating PnL on open positions), so the headline number
+// moves with open trades; unrealized is the floating PnL itself.
 async function bybitAccountSummary(mode, apiKey, secretKey){
   const account = await bybitWalletBalanceRaw(mode, apiKey, secretKey);
   const usdt = (account.coin || []).find(c => c.coin === 'USDT');
-  return { total: usdt ? numOrNull(usdt.walletBalance) : null, available: numOrNull(account.totalAvailableBalance) };
+  const wallet = usdt ? numOrNull(usdt.walletBalance) : null;
+  const unrealized = usdt ? numOrNull(usdt.unrealisedPnl) : null;
+  const equity = usdt ? (numOrNull(usdt.equity) ?? (wallet != null ? wallet + (unrealized || 0) : null)) : null;
+  return { total: equity, available: numOrNull(account.totalAvailableBalance), unrealized };
 }
 async function binanceAccountSummary(mode, apiKey, secretKey){
   const account = await binanceFuturesSignedRequest('GET', '/fapi/v2/account', {}, apiKey, secretKey, mode);
   const usdt = (account.assets || []).find(a => a.asset === 'USDT');
-  return { total: usdt ? numOrNull(usdt.walletBalance) : null, available: usdt ? numOrNull(usdt.availableBalance) : null };
+  if(!usdt) return { total: null, available: null, unrealized: null };
+  const wallet = numOrNull(usdt.walletBalance);
+  const unrealized = numOrNull(usdt.unrealizedProfit);
+  const equity = numOrNull(usdt.marginBalance) ?? (wallet != null ? wallet + (unrealized || 0) : null);
+  return { total: equity, available: numOrNull(usdt.availableBalance), unrealized };
 }
 async function gateioAccountSummary(mode, apiKey, secretKey){
   const account = await gateioFuturesSignedRequest('GET', '/api/v4/futures/usdt/accounts', '', null, apiKey, secretKey, mode);
-  return { total: account ? numOrNull(account.total) : null, available: account ? numOrNull(account.available) : null };
+  if(!account) return { total: null, available: null, unrealized: null };
+  // Gate's `total` excludes unrealised PnL, so add it back.
+  const unrealized = numOrNull(account.unrealised_pnl);
+  const total = numOrNull(account.total);
+  return { total: total != null ? total + (unrealized || 0) : null, available: numOrNull(account.available), unrealized };
 }
 async function mexcAccountSummary(mode, apiKey, secretKey){
   const asset = await mexcFuturesSignedRequest('GET', '/api/v1/private/account/asset/USDT', null, apiKey, secretKey);
-  const total = asset ? (numOrNull(asset.equity) ?? numOrNull(asset.cashBalance)) : null;
-  return { total, available: asset ? numOrNull(asset.availableBalance) : null };
+  if(!asset) return { total: null, available: null, unrealized: null };
+  const unrealized = numOrNull(asset.unrealized);
+  const total = numOrNull(asset.equity) ?? (numOrNull(asset.cashBalance) != null ? numOrNull(asset.cashBalance) + (unrealized || 0) : null);
+  return { total, available: numOrNull(asset.availableBalance), unrealized };
 }
 async function bitgetAccountSummary(mode, apiKey, secretKey, passphrase){
   const data = await bitgetSignedRequest('GET', '/api/v2/mix/account/accounts', 'productType=USDT-FUTURES', null, apiKey, secretKey, passphrase, mode);
   const usdt = Array.isArray(data) ? data.find(a => String(a.marginCoin || '').toUpperCase() === 'USDT') : null;
-  const total = usdt ? (numOrNull(usdt.accountEquity) ?? numOrNull(usdt.usdtEquity)) : null;
-  return { total, available: usdt ? numOrNull(usdt.available) : null };
+  if(!usdt) return { total: null, available: null, unrealized: null };
+  const unrealized = numOrNull(usdt.unrealizedPL);
+  return { total: numOrNull(usdt.accountEquity) ?? numOrNull(usdt.usdtEquity), available: numOrNull(usdt.available), unrealized };
 }
 const FUTURES_ACCOUNT_SUMMARY_GETTERS = {
   bybit: bybitAccountSummary,
@@ -3751,12 +3768,12 @@ app.post('/api/futures/account-summary', async (req, res) => {
   }
   const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
   try{
-    const { total, available } = await getter(netMode, apiKey, secretKey, passphrase);
+    const { total, available, unrealized } = await getter(netMode, apiKey, secretKey, passphrase);
     if(available == null) return res.json({ ok:false, rejected:false, message:`${exchange} returned no USDT futures balance for this account.` });
     // Never let total dip below free (rounding, or a field that excludes
     // unrealised PnL) — that would show a negative "in use".
     const safeTotal = total == null ? available : Math.max(total, available);
-    return res.json({ ok:true, total: safeTotal, available, inUse: Math.max(0, safeTotal - available) });
+    return res.json({ ok:true, total: safeTotal, available, inUse: Math.max(0, safeTotal - available), unrealized: unrealized == null ? 0 : unrealized });
   }catch(err){
     if(err instanceof VerifyRejected){
       return res.json({ ok:false, rejected:true, message: err.message });
