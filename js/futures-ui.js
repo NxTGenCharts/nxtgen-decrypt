@@ -5418,8 +5418,107 @@ function exchangeCheckHtml(bot){
   return `${EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange} booked <strong style="color:var(--ink);">${fmtUsd(c.sumUsd)}</strong> across ${c.count} closes since this bot started (net of fees). The app shows <strong style="color:var(--ink);">${fmtUsd(bot.realizedUsd || 0)}</strong> across ${m.records.length} — difference ${fmtUsd(diff)}. Any trades made by hand or by another bot on this pair in that window are counted on the exchange side too.`;
 }
 
-function renderSmartBotDetail(id){
+// -------------------------------------------------------------
+// Edit profit target / stop loss on a RUNNING bot.
+//  - Grid: both numbers live in bot.config and are re-read every management cycle, so a change
+//    simply takes effect on the next check (no exchange orders to touch). The grid's stop loss is
+//    a realized-loss floor, not a per-position exchange order.
+//  - DCA: take profit / stop loss are real exchange-side exit orders priced off the average entry,
+//    so a change is pushed to the exchange first (same /dca/set-tp call the bot uses when a safety
+//    order fills) and only saved if the exchange accepts it.
+// Draft values are kept in f.sbEdit so the periodic re-render doesn't wipe what's being typed.
+// -------------------------------------------------------------
+function sbEditTargetsHtml(bot, f){
+  const isGrid = bot.type === 'grid';
+  const curTp = isGrid ? (bot.config?.profitTargetPct ?? '') : (bot.plan?.takeProfitPct ?? '');
+  const curSl = isGrid ? (bot.config?.maxLossPct ?? '') : (bot.plan?.stopLossPct || '');
+  const ed = f.sbEdit && f.sbEdit.id === bot.id ? f.sbEdit : null;
+  const tpVal = ed && ed.tp != null ? ed.tp : curTp;
+  const slVal = ed && ed.sl != null ? ed.sl : curSl;
+  const msg = ed && ed.msg ? `<div class="sbf-hint" style="margin-top:10px;${ed.msgError ? 'color:var(--red);' : 'color:var(--green);'}">${ed.msg}</div>` : '';
+  return `
+    <details class="sbf-card sbf-rules" id="sbEditTargets" data-bot-id="${bot.id}" style="margin-top:18px;"${ed && ed.open ? ' open' : ''}>
+      <summary class="sbf-sec">Edit profit target &amp; stop loss</summary>
+      <div class="sbf-collapse-body">
+        <div class="sbf-hint" style="margin:0 0 12px;">Changes apply to this running bot${isGrid ? ' from its next check' : ' and update its take-profit / stop-loss orders on the exchange'}. Current: ${isGrid ? 'profit target' : 'take profit'} ${curTp === '' || curTp == null ? 'none' : curTp + '%'}, stop loss ${curSl === '' || curSl == null ? 'none' : curSl + '%'}.</div>
+        <div class="sbf-fields" style="grid-template-columns:repeat(2, minmax(0,1fr));gap:10px;">
+          ${sbfNumberField({ id: 'sbEditTp', label: isGrid ? 'Profit target' : 'Take profit', value: tpVal, unit: '%', min: 0, tag: isGrid ? 'Optional' : 'Required' })}
+          ${sbfNumberField({ id: 'sbEditSl', label: 'Stop loss', value: slVal, unit: '%', min: 0, tag: isGrid ? 'Required' : 'Optional' })}
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap;">
+          <button type="button" class="primary sb-pill-btn sb-edit-save-btn" data-id="${bot.id}">Save changes</button>
+          ${isGrid ? '<span class="sbf-hint" style="margin:0;">Leave profit target blank for none.</span>' : '<span class="sbf-hint" style="margin:0;">Leave stop loss blank for none.</span>'}
+        </div>
+        ${msg}
+      </div>
+    </details>`;
+}
+
+function sbEditSet(bot, patch){
+  const f = fu();
+  f.sbEdit = Object.assign({}, f.sbEdit && f.sbEdit.id === bot.id ? f.sbEdit : { id: bot.id, open: true }, patch);
+}
+
+async function saveBotTargets(id){
+  const f = fu();
+  const bot = f.tradingBots.find(b => b.id === id);
+  if(!bot || bot.status !== 'active') return;
+  const tpRaw = (document.getElementById('sbEditTp')?.value ?? '').trim();
+  const slRaw = (document.getElementById('sbEditSl')?.value ?? '').trim();
+  const tp = tpRaw === '' ? null : parseFloat(tpRaw);
+  const sl = slRaw === '' ? null : parseFloat(slRaw);
+  const fail = (msg) => { sbEditSet(bot, { tp: tpRaw, sl: slRaw, open: true, msg, msgError: true }); renderSmartBotDetail(id, true); };
+  const isGrid = bot.type === 'grid';
+
+  if(isGrid){
+    if(tp != null && !(tp >= 0.5)) return fail('Profit target must be 0.5% or more (or blank for none).');
+    if(!(sl > 0)) return fail('Grid bots need a stop loss greater than 0%.');
+    const inv = bot.investmentUsd || 0;
+    const realized = bot.realizedUsd || 0;
+    // Saving a value the bot has ALREADY passed would make it flatten and close on its next check.
+    // That is legitimate but irreversible, so make the user confirm it.
+    const tripsTp = tp != null && inv > 0 && realized >= inv * (tp / 100);
+    const tripsSl = inv > 0 && realized <= -inv * (sl / 100);
+    if((tripsTp || tripsSl) && typeof confirm === 'function'){
+      const why = tripsTp ? `realized profit (${fmtUsd(realized)}) is already past the new ${tp}% target` : `realized loss (${fmtUsd(realized)}) is already past the new ${sl}% stop loss`;
+      if(!confirm(`Your ${why}. Saving will make the bot flatten its positions and close on its next check. Continue?`)) return;
+    }
+    const before = { tp: bot.config.profitTargetPct, sl: bot.config.maxLossPct };
+    bot.config.profitTargetPct = tp;
+    bot.config.maxLossPct = sl;
+    tradingBotLog(bot, `Targets updated: profit target ${before.tp ?? 'none'}${before.tp != null && before.tp !== '' ? '%' : ''} -> ${tp == null ? 'none' : tp + '%'}, stop loss ${before.sl}% -> ${sl}%.`, false);
+  } else {
+    if(!(tp > 0)) return fail('Take profit must be greater than 0%.');
+    if(sl != null && !(sl > 0)) return fail('Stop loss must be greater than 0% (or blank for none).');
+    const before = { tp: bot.plan.takeProfitPct, sl: bot.plan.stopLossPct };
+    const avg = bot.runtime && bot.runtime.avgEntryPrice;
+    if(avg > 0){
+      // A position is open: re-price the real exit orders on the exchange FIRST.
+      const cred = liveCred(bot.exchange, bot.mode);
+      if(!cred) return fail('No API key for this exchange/network - cannot update the live exit orders.');
+      const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
+      const exits = computeDcaExitPrices({ direction: bot.direction, avgEntryPrice: avg, takeProfitPct: tp, stopLossPct: sl });
+      const btn = document.querySelector('.sb-edit-save-btn'); if(btn){ btn.disabled = true; btn.textContent = 'Saving\u2026'; }
+      const res = await callProxy('/api/futures/dca/set-tp', { ...proxyArgs, direction: bot.direction, takeProfitPrice: exits.takeProfitPrice, stopLossPrice: exits.stopLossPrice, existingTpAlgoId: bot.runtime.tpAlgoId, existingSlAlgoId: bot.runtime.slAlgoId }).catch(err => ({ ok:false, message: err.message }));
+      if(!res.ok) return fail(`The exchange rejected the update (${res.message || 'unknown error'}). Nothing was changed.`);
+      bot.runtime.tpAlgoId = res.tpAlgoId || null;
+      bot.runtime.slAlgoId = res.slAlgoId || null;
+    }
+    bot.plan.takeProfitPct = tp;
+    bot.plan.stopLossPct = sl;
+    tradingBotLog(bot, `Targets updated: take profit ${before.tp}% -> ${tp}%, stop loss ${before.sl || 'none'}${before.sl ? '%' : ''} -> ${sl == null ? 'none' : sl + '%'}${avg > 0 ? ' (exchange orders re-set)' : ''}.`, false);
+  }
+  saveTradingBotsSnapshot();
+  f.sbEdit = { id: bot.id, open: true, tp: null, sl: null, msg: isGrid ? 'Saved. Applies from the next check.' : 'Saved.', msgError: false };
+  renderSmartBotsPanel();
+}
+
+function renderSmartBotDetail(id, force){
   if(!els.sbDetailHost) return;
+  // The bot cycle re-renders this view every few seconds. Don't rebuild it out from under someone
+  // who is typing in the edit-targets fields (it would drop focus and the on-screen keyboard).
+  const ae = document.activeElement;
+  if(!force && ae && ae.tagName === 'INPUT' && ae.closest && ae.closest('#sbEditTargets') && els.sbDetailHost.contains(ae)) return;
   const f = fu();
   const bot = f.tradingBots.find(b => b.id === id);
   if(!bot){ f.sbView = 'list'; renderSmartBotsPanel(); return; }
@@ -5433,6 +5532,7 @@ function renderSmartBotDetail(id){
       <div class="progress-track progress-track--tall" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(tgt.progressPct)}"><div class="progress-bar progress-bar--green${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div><span class="progress-pct">${Number(tgt.progressPct.toFixed(1))}%</span></div>
       <div class="progress-label"><strong class="progress-left">${fmtUsd(tgt.realizedUsd)} of ${fmtUsd(tgt.targetUsd)}</strong> (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}</div>
     </div>` : '';
+  const editHtml = bot.status === 'active' ? sbEditTargetsHtml(bot, f) : '';
   // The management cycle re-renders this whole view every few seconds; without this the
   // trades table (horizontally scrollable on mobile) snaps back to its left edge each time.
   const prevScroll = els.sbDetailHost.querySelector('.table-scroll');
@@ -5483,6 +5583,7 @@ function renderSmartBotDetail(id){
       </table>
     </div>
     ${bot.statusMessage ? `<div class="tb-card-log" style="margin-top:14px;${bot.statusIsError ? 'color:var(--red);' : ''}">${bot.statusMessage}</div>` : ''}
+    ${editHtml}
     <div class="tb-card-actions" style="margin-top:18px;gap:10px;flex-wrap:wrap;">
       ${bot.status === 'active' ? `
         <button type="button" class="primary ghost sb-pause-btn" data-id="${bot.id}">${bot.paused ? 'Resume' : 'Pause'}</button>
@@ -5776,7 +5877,19 @@ function initSmartBots(){
       else if(e.target.classList.contains('sb-copy-btn')) copySmartBot(id);
       else if(e.target.classList.contains('sb-rename-btn')) renameSmartBot(id);
       else if(e.target.classList.contains('sb-verify-btn')) await verifyBotWithExchange(id);
+      else if(e.target.classList.contains('sb-edit-save-btn')) await saveBotTargets(id);
     });
+    // Keep what's typed (and whether the section is open) across the periodic re-render.
+    els.sbDetailHost.addEventListener('input', (e) => {
+      const t = e.target; if(!t || (t.id !== 'sbEditTp' && t.id !== 'sbEditSl')) return;
+      const bot = fu().tradingBots.find(b => b.id === fu().sbDetailId); if(!bot) return;
+      sbEditSet(bot, { open: true, msg: null, [t.id === 'sbEditTp' ? 'tp' : 'sl']: t.value });
+    });
+    els.sbDetailHost.addEventListener('toggle', (e) => {
+      if(!e.target || e.target.id !== 'sbEditTargets') return;
+      const bot = fu().tradingBots.find(b => b.id === fu().sbDetailId); if(!bot) return;
+      sbEditSet(bot, { open: e.target.open });
+    }, true);
   }
 }
 
