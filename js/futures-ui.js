@@ -414,7 +414,7 @@ async function runGridLiveCycleInner(){
   }
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);
-  if(!cred){ gridLiveLog(`No verified ${exchange} ${mode} credential — connect it in Autotrade & Balances first.`, 'error'); return; }
+  if(!cred){ gridLiveLog(`No verified ${exchange} ${mode} credential — connect it on the API Keys tab first.`, 'error'); return; }
   const gridCfg = loadGridConfig();
   // Same override as Paper's runGridPaperTick — deployment size tracks
   // the shared "Risk per trade (%)" control (fuRiskPct/fuLiveRiskPct)
@@ -835,7 +835,7 @@ const LIVE_ONLY_EXCHANGES = ['mexc'];
 
 export function callProxy(path, body){
   const proxyUrl = (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
-  if(!proxyUrl) return Promise.reject(new Error('No verification proxy configured — set one in Autotrade & Balances.'));
+  if(!proxyUrl) return Promise.reject(new Error('No verification proxy configured — set one on the API Keys tab.'));
   return fetch(proxyUrl + path, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then(res => res.json().catch(() => null)).then(data => {
@@ -1631,7 +1631,7 @@ function initStrategiesCollapse(){
   });
 }
 
-// Live Opportunity Scanner (Autotrade & Futures page) — same collapse
+// Live Opportunity Scanner (Futures Engine page) — same collapse
 // pattern as Strategies above: a <details>/<summary> the user can hide
 // once they trust the bot, remembered per-browser so it doesn't
 // re-expand and push the Live/Demo controls down every reload.
@@ -1802,7 +1802,7 @@ function renderGridPanel(){
         <div id="fuGridLiveStatus" style="font-size:11.5px;color:var(--dim);margin-top:8px;"></div>
       </div>
       ` : `
-      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim);">Grid Live/Demo is armed from <a href="/autotrade-futures/#ai-futures-engine">Futures Engine</a>.</div>`}
+      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim);">Grid Live/Demo is armed from <a href="/autotrade-futures/">Futures Engine</a>.</div>`}
     </div>
   `;
   renderGridDashboard();
@@ -2251,7 +2251,7 @@ function liveExchangeRowHtml(key, { selected, isCurrent }){
   const verified = !!(cred && cred.verified);
   const statusNote = verified
     ? `verified ${mode} key connected`
-    : `no verified ${mode} key — connect in Autotrade &amp; Balances`;
+    : `no verified ${mode} key — connect on the API Keys tab`;
   const modeToggle = supportsDemo ? `
     <div class="mode-toggle" role="group" aria-label="${name} network">
       <button type="button" class="mode-btn ${mode==='live'?'active':''}" data-mode="live">Live</button>
@@ -3219,7 +3219,7 @@ async function createTradingBotFromForm(){
   if(!GRID_LIVE_EXCHANGES.includes(exchange)){ tbCreateStatus('Trading Bots only support Bybit or Binance.', true); return; }
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);
-  if(!cred){ tbCreateStatus(`No verified ${exchange} ${mode} credential — connect it in Autotrade & Balances first.`, true); return; }
+  if(!cred){ tbCreateStatus(`No verified ${exchange} ${mode} credential — connect it on the API Keys tab first.`, true); return; }
   readTradingBotFormNumbers();
 
   if(type === 'grid' && f.tbGridForm.autoScan){
@@ -4945,10 +4945,18 @@ async function ensureSbBalanceLoaded(exchange, mode, force){
 const SB_ACCT_TTL_MS = 15_000;
 const SB_ACCT_POLL_MS = 8_000; // background refresh while the tab is visible
 
+// Two pages render this card: Trading Bots (Utilities & Tools, #sbBalanceHost —
+// Bybit/Binance, the exchanges bots deploy on) and Futures Engine (#fuBalanceHost —
+// all five exchanges). Only one host exists per page.
+function sbAcctHosts(){ return [els.sbBalanceHost, els.fuBalanceHost].filter(Boolean); }
+function sbAcctExchanges(){ return els.fuBalanceHost ? Object.keys(EXCHANGE_DISPLAY_NAMES) : GRID_LIVE_EXCHANGES; }
+
 function sbAcctSel(){
   const f = sbState();
-  if(!f.sbAcctExchange || !GRID_LIVE_EXCHANGES.includes(f.sbAcctExchange)){
-    f.sbAcctExchange = GRID_LIVE_EXCHANGES.includes(f.sbCreateExchange) ? f.sbCreateExchange : GRID_LIVE_EXCHANGES[0];
+  const list = sbAcctExchanges();
+  if(!f.sbAcctExchange || !list.includes(f.sbAcctExchange)){
+    const pref = els.fuBalanceHost ? f.liveExchange : f.sbCreateExchange;
+    f.sbAcctExchange = list.includes(pref) ? pref : list[0];
   }
   if(f.sbAcctMode !== 'live' && f.sbAcctMode !== 'demo'){
     f.sbAcctMode = (f.liveModeByExchange && f.liveModeByExchange[f.sbAcctExchange]) === 'demo' ? 'demo' : 'live';
@@ -4958,8 +4966,7 @@ function sbAcctSel(){
 }
 
 function sbAcctPanelVisible(){
-  const panel = document.getElementById('panelSmartBots');
-  return !!panel && panel.offsetParent !== null;
+  return sbAcctHosts().some(h => h.offsetParent !== null);
 }
 
 function sbAcctHtml(){
@@ -4968,7 +4975,8 @@ function sbAcctHtml(){
   const exName = EXCHANGE_DISPLAY_NAMES[exchange] || exchange;
   const modeLabel = mode === 'demo' ? 'Demo' : 'Live';
   let state = 'loading', note = '', statusText = 'Reading\u2026', statusIcon = 'refresh-cw';
-  if(c && c.status === 'nocred'){ state = 'nocred'; statusText = 'No API key'; statusIcon = 'triangle-alert'; note = `No verified ${modeLabel} API key for ${exName} \u2014 add one under API Keys.`; }
+  if(exchange === 'mexc' && mode === 'demo'){ state = 'nocred'; statusText = 'No Demo'; statusIcon = 'triangle-alert'; note = 'MEXC has no Demo trading environment \u2014 switch to Live.'; }
+  else if(c && c.status === 'nocred'){ state = 'nocred'; statusText = 'No API key'; statusIcon = 'triangle-alert'; note = `No verified ${modeLabel} API key for ${exName} \u2014 add one under API Keys.`; }
   else if(c && c.status === 'error'){ state = 'error'; statusText = 'Unavailable'; statusIcon = 'triangle-alert'; note = c.message || 'Couldn\u2019t read the account balance.'; }
   else if(c && (c.status === 'ok' || c.status === 'partial')){ state = 'ok'; statusText = c.status === 'partial' ? 'Free margin only' : 'Connected'; statusIcon = 'circle-check'; }
   const ok = state === 'ok';
@@ -4987,7 +4995,7 @@ function sbAcctHtml(){
         </div>
         <div class="sb-acct-controls">
           <div class="sbf-select sb-acct-select">
-            <select id="sbAcctExchange" aria-label="Exchange">${GRID_LIVE_EXCHANGES.map(x => `<option value="${x}" ${exchange === x ? 'selected' : ''}>${EXCHANGE_DISPLAY_NAMES[x] || x}</option>`).join('')}</select>
+            <select id="sbAcctExchange" aria-label="Exchange">${sbAcctExchanges().map(x => `<option value="${x}" ${exchange === x ? 'selected' : ''}>${EXCHANGE_DISPLAY_NAMES[x] || x}</option>`).join('')}</select>
             ${icon('chevron-down')}
           </div>
           <div class="mode-toggle" role="group" aria-label="Live or Demo account">${modeBtn('live', 'Live')}${modeBtn('demo', 'Demo')}</div>
@@ -5008,11 +5016,12 @@ function sbAcctHtml(){
 }
 
 function renderSbAcctBalance(){
-  if(!els.sbBalanceHost) return;
+  const hosts = sbAcctHosts();
+  if(!hosts.length) return;
   const { exchange, mode } = sbAcctSel();
   // Background re-renders fire often — don't yank the dropdown away mid-selection.
   const picking = document.activeElement && document.activeElement.id === 'sbAcctExchange';
-  if(!picking) els.sbBalanceHost.innerHTML = sbAcctHtml();
+  if(!picking) hosts.forEach(h => { h.innerHTML = sbAcctHtml(); });
   if(sbAcctPanelVisible()) ensureSbAcctLoaded(exchange, mode, false);
 }
 
@@ -5022,6 +5031,7 @@ async function ensureSbAcctLoaded(exchange, mode, force, silent){
   const key = `${exchange}:${mode}`;
   const cached = f.sbAcctCache[key];
   if(sbAcctInflight.has(key)) return;
+  if(exchange === 'mexc' && mode === 'demo') return;
   if(!force && cached && (cached.status === 'loading' || (cached.status !== 'error' && cached.status !== 'nocred' && Date.now() - cached.atMs < SB_ACCT_TTL_MS))) return;
   const cred = liveCred(exchange, mode);
   if(!cred){ f.sbAcctCache[key] = { status: 'nocred', atMs: Date.now() }; sbAcctPatch(exchange, mode); return; }
@@ -5063,18 +5073,21 @@ async function ensureSbAcctLoaded(exchange, mode, force, silent){
 // the one the person has since switched to.
 function sbAcctPatch(exchange, mode){
   const { exchange: ex, mode: m } = sbAcctSel();
-  if(ex === exchange && m === mode && els.sbBalanceHost) els.sbBalanceHost.innerHTML = sbAcctHtml();
+  if(ex === exchange && m === mode) sbAcctHosts().forEach(h => { h.innerHTML = sbAcctHtml(); });
 }
 
 function initSbAcctBalance(){
-  if(!els.sbBalanceHost) return;
-  els.sbBalanceHost.addEventListener('click', (e) => {
-    const modeBtn = e.target.closest('.sb-acct-mode');
-    if(modeBtn){ sbAcctSel(); sbState().sbAcctMode = modeBtn.dataset.mode === 'demo' ? 'demo' : 'live'; renderSbAcctBalance(); return; }
-    if(e.target.closest('#sbAcctRefresh')){ const { exchange, mode } = sbAcctSel(); ensureSbAcctLoaded(exchange, mode, true); }
-  });
-  els.sbBalanceHost.addEventListener('change', (e) => {
-    if(e.target.id === 'sbAcctExchange'){ sbAcctSel(); sbState().sbAcctExchange = e.target.value; renderSbAcctBalance(); }
+  const hosts = sbAcctHosts();
+  if(!hosts.length) return;
+  hosts.forEach(host => {
+    host.addEventListener('click', (e) => {
+      const modeBtn = e.target.closest('.sb-acct-mode');
+      if(modeBtn){ sbAcctSel(); sbState().sbAcctMode = modeBtn.dataset.mode === 'demo' ? 'demo' : 'live'; renderSbAcctBalance(); return; }
+      if(e.target.closest('#sbAcctRefresh')){ const { exchange, mode } = sbAcctSel(); ensureSbAcctLoaded(exchange, mode, true); }
+    });
+    host.addEventListener('change', (e) => {
+      if(e.target.id === 'sbAcctExchange'){ sbAcctSel(); sbState().sbAcctExchange = e.target.value; renderSbAcctBalance(); }
+    });
   });
   // The panel is hidden until its sub-tab is opened, and the load is skipped
   // while hidden (no background polling) — so fetch when it's shown.
@@ -5358,7 +5371,7 @@ async function createSmartBotFromForm(){
   }
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);
-  if(!cred){ sbCreateStatus(`No verified ${exchange} ${mode} credential — connect it in Autotrade & Balances first.`, true); return; }
+  if(!cred){ sbCreateStatus(`No verified ${exchange} ${mode} credential — connect it on the API Keys tab first.`, true); return; }
   const cfg = type === 'grid' ? f.sbGridForm : f.sbDcaForm;
   if(type === 'grid' && !(cfg.stopLossPct > 0)){ sbCreateStatus('Grid Bots need a Stop Loss % greater than 0.', true); return; }
   if(cfg.fundingMode !== 'pct' && !(cfg.fundingUsd > 0)){ sbCreateStatus('Enter a margin amount.', true); return; }

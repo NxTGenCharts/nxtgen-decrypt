@@ -206,14 +206,13 @@ document.addEventListener('click', (e) => {
   if (real) real.click();
 });
 
-// ---------- Trade page deep links: #auto  #futures ----------
+// ---------- Trade page deep links: #auto ----------
 // (Utilities & Tools sub-tabs — #paper-trading, #backtesting, #trading-bots (formerly #smart-bots) — are routed by ui.js.)
 function routeHash() {
   const h = location.hash.replace('#', '');
   if (!h) return;
-  const click = (id) => { const b = document.getElementById(id); if (b) b.click(); };
-  if (h === 'auto') click('tabAutoBtn');
-  if (h === 'futures') click('tabFuturesBtn');
+  // Autotrade moved to the Triangular Arbitrage page; Futures Engine is its own page now.
+  if (h === 'auto' && location.pathname.indexOf('/autotrade-futures') === 0) location.replace('/triangular-arbitrage/');
 }
 window.addEventListener('hashchange', routeHash);
 // app.js wires the sub-tab buttons in its own module; wait a tick so its listeners exist.

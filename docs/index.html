@@ -32,10 +32,11 @@
 <p>Bitget, Binance, Bybit, MEXC and Gate.io. Public market data for all five is fetched through the app's market-data backend, which returns one merged, briefly cached response. If that backend is unreachable, the app falls back to calling exchanges directly from your browser.</p>
 <h2>Triangular Arbitrage</h2>
 <p>Finds three-leg cycles on one exchange that start and end in the same anchor currency (USDT by default; USDC, BTC, ETH, BNB or all are available). Controls include exchange, anchor currency, taker fee per leg (default 0.10%), minimum profit filter, minimum 24h volume, number of results and a live-scan interval. By default the scan uses live bid/ask prices and subtracts your fee assumption. A "Theoretical (CLI-style)" option uses last price with no fee, which is not realistic and shows larger numbers.</p>
+<p>The page also carries <strong>Triangular Autotrade</strong> (spot). It starts from the balance of the exchange account you connected on the API Keys page, simulates cycles by default, and places real orders only if you explicitly arm Real order execution.</p>
 <h2>Cross-Exchange</h2>
 <p>Compares the same asset across exchanges and lists the buy venue, sell venue, estimated final amount for your chosen notional, how long the gap has been open, liquidity level and net profit after the taker fee. Advanced filters cover minimum volume, liquidity, window, quote asset, per-exchange toggles and a Bitget deposit/withdraw confirmation filter.</p>
-<h2>Autotrade &amp; Futures</h2>
-<p>Includes the AI Futures Engine with Live/Demo, Paper and Backtest modes and several strategies. Live and Demo trading run from your browser tab while it is open and place orders only after you connect keys with trading permission and explicitly start them. Paper and Backtest do not place orders.</p>
+<h2>Futures Engine</h2>
+<p>The Futures Engine runs Live/Demo trading with several strategies, and shows your account balance (total including floating PnL, margin in use and free margin) with a Live/Demo toggle. Paper and Backtest live on Utilities &amp; Tools. Live and Demo trading run from your browser tab while it is open and place orders only after you connect keys with trading permission and explicitly start them. Paper and Backtest do not place orders.</p>
 <h2>Utilities &amp; Tools</h2>
 <p>Paper trading and trading bots for testing ideas without risking capital.</p>
 <h2>API Keys</h2>

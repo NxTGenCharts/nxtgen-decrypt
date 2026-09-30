@@ -41,7 +41,6 @@ export const els = {
   tabTradingBtn: document.getElementById('tabTradingBtn'),
   tabKeysBtn: document.getElementById('tabKeysBtn'),
   panelKeys: document.getElementById('panelKeys'),
-  goToKeysBtn: document.getElementById('goToKeysBtn'),
   panelTrading: document.getElementById('panelTrading'),
   panelTri: document.getElementById('panelTri'),
   panelX: document.getElementById('panelX'),
@@ -85,11 +84,8 @@ export const els = {
   badgeBybit: document.getElementById('badgeBybit'),
   badgeMexc: document.getElementById('badgeMexc'),
   badgeGateio: document.getElementById('badgeGateio'),
-  // --- Autotrade & Balances tab ---
-  tabAutoBtn: document.getElementById('tabAutoBtn'),
-  panelAuto: document.getElementById('panelAuto'),
+  // --- Triangular Autotrade (Triangular Arbitrage page) ---
   connectRows: document.getElementById('connectRows'),
-  balanceRows: document.getElementById('balanceRows'),
   atExchange: document.getElementById('atExchange'),
   atProxyUrl: document.getElementById('atProxyUrl'),
   atModeRow: document.getElementById('atModeRow'),
@@ -125,7 +121,6 @@ export const els = {
   atProgressLabel: document.getElementById('atProgressLabel'),
   atCycleLog: document.getElementById('atCycleLog'),
   // --- AI Futures Engine tab ---
-  tabFuturesBtn: document.getElementById('tabFuturesBtn'),
   panelFutures: document.getElementById('panelFutures'),
   // --- Utilities & Tools page sub-tabs ---
   tabPaperBtn: document.getElementById('tabPaperBtn'),
@@ -157,6 +152,7 @@ export const els = {
   sbCreateView: document.getElementById('sbCreateView'),
   sbDetailView: document.getElementById('sbDetailView'),
   sbBalanceHost: document.getElementById('sbBalanceHost'),
+  fuBalanceHost: document.getElementById('fuBalanceHost'),
   sbSummaryHost: document.getElementById('sbSummaryHost'),
   sbTabsHost: document.getElementById('sbTabsHost'),
   sbListHost: document.getElementById('sbListHost'),

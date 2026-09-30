@@ -593,23 +593,10 @@ if(els.connectRows) els.connectRows.addEventListener('click', async (e) => {
 });
 
 // ---------------- Balances ----------------
+// The manual Balances (Spot) panel is gone — balances come from the verified
+// API keys (see refreshAllConnectedBalances above). This just keeps the
+// read-only "Today's starting balance" field in step with them.
 function renderBalances(){
-  if(!els.balanceRows) return; // lives on the Autotrade & Futures page only
-  els.balanceRows.innerHTML = Object.keys(EXCHANGES).map(key => {
-    const label = EXCHANGES[key].label;
-    const mode = EXCHANGES[key].demoSupported ? (state.exchangeMode[key] || 'live') : 'live';
-    const bal = (state.balances[key] || {})[mode];
-    const isAtExchange = state.autotrade.exchange === key && state.autotrade.mode === mode;
-    const modeTag = mode === 'demo'
-      ? ' <span class="pill" style="color:var(--amber);border-color:var(--amber-dim);">DEMO</span>'
-      : '';
-    return `<div class="balance-row" data-exchange="${key}">
-      <div class="connect-label">${label}${modeTag}${isAtExchange ? ' <span class="pill tr-yes" style="margin-left:6px;">AUTOTRADE</span>' : ''}</div>
-      <input class="bal-input" type="number" min="0" step="0.01" placeholder="Enter balance (USDT)" value="${bal !== null && bal !== undefined ? bal : ''}">
-      <button class="primary ghost bal-save-btn">Save Balance</button>
-      <div class="balance-shown">${bal !== null && bal !== undefined ? money(bal) : '—'}</div>
-    </div>`;
-  }).join('');
   syncStartBalanceField();
 }
 
@@ -622,38 +609,20 @@ function renderBalances(){
 // orders (see the "Simulated only" note in the UI) — it just makes sure
 // the *simulation's* starting point can't drift from reality by accident.
 function syncStartBalanceField(){
-  if(!els.atStartBalance) return; // lives on the Autotrade & Futures page only
+  if(!els.atStartBalance) return; // lives on the Triangular Arbitrage page only
   const key = state.autotrade.exchange;
   const mode = EXCHANGES[key].demoSupported ? state.autotrade.mode : 'live';
   const bal = state.balances[key]?.[mode];
   els.atStartBalance.value = bal != null ? bal : '';
   els.atStartBalance.setAttribute('readonly', 'readonly');
   els.atStartBalance.title = bal != null
-    ? `Locked to ${EXCHANGES[key].label}'s actual ${mode} balance — connect/refresh that account to change this.`
-    : `No balance found for ${EXCHANGES[key].label} (${mode}) yet — connect that account or click Refresh Balance on the row above first.`;
+    ? `Locked to ${EXCHANGES[key].label}'s actual ${mode} balance — connect/refresh that account on the API Keys tab to change this.`
+    : `No balance found for ${EXCHANGES[key].label} (${mode}) yet — connect that account on the API Keys tab first.`;
 }
-
-// els.balanceRows lives on the Autotrade & Futures page only.
-if(els.balanceRows) els.balanceRows.addEventListener('click', (e) => {
-  const btn = e.target.closest('.bal-save-btn');
-  if(!btn) return;
-  const row = e.target.closest('.balance-row');
-  const key = row.dataset.exchange;
-  const mode = state.exchangeMode[key];
-  const val = parseFloat(row.querySelector('.bal-input').value);
-  if(!isFinite(val) || val < 0){
-    showAtMessage('Enter a valid balance amount first.', 'error');
-    return;
-  }
-  state.balances[key][mode] = val;
-  persist();
-  renderBalances();
-  showAtMessage(`${EXCHANGES[key].label} (${mode}) balance saved: ${money(val)}. This is a manual entry — reading a live balance requires an authenticated call this front-end intentionally does not make.`, 'info');
-});
 
 // ---------------- Autotrade config UI ----------------
 function renderExchangeOptions(){
-  if(!els.atExchange) return; // lives on the Autotrade & Futures page only
+  if(!els.atExchange) return; // lives on the Triangular Arbitrage page only
   if(els.atExchange.options.length === 0 || els.atExchange.dataset.built !== '1'){
     els.atExchange.innerHTML = Object.keys(EXCHANGES).map(k => `<option value="${k}">${EXCHANGES[k].label}</option>`).join('');
     els.atExchange.dataset.built = '1';
@@ -663,7 +632,7 @@ function renderExchangeOptions(){
 }
 
 function syncAtModeToggle(){
-  if(!els.atExchange || !els.atModeRow) return; // lives on the Autotrade & Futures page only
+  if(!els.atExchange || !els.atModeRow) return; // lives on the Triangular Arbitrage page only
   const key = els.atExchange.value;
   const supportsDemo = EXCHANGES[key].demoSupported;
   els.atModeRow.style.display = supportsDemo ? '' : 'none';
@@ -675,7 +644,7 @@ function syncAtModeToggle(){
 }
 
 // The atMode*/atTestMode/atLiveExecution/atArmBtn/atToggleBtn/atExchange
-// controls below all live on the Autotrade & Futures page only — this
+// controls below all live on the Triangular Arbitrage page only — this
 // module is imported on every page, so each listener is guarded.
 if(els.atModeLive) els.atModeLive.addEventListener('click', () => { state.autotrade.mode = 'live'; syncAtModeToggle(); renderBalances(); });
 if(els.atModeDemo) els.atModeDemo.addEventListener('click', () => {
@@ -708,7 +677,7 @@ const ARM_PHRASE = 'PLACE REAL ORDERS';
 
 function disarmLiveExecution(){
   state.autotrade.liveExecution = false;
-  if(!els.atLiveExecution) return; // lives on the Autotrade & Futures page only
+  if(!els.atLiveExecution) return; // lives on the Triangular Arbitrage page only
   els.atLiveExecution.checked = false;
   els.atArmRow.style.display = 'none';
   els.atArmPhrase.value = '';
@@ -777,7 +746,7 @@ function ensureDay(){
 }
 
 function renderAutotradeStatus(){
-  if(!els.atStatDay) return; // lives on the Autotrade & Futures page only
+  if(!els.atStatDay) return; // lives on the Triangular Arbitrage page only
   const at = state.autotrade;
   els.atStatDay.textContent = at.dateKey || '—';
   els.atStatBalance.textContent = money(at.currentBalance || 0);
@@ -804,7 +773,7 @@ function renderAutotradeStatus(){
 }
 
 function renderCycleLog(){
-  if(!els.atCycleLog) return; // lives on the Autotrade & Futures page only
+  if(!els.atCycleLog) return; // lives on the Triangular Arbitrage page only
   const cycles = state.autotrade.cycles;
   if(cycles.length === 0){
     els.atCycleLog.innerHTML = `<div class="empty">No cycles executed yet today. Autotrade fires on the single highest-profit triangular cycle above your floor, each time it scans.</div>`;
@@ -1259,7 +1228,7 @@ function startAutotrade(){
   const mode = EXCHANGES[key].demoSupported ? state.autotrade.mode : 'live';
   const startBal = state.balances[key]?.[mode];
   if(startBal == null || !isFinite(startBal) || startBal <= 0){
-    showAtMessage(`No balance found for ${EXCHANGES[key].label} (${mode}). Connect that account (or click Refresh Balance on its row) above before starting Autotrade.`, 'error');
+    showAtMessage(`No balance found for ${EXCHANGES[key].label} (${mode}). Connect that account on the API Keys tab before starting Autotrade.`, 'error');
     return;
   }
   at.exchange = key;

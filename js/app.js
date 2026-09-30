@@ -1,7 +1,7 @@
 // =============================================================
 // app.js — application initialization and orchestration.
 // The site is now a set of separate HTML pages (Overview,
-// Triangular Arbitrage, Cross-Exchange, Autotrade & Futures, API
+// Triangular Arbitrage, Cross-Exchange, Futures Engine, API
 // Keys) instead of one single-page app with JS-driven tabs, so
 // top-level nav is just real <a href> links now — no click-based
 // tab switching needed for it.
@@ -42,10 +42,8 @@ if(els.scanBtn) els.scanBtn.addEventListener('click', runScan);
 // ---- Cross-Exchange page ----
 if(els.xScanBtn) els.xScanBtn.addEventListener('click', runXScan);
 
-// ---- Autotrade & Futures page ----
-// tabAutoBtn/tabFuturesBtn are the sub-tab switch within this one page. The
-// selected sub-tab is kept in the URL hash (#autotrade-balances /
-// #ai-futures-engine) — see initSubTabRouting in ui.js.
+// ---- Triangular Autotrade lives on the Triangular Arbitrage page; Futures Engine has its own page. ----
+// Utilities & Tools keeps its paper/backtest/bots sub-tabs (hash-routed, see initSubTabRouting in ui.js).
 
 // ---- Init calls: each one is a no-op (or close to it) on a page that
 // doesn't have its elements, since every render function it calls now

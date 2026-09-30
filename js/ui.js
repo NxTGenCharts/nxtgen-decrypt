@@ -93,14 +93,11 @@ export function switchTabAll(which){
   });
 }
 
-// Sub-tab switching WITHIN a page. Two pages have sub-tabs: Autotrade &
-// Futures (auto / futures) and Utilities & Tools (paper / backtest / bots).
+// Sub-tab switching WITHIN a page. Only Utilities & Tools has sub-tabs now (paper / backtest / bots).
 // Each group is described once below; everything else is generic.
 //
 // The active sub-tab lives in the URL hash so it can be linked to, survives a
 // reload, and works with the browser's Back/Forward buttons, e.g.
-//   /autotrade-futures/#autotrade-balances   (also the default with no hash)
-//   /autotrade-futures/#ai-futures-engine
 //   /utilities-tools/#paper-trading          (also the default with no hash)
 //   /utilities-tools/#backtesting
 //   /utilities-tools/#trading-bots
@@ -108,13 +105,6 @@ export function switchTabAll(which){
 // tab still lives on that page. (#bots on the Futures page is redirected to
 // Utilities & Tools by an inline script in that page.)
 const SUBTAB_GROUPS = [
-  {
-    defaultKey: 'auto',
-    btn: { auto: 'tabAutoBtn', futures: 'tabFuturesBtn' },
-    panel: { auto: 'panelAuto', futures: 'panelFutures' },
-    slug: { auto: 'autotrade-balances', futures: 'ai-futures-engine' },
-    alias: { 'autotrade-balances': 'auto', 'auto': 'auto', 'ai-futures-engine': 'futures', 'futures': 'futures' },
-  },
   {
     defaultKey: 'paper',
     btn: { paper: 'tabPaperBtn', backtest: 'tabBacktestBtn', smartbots: 'tabSmartBotsBtn' },
