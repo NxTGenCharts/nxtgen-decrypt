@@ -156,6 +156,7 @@ export const els = {
   sbListView: document.getElementById('sbListView'),
   sbCreateView: document.getElementById('sbCreateView'),
   sbDetailView: document.getElementById('sbDetailView'),
+  sbBalanceHost: document.getElementById('sbBalanceHost'),
   sbSummaryHost: document.getElementById('sbSummaryHost'),
   sbTabsHost: document.getElementById('sbTabsHost'),
   sbListHost: document.getElementById('sbListHost'),

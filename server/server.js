@@ -3694,6 +3694,77 @@ const FUTURES_AVAILABLE_MARGIN_GETTERS = {
   mexc: mexcFuturesBalance,
   bitget: bitgetFuturesBalance,
 };
+// Full account summary for the Trading Bots balance card: total USDT balance,
+// free (available) margin, and margin in use. Read-only, same signed
+// requests the balance / available-margin getters already make — just
+// keeping the extra fields they used to throw away. "In use" is derived
+// as total - free so the three numbers always add up on screen, whatever
+// each exchange calls its own margin fields.
+const numOrNull = (v) => {
+  if(v == null || v === '') return null;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+};
+async function bybitAccountSummary(mode, apiKey, secretKey){
+  const account = await bybitWalletBalanceRaw(mode, apiKey, secretKey);
+  const usdt = (account.coin || []).find(c => c.coin === 'USDT');
+  return { total: usdt ? numOrNull(usdt.walletBalance) : null, available: numOrNull(account.totalAvailableBalance) };
+}
+async function binanceAccountSummary(mode, apiKey, secretKey){
+  const account = await binanceFuturesSignedRequest('GET', '/fapi/v2/account', {}, apiKey, secretKey, mode);
+  const usdt = (account.assets || []).find(a => a.asset === 'USDT');
+  return { total: usdt ? numOrNull(usdt.walletBalance) : null, available: usdt ? numOrNull(usdt.availableBalance) : null };
+}
+async function gateioAccountSummary(mode, apiKey, secretKey){
+  const account = await gateioFuturesSignedRequest('GET', '/api/v4/futures/usdt/accounts', '', null, apiKey, secretKey, mode);
+  return { total: account ? numOrNull(account.total) : null, available: account ? numOrNull(account.available) : null };
+}
+async function mexcAccountSummary(mode, apiKey, secretKey){
+  const asset = await mexcFuturesSignedRequest('GET', '/api/v1/private/account/asset/USDT', null, apiKey, secretKey);
+  const total = asset ? (numOrNull(asset.equity) ?? numOrNull(asset.cashBalance)) : null;
+  return { total, available: asset ? numOrNull(asset.availableBalance) : null };
+}
+async function bitgetAccountSummary(mode, apiKey, secretKey, passphrase){
+  const data = await bitgetSignedRequest('GET', '/api/v2/mix/account/accounts', 'productType=USDT-FUTURES', null, apiKey, secretKey, passphrase, mode);
+  const usdt = Array.isArray(data) ? data.find(a => String(a.marginCoin || '').toUpperCase() === 'USDT') : null;
+  const total = usdt ? (numOrNull(usdt.accountEquity) ?? numOrNull(usdt.usdtEquity)) : null;
+  return { total, available: usdt ? numOrNull(usdt.available) : null };
+}
+const FUTURES_ACCOUNT_SUMMARY_GETTERS = {
+  bybit: bybitAccountSummary,
+  binance: binanceAccountSummary,
+  gateio: gateioAccountSummary,
+  mexc: mexcAccountSummary,
+  bitget: bitgetAccountSummary,
+};
+app.post('/api/futures/account-summary', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey, passphrase } = req.body || {};
+  if(!exchange || !apiKey || !secretKey){
+    return res.status(400).json({ ok:false, message:'exchange, apiKey and secretKey are all required.' });
+  }
+  if(exchange === 'bitget' && !passphrase){
+    return res.status(400).json({ ok:false, message:'Bitget also requires the passphrase set when the API key was created.' });
+  }
+  const getter = FUTURES_ACCOUNT_SUMMARY_GETTERS[exchange];
+  if(!getter){
+    return res.status(400).json({ ok:false, message:`No account-summary getter for "${exchange}" yet — only bybit, binance, gateio, mexc, and bitget are supported so far.` });
+  }
+  const netMode = ['live', 'demo'].includes(mode) ? mode : 'live';
+  try{
+    const { total, available } = await getter(netMode, apiKey, secretKey, passphrase);
+    if(available == null) return res.json({ ok:false, rejected:false, message:`${exchange} returned no USDT futures balance for this account.` });
+    // Never let total dip below free (rounding, or a field that excludes
+    // unrealised PnL) — that would show a negative "in use".
+    const safeTotal = total == null ? available : Math.max(total, available);
+    return res.json({ ok:true, total: safeTotal, available, inUse: Math.max(0, safeTotal - available) });
+  }catch(err){
+    if(err instanceof VerifyRejected){
+      return res.json({ ok:false, rejected:true, message: err.message });
+    }
+    return res.json({ ok:false, rejected:false, message: `Could not read account summary on ${exchange}: ${err.message}` });
+  }
+});
+
 app.post('/api/futures/available-margin', async (req, res) => {
   const { exchange, mode, apiKey, secretKey, passphrase } = req.body || {};
   if(!exchange || !apiKey || !secretKey){

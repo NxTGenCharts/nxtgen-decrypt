@@ -4655,6 +4655,8 @@ function renderSmartBotsList(){
   const tab = f.sbListTab || 'active';
   const shown = bots.filter(b => tab === 'active' ? (b.status === 'active' || b.status === 'deploying') : (b.status === 'stopped' || b.status === 'closed' || b.status === 'error'));
 
+  renderSbAcctBalance();
+
   let sumPnl = 0, sumInv = 0;
   bots.forEach(b => { const m = computeBotMetrics(b); sumPnl += (m.totalPnl || 0); sumInv += (b.investmentUsd || 0); });
   if(els.sbSummaryHost){
@@ -4933,6 +4935,139 @@ async function ensureSbBalanceLoaded(exchange, mode, force){
   const result = await checkAvailableMarginFor({ exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase }, 0).catch(() => ({ available: null }));
   f.sbBalanceCache[key] = { status: result.available == null ? 'error' : 'ok', available: result.available, atMs: Date.now() };
   updateSbBalanceInfoDom();
+}
+
+// ---- Trading Bots account balance card (list view) ----
+// Total USDT balance, margin in use and free margin for one exchange +
+// Live/Demo account. The Live/Demo toggle here is a VIEW switch only — it
+// never touches liveModeByExchange (which decides where new bots deploy).
+// Read-only: it only calls /api/futures/account-summary.
+const SB_ACCT_TTL_MS = 15_000;
+
+function sbAcctSel(){
+  const f = sbState();
+  if(!f.sbAcctExchange || !GRID_LIVE_EXCHANGES.includes(f.sbAcctExchange)){
+    f.sbAcctExchange = GRID_LIVE_EXCHANGES.includes(f.sbCreateExchange) ? f.sbCreateExchange : GRID_LIVE_EXCHANGES[0];
+  }
+  if(f.sbAcctMode !== 'live' && f.sbAcctMode !== 'demo'){
+    f.sbAcctMode = (f.liveModeByExchange && f.liveModeByExchange[f.sbAcctExchange]) === 'demo' ? 'demo' : 'live';
+  }
+  if(!f.sbAcctCache) f.sbAcctCache = {};
+  return { f, exchange: f.sbAcctExchange, mode: f.sbAcctMode };
+}
+
+function sbAcctPanelVisible(){
+  const panel = document.getElementById('panelSmartBots');
+  return !!panel && panel.offsetParent !== null;
+}
+
+function sbAcctHtml(){
+  const { f, exchange, mode } = sbAcctSel();
+  const c = f.sbAcctCache[`${exchange}:${mode}`];
+  const exName = EXCHANGE_DISPLAY_NAMES[exchange] || exchange;
+  const modeLabel = mode === 'demo' ? 'Demo' : 'Live';
+  let state = 'loading', note = '', statusText = 'Reading\u2026', statusIcon = 'refresh-cw';
+  if(c && c.status === 'nocred'){ state = 'nocred'; statusText = 'No API key'; statusIcon = 'triangle-alert'; note = `No verified ${modeLabel} API key for ${exName} \u2014 add one under API Keys.`; }
+  else if(c && c.status === 'error'){ state = 'error'; statusText = 'Unavailable'; statusIcon = 'triangle-alert'; note = c.message || 'Couldn\u2019t read the account balance.'; }
+  else if(c && (c.status === 'ok' || c.status === 'partial')){ state = 'ok'; statusText = c.status === 'partial' ? 'Free margin only' : 'Connected'; statusIcon = 'circle-check'; }
+  const ok = state === 'ok';
+  const partial = ok && c.status === 'partial';
+  const val = (n) => (ok && n != null) ? sbFmtBalance(n) : '&mdash;';
+  const pct = (ok && !partial && c.total > 0) ? Math.min(100, Math.max(0, (c.inUse / c.total) * 100)) : null;
+  if(partial) note = 'Total and margin in use need the latest backend (new /api/futures/account-summary endpoint) \u2014 showing free margin only.';
+  const modeBtn = (m, label) => `<button type="button" class="mode-btn sb-acct-mode ${mode === m ? 'active' : ''}" data-mode="${m}" aria-pressed="${mode === m ? 'true' : 'false'}">${label}</button>`;
+  const refreshBtn = state === 'nocred' ? '' : `<button type="button" class="sbf-icon-btn" id="sbAcctRefresh" aria-label="Refresh account balance" title="Refresh" ${state === 'loading' ? 'disabled' : ''}>${icon('refresh-cw')}</button>`;
+  return `
+    <div class="ov-block sb-acct-card" data-state="${state}" data-mode="${mode}" role="group" aria-label="Account balance">
+      <div class="sb-acct-head">
+        <div class="sb-acct-title">
+          <span class="sbf-eyebrow">Account balance</span>
+          <span class="sbf-acct-name">${exName}<span class="sbf-env sbf-env--${mode}">${modeLabel}</span></span>
+        </div>
+        <div class="sb-acct-controls">
+          <div class="sbf-select sb-acct-select">
+            <select id="sbAcctExchange" aria-label="Exchange">${GRID_LIVE_EXCHANGES.map(x => `<option value="${x}" ${exchange === x ? 'selected' : ''}>${EXCHANGE_DISPLAY_NAMES[x] || x}</option>`).join('')}</select>
+            ${icon('chevron-down')}
+          </div>
+          <div class="mode-toggle" role="group" aria-label="Live or Demo account">${modeBtn('live', 'Live')}${modeBtn('demo', 'Demo')}</div>
+          <span class="sbf-chip sbf-chip--${state}">${icon(statusIcon)}<span>${statusText}</span></span>
+          ${refreshBtn}
+        </div>
+      </div>
+      <div class="sb-acct-grid">
+        <div class="ov-card ov-highlight"><span class="ov-label">Total USDT balance</span><span class="ov-value">${val(c && c.total)}</span></div>
+        <div class="ov-card"><span class="ov-label">Margin in use</span><span class="ov-value">${val(c && c.inUse)}</span></div>
+        <div class="ov-card"><span class="ov-label">Free margin</span><span class="ov-value sb-acct-free">${val(c && c.available)}</span></div>
+      </div>
+      ${pct != null ? `<div class="sb-acct-bar" role="img" aria-label="${pct.toFixed(1)}% of balance is in use as margin"><span style="width:${pct.toFixed(1)}%"></span></div><div class="sb-acct-barlabel">${pct.toFixed(1)}% of balance in use as margin</div>` : ''}
+      ${note ? `<div class="sb-acct-note ${state === 'ok' ? 'sb-acct-note--info' : ''}">${note}</div>` : ''}
+    </div>`;
+}
+
+function renderSbAcctBalance(){
+  if(!els.sbBalanceHost) return;
+  const { exchange, mode } = sbAcctSel();
+  // Background re-renders fire often — don't yank the dropdown away mid-selection.
+  const picking = document.activeElement && document.activeElement.id === 'sbAcctExchange';
+  if(!picking) els.sbBalanceHost.innerHTML = sbAcctHtml();
+  if(sbAcctPanelVisible()) ensureSbAcctLoaded(exchange, mode, false);
+}
+
+async function ensureSbAcctLoaded(exchange, mode, force){
+  const { f } = sbAcctSel();
+  const key = `${exchange}:${mode}`;
+  const cached = f.sbAcctCache[key];
+  if(!force && cached && (cached.status === 'loading' || (cached.status !== 'error' && cached.status !== 'nocred' && Date.now() - cached.atMs < SB_ACCT_TTL_MS))) return;
+  const cred = liveCred(exchange, mode);
+  if(!cred){ f.sbAcctCache[key] = { status: 'nocred', atMs: Date.now() }; sbAcctPatch(exchange, mode); return; }
+  f.sbAcctCache[key] = { status: 'loading', atMs: Date.now(), prev: cached && cached.status === 'ok' ? cached : null };
+  sbAcctPatch(exchange, mode);
+  const args = { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase };
+  let next;
+  try{
+    const r = await callProxy('/api/futures/account-summary', args);
+    if(r && r.ok && r.available != null){
+      next = { status: 'ok', total: r.total, available: r.available, inUse: r.inUse, atMs: Date.now() };
+    }else if(r && r.ok === false && r.message && !/Cannot POST|Not Found|No account-summary/i.test(r.message)){
+      next = { status: 'error', message: r.message, atMs: Date.now() };
+    }
+  }catch(err){ /* fall through to the free-margin-only fallback below */ }
+  if(!next){
+    // Backend without the new endpoint (or unreachable for it): still show
+    // free margin from the older endpoint rather than nothing.
+    const m = await checkAvailableMarginFor(args, 0).catch(() => ({ available: null }));
+    next = m.available == null
+      ? { status: 'error', message: 'Couldn\u2019t read the account balance.', atMs: Date.now() }
+      : { status: 'partial', total: null, inUse: null, available: m.available, atMs: Date.now() };
+  }
+  f.sbAcctCache[key] = next;
+  sbAcctPatch(exchange, mode);
+}
+
+// Only repaint if the result is for the account currently on screen, so a
+// slow response for a previously selected exchange/network can't overwrite
+// the one the person has since switched to.
+function sbAcctPatch(exchange, mode){
+  const { exchange: ex, mode: m } = sbAcctSel();
+  if(ex === exchange && m === mode && els.sbBalanceHost) els.sbBalanceHost.innerHTML = sbAcctHtml();
+}
+
+function initSbAcctBalance(){
+  if(!els.sbBalanceHost) return;
+  els.sbBalanceHost.addEventListener('click', (e) => {
+    const modeBtn = e.target.closest('.sb-acct-mode');
+    if(modeBtn){ sbAcctSel(); sbState().sbAcctMode = modeBtn.dataset.mode === 'demo' ? 'demo' : 'live'; renderSbAcctBalance(); return; }
+    if(e.target.closest('#sbAcctRefresh')){ const { exchange, mode } = sbAcctSel(); ensureSbAcctLoaded(exchange, mode, true); }
+  });
+  els.sbBalanceHost.addEventListener('change', (e) => {
+    if(e.target.id === 'sbAcctExchange'){ sbAcctSel(); sbState().sbAcctExchange = e.target.value; renderSbAcctBalance(); }
+  });
+  // The panel is hidden until its sub-tab is opened, and the load is skipped
+  // while hidden (no background polling) — so fetch when it's shown.
+  const tabBtn = document.getElementById('tabSmartBotsBtn');
+  if(tabBtn) tabBtn.addEventListener('click', () => setTimeout(renderSbAcctBalance, 0));
+  window.addEventListener('hashchange', () => setTimeout(renderSbAcctBalance, 0));
+  setTimeout(renderSbAcctBalance, 0);
 }
 
 // ---- Smart Bots create-form view helpers (presentation only) ----
@@ -5742,6 +5877,7 @@ function initSbScanner(){
 function initSmartBots(){
   renderSmartBotsPanel();
   initSbScanner();
+  initSbAcctBalance();
 
   if(els.sbListHost){
     els.sbListHost.addEventListener('click', (e) => {
