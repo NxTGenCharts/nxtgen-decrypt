@@ -183,6 +183,19 @@ function fu(){ return state.futures; }
 // pages (Strategies / NxTGen Grid) render only the half that belongs to the
 // page they're on, so no page shows controls that can't work there.
 function hasLiveControls(){ return !!els.fuLiveExchRows; }
+// Futures Engine page only: Breakout + Retest is not offered for Live/Demo trading.
+// Utilities & Tools (Paper / Backtest) still lists it.
+const LIVE_PAGE_HIDDEN_STRATEGY_IDS = ['breakoutRetest'];
+function visibleStrategies(){
+  return hasLiveControls() ? STRATEGY_REGISTRY.filter(s => !LIVE_PAGE_HIDDEN_STRATEGY_IDS.includes(s.id)) : STRATEGY_REGISTRY;
+}
+// Strategy flags handed to the scan: hidden strategies are forced off on the Futures
+// Engine page even if a saved setting (e.g. toggled on Utilities & Tools) has them on.
+function liveStrategyFlags(strategies){
+  const out = Object.assign({}, strategies);
+  if(hasLiveControls()) LIVE_PAGE_HIDDEN_STRATEGY_IDS.forEach(id => { out[id] = false; });
+  return out;
+}
 function hasPaperControls(){ return !!els.fuModeBtn; }
 
 function ensureDayState(){
@@ -686,7 +699,7 @@ function runCycle(){
     exchange: f.exchange, weights: DEFAULT_WEIGHTS, highSelectivity: f.highSelectivity,
     minConfidence: f.minConfidence, minRiskReward: f.minRiskReward, minNetProfitPct: f.minNetProfitPct,
     riskPctPerTrade: f.riskPctPerTrade, leverage: f.leverage,
-    strategies: f.strategies, strategyRR: f.strategyRR,
+    strategies: liveStrategyFlags(f.strategies), strategyRR: f.strategyRR,
   };
   refreshPaperWatchlist();
   const { rows } = runScanCycle(cfg, dayState, { symbols: paperScanSymbols(f) });
@@ -1081,7 +1094,7 @@ async function executeLivePendingSignal(){
     minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost),
     minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
     riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage, maxLeverage: LIVE_LEVERAGE_MAX_LEVERAGE,
-    strategies: f2.strategies, strategyRR: f2.strategyRR,
+    strategies: liveStrategyFlags(f2.strategies), strategyRR: f2.strategyRR,
   };
   let snap, btcSnap;
   const tf = '5m'; // locked everywhere — see initLiveTimeframeInput's comment
@@ -1546,7 +1559,7 @@ function computeStrategyStats(setupType){
 // eyeballing the panel.
 function bestSignificantStrategy(){
   let best = null;
-  for(const s of STRATEGY_REGISTRY){
+  for(const s of visibleStrategies()){
     const stats = computeStrategyStats(s.type);
     if(!stats.isSignificant) continue;
     if(!best || stats.winRatePct > best.stats.winRatePct
@@ -1606,7 +1619,7 @@ function renderStrategyRows(){
   // independent engine (Paper AND Live/Demo both — see grid.js's header
   // comment), so its on/off switch and stats live only in its own panel
   // just below, not mixed into this shared list.
-  const strategyRowsHtml = STRATEGY_REGISTRY.map(renderStratRow).join('');
+  const strategyRowsHtml = visibleStrategies().map(renderStratRow).join('');
 
   els.fuStrategyRows.innerHTML = strategyRowsHtml;
   // Shown next to "Strategies" in the collapsed <summary> row (see
@@ -1614,7 +1627,7 @@ function renderStrategyRows(){
   // space doesn't hide which/how many strategies are actually live.
   // Grid is excluded from both the count and the badge — it's tracked
   // entirely within its own panel now.
-  const totalStrategyCount = STRATEGY_REGISTRY.length;
+  const totalStrategyCount = visibleStrategies().length;
   if(els.fuStrategiesBadge) els.fuStrategiesBadge.textContent = `${enabledCount}/${totalStrategyCount} enabled`;
 }
 
@@ -1728,6 +1741,9 @@ const GRID_TOGGLES = [
 
 function renderGridPanel(){
   if(!els.fuGridPanel) return;
+  // NxTGen Grid is not offered on the Futures Engine page (Live/Demo). It stays on
+  // Utilities & Tools for Paper and Backtest.
+  if(hasLiveControls()){ els.fuGridPanel.innerHTML = ''; return; }
   const cfg = loadGridConfig();
   const f = fu();
   const gridExchange = f.gridLiveExchange;
@@ -1740,8 +1756,8 @@ function renderGridPanel(){
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
         <div>
           <strong>${GRID_STRATEGY.label}</strong>
-          <span style="font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:6px;">Paper + Live/Demo (Bybit/Binance) supported</span>
-          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Turn on "Enabled (Paper)" to the right to run it against the synthetic feed, check it as the 7th strategy in Backtesting (Utilities &amp; Tools) for real-historical-data testing, or arm Live/Demo below to scan the watchlist on Bybit or Binance and deploy on whichever symbol presents a valid grid. <strong>Live/Demo is untested against real exchanges — start in Demo and watch it closely before ever arming Live.</strong></div>
+          <span style="font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin-left:6px;">Paper + Backtest</span>
+          <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">${GRID_STRATEGY.description} Turn on "Enabled (Paper)" to the right to run it against the synthetic feed, check it as the 7th strategy in Backtesting (Utilities &amp; Tools) for real-historical-data testing.</div>
           <div style="font-size:12px;color:var(--dim);margin-top:6px;line-height:1.5;max-width:640px;">Deployment size per symbol uses the same <strong>Risk per trade (${f.riskPctPerTrade}%)</strong> control as the six single-entry strategies (the Risk per trade field on this page) — e.g. ${f.riskPctPerTrade}% of a $10,000 balance commits $${(10000 * f.riskPctPerTrade / 100).toLocaleString('en-US')} to a grid deployment, not a separate Grid-only allocation setting. Leverage is capped at ${Math.min(cfg.maxLeverage, 5)}x (your Maximum Leverage setting below, hard-ceilinged at 5x) and a deployment stops opening new grids for the day once your Daily Profit Target below is hit.</div>
         </div>
         <label class="toggle-check" style="font-weight:600;font-size:12.5px;white-space:nowrap;">
@@ -1801,8 +1817,7 @@ function renderGridPanel(){
         </div>
         <div id="fuGridLiveStatus" style="font-size:11.5px;color:var(--dim);margin-top:8px;"></div>
       </div>
-      ` : `
-      <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim);">Grid Live/Demo is armed from <a href="/autotrade-futures/">Futures Engine</a>.</div>`}
+      ` : ''}
     </div>
   `;
   renderGridDashboard();
