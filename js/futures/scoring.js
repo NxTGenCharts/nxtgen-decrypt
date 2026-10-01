@@ -32,8 +32,8 @@ function trendScore(snap, setupSignal){
 }
 
 function structureScore(setupSignal){
-  // Setups that are explicitly structure-based (breakout/retest, sweep) score higher here.
-  const base = { 'Trend Continuation': 65, 'Breakout + Retest': 82, 'Range Reversal': 70, 'Liquidity Sweep Reversal': 80, 'Nova Scalp': 62 };
+  // Setups that are explicitly structure-based (sweep) score higher here.
+  const base = { 'Trend Continuation': 65, 'Range Reversal': 70, 'Liquidity Sweep Reversal': 80, 'Nova Scalp': 62 };
   return base[setupSignal.type] || 55;
 }
 
@@ -69,7 +69,6 @@ function orderFlowScore(snap){
 
 function supportResistanceScore(setupSignal){
   if(setupSignal.type === 'Range Reversal' || setupSignal.type === 'Liquidity Sweep Reversal') return 85;
-  if(setupSignal.type === 'Breakout + Retest') return 75;
   return 55;
 }
 

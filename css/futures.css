@@ -746,13 +746,41 @@ button.primary.sb-pill-btn:hover{ background:var(--amber); filter:brightness(1.0
 .sb-acct-card:not([data-state="ok"]) .sb-acct-free{ color:inherit; }
 .sb-acct-bar{ height:6px; margin-top:12px; border-radius:999px; background:var(--panel2); border:1px solid var(--line); overflow:hidden; }
 .sb-acct-bar > span{ display:block; height:100%; background:var(--amber-grad, var(--amber)); border-radius:999px; transition:width .3s ease; }
-.sb-acct-barlabel{ margin-top:6px; font-size:11.5px; color:var(--dim); font-family:var(--mono); }
+.sb-acct-foot{ display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:4px 12px; margin-top:6px; font-size:11.5px; color:var(--dim); font-family:var(--mono); }
+.sb-acct-sub{ text-transform:none; letter-spacing:0; opacity:.7; }
 .sb-acct-note{ margin-top:10px; font-size:12px; line-height:1.4; color:var(--red); }
 .sb-acct-note--info{ color:var(--dim); }
 @media (max-width:1023px){
   .sb-acct-grid{ grid-template-columns:repeat(2, minmax(0,1fr)); }
 }
+/* Phones: keep the desktop shape — a compact 2x2 grid of figures, and a two-row
+   control strip (exchange + Live/Demo, then status + refresh) — instead of one tall
+   column of four cards. */
 @media (max-width:719px){
-  .sb-acct-grid{ grid-template-columns:minmax(0,1fr); }
-  .sb-acct-controls{ width:100%; }
+  .sb-acct-card{ padding:14px; }
+  .sb-acct-head{ margin-bottom:10px; gap:10px; }
+  .sb-acct-controls{ width:100%; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center; }
+  .sb-acct-select{ min-width:0; }
+  .sb-acct-controls .mode-btn{ padding:6px 12px; }
+  .sb-acct-controls .sbf-chip{ justify-self:start; }
+  .sb-acct-controls .sbf-icon-btn{ justify-self:end; }
+  .sb-acct-grid{ gap:8px; }
+  .sb-acct-grid .ov-card{ padding:10px 12px; min-height:0; gap:6px; }
+  .sb-acct-grid .ov-label{ font-size:9px; line-height:1.3; }
+  .sb-acct-grid .ov-value{ font-size:clamp(15px, 4.8vw, 19px); }
+  .sb-acct-sub{ display:block; margin-top:1px; }
+  .sb-acct-bar{ margin-top:10px; }
+  .sb-acct-foot{ font-size:10.5px; }
+  .sb-acct-auto{ display:none; }
+}
+
+/* Futures Engine page, phones: the live stat cards (Real Balance, Trades, Gross/Net P&L...)
+   and the trade-history totals get the same compact card sizing as the account balance
+   card above them, so the whole page reads as one consistent 2-column grid. */
+@media (max-width:768px){
+  .fu-summary-grid{ margin-top:12px; gap:8px; }
+  .fu-summary-grid > .ov-card, .fu-log-stats > .ov-card{ padding:10px 12px; min-height:0; gap:6px; }
+  .fu-summary-grid .ov-label, .fu-log-stats .ov-label{ font-size:9px; line-height:1.3; }
+  .fu-summary-grid .ov-value, .fu-log-stats .ov-value{ font-size:clamp(15px, 4.8vw, 19px); }
+  .fu-log-stats{ gap:8px !important; }
 }

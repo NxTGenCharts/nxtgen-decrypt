@@ -183,19 +183,6 @@ function fu(){ return state.futures; }
 // pages (Strategies / NxTGen Grid) render only the half that belongs to the
 // page they're on, so no page shows controls that can't work there.
 function hasLiveControls(){ return !!els.fuLiveExchRows; }
-// Futures Engine page only: Breakout + Retest is not offered for Live/Demo trading.
-// Utilities & Tools (Paper / Backtest) still lists it.
-const LIVE_PAGE_HIDDEN_STRATEGY_IDS = ['breakoutRetest'];
-function visibleStrategies(){
-  return hasLiveControls() ? STRATEGY_REGISTRY.filter(s => !LIVE_PAGE_HIDDEN_STRATEGY_IDS.includes(s.id)) : STRATEGY_REGISTRY;
-}
-// Strategy flags handed to the scan: hidden strategies are forced off on the Futures
-// Engine page even if a saved setting (e.g. toggled on Utilities & Tools) has them on.
-function liveStrategyFlags(strategies){
-  const out = Object.assign({}, strategies);
-  if(hasLiveControls()) LIVE_PAGE_HIDDEN_STRATEGY_IDS.forEach(id => { out[id] = false; });
-  return out;
-}
 function hasPaperControls(){ return !!els.fuModeBtn; }
 
 function ensureDayState(){
@@ -699,7 +686,7 @@ function runCycle(){
     exchange: f.exchange, weights: DEFAULT_WEIGHTS, highSelectivity: f.highSelectivity,
     minConfidence: f.minConfidence, minRiskReward: f.minRiskReward, minNetProfitPct: f.minNetProfitPct,
     riskPctPerTrade: f.riskPctPerTrade, leverage: f.leverage,
-    strategies: liveStrategyFlags(f.strategies), strategyRR: f.strategyRR,
+    strategies: f.strategies, strategyRR: f.strategyRR,
   };
   refreshPaperWatchlist();
   const { rows } = runScanCycle(cfg, dayState, { symbols: paperScanSymbols(f) });
@@ -1094,7 +1081,7 @@ async function executeLivePendingSignal(){
     minConfidence: Math.min(95, f2.minConfidence + f2.liveAdaptiveConfidenceBoost),
     minRiskReward: f2.minRiskReward, minNetProfitPct: f2.minNetProfitPct,
     riskPctPerTrade: f2.riskPctPerTrade, leverage: f2.leverage, maxLeverage: LIVE_LEVERAGE_MAX_LEVERAGE,
-    strategies: liveStrategyFlags(f2.strategies), strategyRR: f2.strategyRR,
+    strategies: f2.strategies, strategyRR: f2.strategyRR,
   };
   let snap, btcSnap;
   const tf = '5m'; // locked everywhere — see initLiveTimeframeInput's comment
@@ -1559,7 +1546,7 @@ function computeStrategyStats(setupType){
 // eyeballing the panel.
 function bestSignificantStrategy(){
   let best = null;
-  for(const s of visibleStrategies()){
+  for(const s of STRATEGY_REGISTRY){
     const stats = computeStrategyStats(s.type);
     if(!stats.isSignificant) continue;
     if(!best || stats.winRatePct > best.stats.winRatePct
@@ -1619,7 +1606,7 @@ function renderStrategyRows(){
   // independent engine (Paper AND Live/Demo both — see grid.js's header
   // comment), so its on/off switch and stats live only in its own panel
   // just below, not mixed into this shared list.
-  const strategyRowsHtml = visibleStrategies().map(renderStratRow).join('');
+  const strategyRowsHtml = STRATEGY_REGISTRY.map(renderStratRow).join('');
 
   els.fuStrategyRows.innerHTML = strategyRowsHtml;
   // Shown next to "Strategies" in the collapsed <summary> row (see
@@ -1627,7 +1614,7 @@ function renderStrategyRows(){
   // space doesn't hide which/how many strategies are actually live.
   // Grid is excluded from both the count and the badge — it's tracked
   // entirely within its own panel now.
-  const totalStrategyCount = visibleStrategies().length;
+  const totalStrategyCount = STRATEGY_REGISTRY.length;
   if(els.fuStrategiesBadge) els.fuStrategiesBadge.textContent = `${enabledCount}/${totalStrategyCount} enabled`;
 }
 
@@ -5019,13 +5006,13 @@ function sbAcctHtml(){
         </div>
       </div>
       <div class="sb-acct-grid">
-        <div class="ov-card ov-highlight"><span class="ov-label">Total USDT balance <span style="text-transform:none;letter-spacing:0;opacity:.7;">(incl. floating PnL)</span></span><span class="ov-value">${val(c && c.total)}</span></div>
+        <div class="ov-card ov-highlight"><span class="ov-label">Total USDT balance <span class="sb-acct-sub">(incl. floating PnL)</span></span><span class="ov-value">${val(c && c.total)}</span></div>
         <div class="ov-card"><span class="ov-label">Floating PnL</span><span class="ov-value ${ok && !partial && c.unrealized > 0 ? 'sb-acct-pos' : ok && !partial && c.unrealized < 0 ? 'sb-acct-neg' : ''}">${ok && !partial && c.unrealized != null ? (c.unrealized > 0 ? '+' : c.unrealized < 0 ? '\u2212' : '') + sbFmtBalance(Math.abs(c.unrealized)) : '&mdash;'}</span></div>
         <div class="ov-card"><span class="ov-label">Margin in use</span><span class="ov-value">${val(c && c.inUse)}</span></div>
         <div class="ov-card"><span class="ov-label">Free margin</span><span class="ov-value sb-acct-free">${val(c && c.available)}</span></div>
       </div>
-      ${ok ? `<div class="sb-acct-barlabel">Updated ${new Date(c.atMs).toLocaleTimeString()} &middot; refreshes automatically</div>` : ''}
-      ${pct != null ? `<div class="sb-acct-bar" role="img" aria-label="${pct.toFixed(1)}% of balance is in use as margin"><span style="width:${pct.toFixed(1)}%"></span></div><div class="sb-acct-barlabel">${pct.toFixed(1)}% of balance in use as margin</div>` : ''}
+      ${pct != null ? `<div class="sb-acct-bar" role="img" aria-label="${pct.toFixed(1)}% of balance is in use as margin"><span style="width:${pct.toFixed(1)}%"></span></div>` : ''}
+      ${ok ? `<div class="sb-acct-foot"><span>${pct != null ? `${pct.toFixed(1)}% of balance in use as margin` : ''}</span><span>Updated ${new Date(c.atMs).toLocaleTimeString()}<span class="sb-acct-auto"> &middot; refreshes automatically</span></span></div>` : ''}
       ${note ? `<div class="sb-acct-note ${state === 'ok' ? 'sb-acct-note--info' : ''}">${note}</div>` : ''}
     </div>`;
 }

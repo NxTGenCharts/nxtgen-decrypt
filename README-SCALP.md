@@ -17,9 +17,9 @@ a record of what was tried and why it didn't hold up live, not as a
 description of the current behavior.
 
 ## 1. Why the strategy kept changing
-The old `detectAllSetups()` ran **four independent detectors** every cycle
-(Trend Continuation, Breakout + Retest, Range Reversal, Liquidity Sweep
-Reversal) and traded whichever one fired. That's why the trade history
+The old `detectAllSetups()` ran **several independent detectors** every
+cycle (Trend Continuation, Range Reversal, Liquidity Sweep Reversal, and
+others) and traded whichever one fired. That's why the trade history
 jumped between strategy names — it wasn't a bug, it was an ensemble, but
 it does make performance impossible to reason about, since every trade
 came from a different rule set.
@@ -473,34 +473,31 @@ before it: none of this has been tested against a real account from
 this codebase's own testing — that's not something an AI assistant can
 do for you.
 
-## Update: Breakout + Retest and Range Reversal moved from M15 to M5 entry triggers
+## Update: Range Reversal moved from M15 to M5 entry trigger
 
 Every other setup in `setups.js` (NxTGen Scalp, Nova Scalp, Range Scalp,
 Liquidity Sweep Reversal, and Trend Continuation's own pullback/momentum
-read) already triggered off `snap.m5`. Breakout + Retest and Range
-Reversal were the two exceptions — their entire pattern (consolidation
-range, breakout candle, retest distance / swing support-resistance,
-rejection candle, RSI) was computed off `snap.m15` instead. That meant
-those two silently traded on 15-minute bars no matter what timeframe was
-selected anywhere in the UI (Paper mode's implicit 5m, or Live/Demo's
-`liveTimeframe` control) — a real inconsistency, not a stylistic one,
-per a direct request that every strategy's entry decision happen on the
-same 5m candle.
+read) already triggered off `snap.m5`. Range Reversal was the exception —
+its entire pattern (swing support/resistance, rejection candle, RSI) was
+computed off `snap.m15` instead. That meant it silently traded on
+15-minute bars no matter what timeframe was selected anywhere in the UI
+(Paper mode's implicit 5m, or Live/Demo's `liveTimeframe` control) — a
+real inconsistency, not a stylistic one, per a direct request that every
+strategy's entry decision happen on the same 5m candle.
 
-**Fixed** by rewriting both detectors onto `snap.m5`, with bar-count
-windows scaled ~3x (15/5) to preserve the same real-world lookback
-duration: Breakout + Retest's 40-bar/6-bar M15 windows became
-120-bar/18-bar M5 windows; Range Reversal's 40-bar M15 swing-level
-window became 120 bars of M5. `regime.js`'s H1/M15 read is untouched —
-that's the higher-timeframe CONTEXT filter (is this symbol trending or
-ranging right now), never the trigger candle, and mixing timeframes for
+**Fixed** by rewriting the detector onto `snap.m5`, with the bar-count
+window scaled ~3x (15/5) to preserve the same real-world lookback
+duration: Range Reversal's 40-bar M15 swing-level window became 120 bars
+of M5. `regime.js`'s H1/M15 read is untouched — that's the
+higher-timeframe CONTEXT filter (is this symbol trending or ranging right
+now), never the trigger candle, and mixing timeframes for
 context-vs-trigger is standard multi-timeframe practice, not the bug
 that was fixed here.
 
-**Also added, while already touching these two**: `relativeVolumePercentile()`
+**Also added, while already touching it**: `relativeVolumePercentile()`
 (`indicators.js`) — where the current bar's volume ranks against the
 recent window as a 0-1 fraction, used alongside (not instead of) the
-existing fixed-multiplier volume gates in both rewritten detectors. A
+existing fixed-multiplier volume gates in the rewritten detector. A
 flat "1.15x the 10-bar average" threshold is sensitive to a couple of
 outlier bars dragging the average around; percentile rank is a steadier
 read of "is this genuinely unusual volume for this symbol right now."
@@ -512,28 +509,26 @@ Also cleaned up (zero behavior change): Trend Continuation's MACD call
 was `macdHistogram(closes(m5).map(c=>({c})).map((x,i)=>m5[i]))` — the
 second `.map` discards the wrapped values and substitutes the original
 candles back in, so the whole chain reduces to `macdHistogram(m5)`.
-Verified with a Node import + synthetic-candle check that both rewritten
-detectors still fire correctly (see the confirmation below) before
-calling this done.
+Verified with a Node import + synthetic-candle check that the rewritten
+detector still fires correctly before calling this done.
 
 **Honesty note, same standard as every other change in this file**:
 this is a real, verified fix to a genuine inconsistency (confirmed by
-constructing synthetic M5 breakout/retest and range/rejection candle
-sequences and checking both detectors fire with sane confidence and
-reasons — they do), and it makes strategy comparisons apples-to-apples
-across all six active detectors. It is **not** itself a measured
-win-rate improvement — neither detector has been re-backtested since
-the rewrite. Run both through the Backtest tab against real historical
-klines before enabling them (they're still off by default) or sizing
-anything real behind them. If your reported ~25% win rate came from
-Range Scalp or an early fade-style build rather than these two, this
-change won't move that number — see the setup-by-setup breakdown
-elsewhere in this file for what would.
+constructing synthetic M5 range/rejection candle sequences and checking
+the detector fires with sane confidence and reasons — it does), and it
+makes strategy comparisons apples-to-apples across the active detectors.
+It is **not** itself a measured win-rate improvement — the detector has
+not been re-backtested since the rewrite. Run it through the Backtest
+tab against real historical klines before enabling it (it's still off by
+default) or sizing anything real behind it. If your reported ~25% win
+rate came from Range Scalp or an early fade-style build rather than this
+one, this change won't move that number — see the setup-by-setup
+breakdown elsewhere in this file for what would.
 
 ## Update: 5m locked as the ONLY execution timeframe (Paper, Backtest, Live/Demo)
 
-The timeframe fix above (Breakout + Retest / Range Reversal moved off
-M15 onto M5) only fixed which candles those two setups *look at*. It
+The timeframe fix above (Range Reversal moved off M15 onto M5) only
+fixed which candles that setup *looks at*. It
 didn't stop the app from letting a real trade actually run on a
 different base timeframe entirely — `fuLiveTimeframe` (Live/Demo) and
 `btTimeframe` (Backtest) were both real dropdowns offering 3m/5m/15m/
@@ -845,11 +840,10 @@ feature, "maybe a different strategy perhaps that offers that." Fair —
 the AI Signal check is an external, optional filter; a genuinely
 different DETECTOR is a different kind of change.
 
-`setups.js` already had four other fully-built detectors sitting
-inactive since the single-strategy build (see the "Single-strategy
-build" comment this replaces): Trend Continuation, Breakout + Retest,
-Range Reversal, and Liquidity Sweep Reversal. Two enabled, two left
-alone, on purpose:
+`setups.js` already had other fully-built detectors sitting inactive
+since the single-strategy build (see the "Single-strategy build"
+comment this replaces): Trend Continuation, Range Reversal, and
+Liquidity Sweep Reversal. Two enabled, one left alone, on purpose:
 
 **Enabled — Trend Continuation.** Enters on a pullback INTO an
 established trend (price retracing toward EMA20/VWAP on contracting
@@ -875,12 +869,7 @@ Re-enabling a fade-flavored setup without evidence it doesn't repeat
 that isn't a risk worth taking on the strength of "it's gated better
 this time" alone.
 
-**Left inactive — Breakout + Retest.** Conceptually closer to AI
-Scalp's own momentum-chasing character than a genuine change of style —
-adds less diversification than the two enabled above for the same "is
-this actually different" bar.
-
-**A real bug this surfaced before either went live**: every setup
+**A real bug this surfaced before these went live**: every setup
 OTHER than AI Scalp shared one `buildLevels` fallback branch in
 `engine.js` with a stop-distance floor of **0.12%** — tighter even than
 the 0.15% value that caused AI Scalp's own fee-drag disaster (see

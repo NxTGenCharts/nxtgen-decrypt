@@ -56,61 +56,10 @@ export function detectTrendContinuation(snap, regime){
   return { type: 'Trend Continuation', direction: dir, rawConfidence: Math.round(conf), reasons };
 }
 
-// ---- SETUP B: Breakout + Retest ----
-// Consolidation -> breakout -> wait -> retest with volume/structure/momentum confirmation.
-//
-// Entry timeframe fix: this used to read the entire pattern (consolidation
-// range, breakout candle, retest) off snap.m15, while every other setup in
-// this file trades snap.m5 — meaning this one silently entered on 15-minute
-// bars regardless of what timeframe was selected elsewhere. Rewritten to run
-// the identical pattern on snap.m5, with bar counts scaled ~3x (15/5) to
-// preserve the same real-world lookback duration: the old 40-bar/6-bar M15
-// windows become 120-bar/18-bar M5 windows. H1/M15 remain used elsewhere
-// (regime.js) purely for higher-timeframe CONTEXT, never for the trigger
-// candle itself — that split (fast timeframe decides entry, slow timeframe
-// only informs regime) is standard multi-timeframe practice and is left
-// alone. This has NOT been re-backtested since the rewrite — run it through
-// the Backtest tab against real historical data before trusting any win-rate
-// number for it, same standard as every other setup in this file.
-export function detectBreakoutRetest(snap, regime){
-  const m5 = snap.m5;
-  if(m5.length < 120) return null;
-  const lookback = m5.slice(-120, -18);
-  const recent = m5.slice(-18);
-  const hi = Math.max(...lookback.map(c => c.h));
-  const lo = Math.min(...lookback.map(c => c.l));
-  const rangePct = ((hi - lo) / lo) * 100;
-  if(rangePct > 3.2) return null; // not a tight enough consolidation to call a breakout meaningful
-
-  const breakoutCandle = recent.find(c => c.c > hi || c.c < lo);
-  if(!breakoutCandle) return null;
-  const dir = breakoutCandle.c > hi ? 'LONG' : 'SHORT';
-  const level = dir === 'LONG' ? hi : lo;
-
-  const last = m5[m5.length - 1];
-  const retestDistPct = Math.abs((last.c - level) / level) * 100;
-  if(retestDistPct > 0.6) return null; // hasn't come back to retest the level yet
-
-  const volExp = volumeExpansion(m5, 10);
-  const volPctile = relativeVolumePercentile(m5, 20);
-  const reasons = [`Consolidation range ${rangePct.toFixed(2)}% before breakout`, `Retesting breakout level within ${retestDistPct.toFixed(2)}%`];
-  if(volExp < 0.7) return null; // retest on dead volume = weak confirmation
-  reasons.push(`Retest volume ${volExp.toFixed(2)}x average (${Math.round(volPctile * 100)}th percentile)`);
-
-  let conf = 58;
-  conf += rangePct < 1.8 ? 10 : 3;
-  conf += retestDistPct < 0.25 ? 10 : 4;
-  conf += volPctile > 0.8 ? 10 : volExp > 1.3 ? 6 : 3;
-  conf += (dir === 'LONG' && BULL_REGIMES.has(regime.regime)) || (dir === 'SHORT' && BEAR_REGIMES.has(regime.regime)) ? 6 : -8;
-  conf = clamp(conf, 0, 95);
-
-  return { type: 'Breakout + Retest', direction: dir, rawConfidence: Math.round(conf), reasons };
-}
-
 // ---- SETUP C: Range Reversal ----
 // Only in confirmed Range regime — fade validated support/resistance, never the middle.
 //
-// Entry timeframe fix: same issue and same fix as Breakout + Retest above —
+// Entry timeframe fix: same issue and fix as the other M5 setups —
 // this read its whole pattern (swing support/resistance, rejection candle,
 // RSI) off snap.m15 instead of snap.m5. Rewritten onto m5 with the lookback
 // scaled ~3x (40 -> 120 bars) to keep the same real-world window. The Range
@@ -255,7 +204,7 @@ export function detectRangeScalp(snap, regime){
 // defaultRR reasoning, each within the requested 1:1-1:3 band: fade/
 // reversion-style setups (Range Reversal) get a tighter ratio since the
 // move back to a mean is naturally limited; trend-following setups
-// (Trend Continuation, Breakout + Retest) get a wider one since a real
+// (Trend Continuation) gets a wider one since a real
 // trend can run further than a single ATR-scaled stop; the two faster,
 // more scalp-like setups (NxTGen Scalp, Liquidity Sweep Reversal) sit at
 // the middle. These are starting points, not measured optima — see the
@@ -287,11 +236,6 @@ export const STRATEGY_REGISTRY = [
     description: 'Fades validated swing-level support/resistance with a rejection candle, only in a confirmed Range regime. Entry trigger now runs on M5 (was M15 — see detectRangeReversal\'s comment). Off by default: this codebase has a measured case (Range Scalp, see README-SCALP.md) of a fade-style approach losing to this feed\'s real short-run momentum — this is more strictly gated than that one was, but unproven under the current engine either way.',
   },
   {
-    id: 'breakoutRetest', type: 'Breakout + Retest', detector: 'detectBreakoutRetest', defaultRR: 2.5, defaultEnabled: false,
-    label: 'Breakout + Retest',
-    description: 'Consolidation, then a breakout, then a retest of that level with volume confirmation. Entry trigger now runs on M5 (was M15 — see detectBreakoutRetest\'s comment). Off by default: conceptually close to NxTGen Scalp\'s own momentum-chasing character, so it adds less diversification than the two enabled by default.',
-  },
-  {
     id: HTF_CONFLUENCE_ID, type: HTF_CONFLUENCE_TYPE, detector: 'detectHtfConfluence', defaultRR: 2, defaultEnabled: false,
     rrOptions: [2, 2.5, 3, 4],
     label: 'NxTGen HTF Confluence',
@@ -321,7 +265,6 @@ export function detectAllSetups(snap, regime, strategyConfig, htfCtx, onlyIds){
     trendContinuation: detectTrendContinuation,
     liquiditySweep: detectLiquiditySweep,
     rangeReversal: detectRangeReversal,
-    breakoutRetest: detectBreakoutRetest,
     [HTF_CONFLUENCE_ID]: (sn, rg) => detectHtfConfluence(sn, rg, htfCtx || {}),
   };
   // combineEnsemble (engine.js) already handles multiple setups firing on

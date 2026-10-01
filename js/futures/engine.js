@@ -181,7 +181,7 @@ function buildLevels(snap, direction, setupType, signalMeta){
   // reasoning as NxTGen Scalp/Nova Scalp's own floor bump just above (see
   // that comment for the fee$-scales-with-notional math) — the same
   // 6-run measurement showed Trend Continuation, Liquidity Sweep
-  // Reversal, and Breakout + Retest all still fee-heavy at 0.35% (fees
+  // Reversal all still fee-heavy at 0.35% (fees
   // ran 45-99% of the whole account's starting balance across each
   // 30-day/~250-425-trade run), not just the two dedicated scalps.
   const stopDistancePct = clamp(Math.max(atrPct * 1.0, Math.min(structuralStopPct, atrPct * 2.0)), 0.45, 1.3);
