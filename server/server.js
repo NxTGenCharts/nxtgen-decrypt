@@ -964,7 +964,7 @@ async function bybitGridEnsureHedgeMode(mode, apiKey, secretKey, symbol){
 // market order, because the whole fee-aware profit model (grid.js's
 // netCycleProfit) assumes maker fills on both sides of a cycle, same as
 // the backtest. side/positionIdx: LONG -> Buy/1, SHORT -> Sell/2.
-async function placeBybitGridLevelOrder(mode, apiKey, secretKey, { symbol, direction, price, qty, leverage, orderLinkTag }){
+async function placeBybitGridLevelOrder(mode, apiKey, secretKey, { symbol, direction, price, qty, leverage, orderLinkTag, stopLoss }){
   const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
   const filters = await bybitFuturesSymbolFilters(base, symbol);
   const roundedQty = floorToStep(qty, filters.qtyStep);
@@ -976,14 +976,34 @@ async function placeBybitGridLevelOrder(mode, apiKey, secretKey, { symbol, direc
   await bybitSetLeverage(mode, apiKey, secretKey, symbol, clampedLeverage);
   const side = direction === 'LONG' ? 'Buy' : 'Sell';
   const positionIdx = direction === 'LONG' ? 1 : 2;
-  const created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+  const baseBody = {
     category: 'linear', symbol, side, orderType: 'Limit', qty: roundedQty.toString(),
     price: roundedPrice.toString(), timeInForce: 'GTC', positionIdx,
-    orderLinkId: `nxgrid-lvl-${orderLinkTag || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-  });
+  };
+  const newLinkId = () => `nxgrid-lvl-${orderLinkTag || Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  // Optional protective stop carried BY the entry order: Bybit activates it the instant the
+  // order fills, so a leg is never unprotected while the app (which otherwise attaches the
+  // stop only after it notices the fill) is closed or in the background. It is the same stop
+  // (tpslMode Full, market) the app sets on the side afterwards, so the two never conflict.
+  // If Bybit rejects the order because of the stop (e.g. a level sitting right on the stop
+  // price), the order is retried WITHOUT it rather than not placed at all — the app's own
+  // post-fill stop still applies.
+  const slPrice = Number.isFinite(stopLoss) && stopLoss > 0 ? Math.round(stopLoss / filters.tickSize) * filters.tickSize : null;
+  let created, stopAttached = false;
+  if(slPrice != null){
+    try{
+      created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', {
+        ...baseBody, tpslMode: 'Full', slOrderType: 'Market', stopLoss: slPrice.toString(), slTriggerBy: 'MarkPrice', orderLinkId: newLinkId(),
+      });
+      stopAttached = true;
+    }catch(err){ created = null; }
+  }
+  if(!created){
+    created = await bybitSignedRequest(base, apiKey, secretKey, 'POST', '/v5/order/create', { ...baseBody, orderLinkId: newLinkId() });
+  }
   const orderId = created.result?.orderId;
   if(!orderId) throw new VerifyRejected('Bybit accepted the grid level order but returned no orderId.');
-  return { orderId, price: roundedPrice, qty: roundedQty, leverage: clampedLeverage };
+  return { orderId, price: roundedPrice, qty: roundedQty, leverage: clampedLeverage, stopAttached };
 }
 
 // Places the reduce-only closing LIMIT order for a leg that just filled
@@ -4060,7 +4080,7 @@ function gridRoute(path, table, argsFromBody){
     }
   });
 }
-gridRoute('/api/futures/grid/place-level', GRID_PLACE_LEVEL, b => ({ symbol: b.symbol, direction: b.direction, price: parseFloat(b.price), qty: parseFloat(b.qty), leverage: parseFloat(b.leverage), orderLinkTag: b.orderLinkTag }));
+gridRoute('/api/futures/grid/place-level', GRID_PLACE_LEVEL, b => ({ symbol: b.symbol, direction: b.direction, price: parseFloat(b.price), qty: parseFloat(b.qty), leverage: parseFloat(b.leverage), orderLinkTag: b.orderLinkTag, stopLoss: b.stopLoss == null ? undefined : parseFloat(b.stopLoss) }));
 gridRoute('/api/futures/grid/place-close', GRID_PLACE_CLOSE, b => ({ symbol: b.symbol, direction: b.direction, price: parseFloat(b.price), qty: parseFloat(b.qty), orderLinkTag: b.orderLinkTag }));
 gridRoute('/api/futures/grid/set-side-stop', GRID_SET_SIDE_STOP, b => ({ symbol: b.symbol, direction: b.direction, stopPrice: parseFloat(b.stopPrice), existingAlgoId: b.existingAlgoId }));
 gridRoute('/api/futures/grid/cancel', GRID_CANCEL_ORDER, b => ({ symbol: b.symbol, orderId: b.orderId }));

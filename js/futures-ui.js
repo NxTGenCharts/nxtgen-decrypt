@@ -2710,6 +2710,8 @@ function initLiveTimeframeInput(){
 // oversight.
 // =============================================================
 const TRADING_BOT_TYPES = { grid: 'Futures Grid', dca: 'DCA' };
+const TB_GAP_NOTICE_MS = 3 * 60_000; // longer than this between checks = the page was closed or backgrounded
+const TB_GAP_NOTICE_SHOW_MS = 30 * 60_000;
 const TRADING_BOTS_CYCLE_MS = 8000; // same conservative real-API cadence as NxTGen Grid Live/Demo
 
 function newTradingBotId(type){ return `BOT-${type.toUpperCase()}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`; }
@@ -2747,6 +2749,15 @@ function loadTradingBotsSnapshot(){
       }
     }
   }catch(e){ /* corrupt/old value — start empty rather than throw */ }
+}
+
+// Amber note shown for a while after the page returns from being closed / backgrounded.
+function botGapNoticeHtml(bot){
+  const g = bot.runtime && bot.runtime.gapNotice;
+  if(!g || Date.now() - g.atMs > TB_GAP_NOTICE_SHOW_MS) return '';
+  const mins = Math.max(1, Math.round(g.ms / 60_000));
+  const dur = mins >= 120 ? `${(mins / 60).toFixed(1)} h` : `${mins} min`;
+  return `<div class="tb-card-log" style="margin-top:10px;color:var(--amber);">Paused for ~${dur} (app closed or in the background), caught up at ${new Date(g.atMs).toLocaleTimeString()}. This bot only runs while the app is open \u2014 no levels are re-armed and the profit target isn\u2019t checked while it\u2019s closed.</div>`;
 }
 
 function tradingBotLog(bot, msg, isError){
@@ -3026,7 +3037,10 @@ function initTradingBots(){
   // real state from the exchange on their very first tick rather than
   // trusting whatever was last saved, so a stale snapshot self-corrects
   // within one cycle either way).
-  if(fu().tradingBots.some(b => b.status === 'active') && !fu().tradingBotsRunning) toggleTradingBotsRunning();
+  if(fu().tradingBots.some(b => b.status === 'active') && !fu().tradingBotsRunning){
+    toggleTradingBotsRunning();
+    setTimeout(runTradingBotsCycle, 3000); // catch up right after a reload instead of waiting for the first timer tick
+  }
   // Same throttled-background-tab reality as the Live Trading engine
   // above: a phone browser backgrounds this tab (screen locked, app
   // switched away from) rather than closing it far more often than it
@@ -3333,7 +3347,7 @@ async function deployGridBotInstance(bot, cred){
     const direction = wantLong ? 'LONG' : 'SHORT';
     const perLevelUsd = plan.allocationUsd / plan.levelCount;
     const qty = (perLevelUsd * plan.leverage) / levelPrice;
-    const placed = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction, price: levelPrice, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${li}` }).catch(err => ({ ok:false, message: err.message }));
+    const placed = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction, price: levelPrice, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${li}`, stopLoss: direction === 'LONG' ? plan.lower : plan.upper }).catch(err => ({ ok:false, message: err.message }));
     if(!placed.ok){ tradingBotLog(bot, `Level ${li} (${levelPrice.toFixed(6)}) skipped: ${placed.message}`, false); continue; }
     levels.push({ levelIndex: li, price: levelPrice, direction, status: 'PENDING_ENTRY', entryOrderId: placed.orderId, targetIndex: wantLong ? li + 1 : li - 1 });
   }
@@ -3593,7 +3607,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
           gridId: bot.id, gridLevel: level.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
         });
         level.missTicks = 0;
-        const rePlaced = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction: level.direction, price: level.price, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${level.levelIndex}-r` }).catch(err => ({ ok:false, message: err.message }));
+        const rePlaced = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction: level.direction, price: level.price, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${level.levelIndex}-r`, stopLoss: level.direction === 'LONG' ? plan.lower : plan.upper }).catch(err => ({ ok:false, message: err.message }));
         if(rePlaced.ok){ level.status = 'PENDING_ENTRY'; level.entryOrderId = rePlaced.orderId; level.closeOrderId = null; }
         else { level.status = 'IDLE'; level.entryOrderId = null; level.closeOrderId = null; tradingBotLog(bot, `Cycle closed on level ${level.levelIndex} but couldn't re-arm it: ${rePlaced.message}`, true); }
         continue;
@@ -3658,7 +3672,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
       if(okSide && inRange){
         const perLevelUsd = plan.allocationUsd / plan.levelCount;
         const qty = (perLevelUsd * plan.leverage) / level.price;
-        const rePlaced = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction: level.direction, price: level.price, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${level.levelIndex}-a${nowMs % 100000}` }).catch(err => ({ ok:false, message: err.message }));
+        const rePlaced = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction: level.direction, price: level.price, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${level.levelIndex}-a${nowMs % 100000}`, stopLoss: level.direction === 'LONG' ? plan.lower : plan.upper }).catch(err => ({ ok:false, message: err.message }));
         if(rePlaced.ok){ level.status = 'PENDING_ENTRY'; level.entryOrderId = rePlaced.orderId; tradingBotLog(bot, `Level ${level.levelIndex} re-armed.`, false); }
       }
     }
@@ -4043,6 +4057,17 @@ async function runTradingBotsCycleUnlocked(){
   // Whatever's already resting on the exchange is left exactly as-is
   // until Resumed or Stopped.
   const activeBots = f.tradingBots.filter(b => b.status === 'active' && !b.paused);
+  // The bots only run while this page is open. Record when each one last ran so that, when the
+  // page comes back after being closed / backgrounded, the gap is visible instead of silent.
+  const cycleStartMs = Date.now();
+  for(const bot of activeBots){
+    bot.runtime = bot.runtime || {};
+    const lastTick = bot.runtime.lastTickAtMs;
+    if(lastTick && cycleStartMs - lastTick > TB_GAP_NOTICE_MS){
+      bot.runtime.gapNotice = { ms: cycleStartMs - lastTick, atMs: cycleStartMs };
+    }
+    bot.runtime.lastTickAtMs = cycleStartMs;
+  }
   for(const bot of activeBots){
     const cred = liveCred(bot.exchange, bot.mode);
     if(!cred){ tradingBotLog(bot, `No verified ${bot.exchange} ${bot.mode} credential anymore — check your connection.`, true); continue; }
@@ -4057,6 +4082,7 @@ async function runTradingBotsCycleUnlocked(){
     try{ await runGridAutoScan(); }
     catch(err){ tbAutoScanStatus(`Auto-scan error: ${err.message}`); }
   }
+  saveTradingBotsSnapshot();
   renderTradingBotsList();
   renderTradingBotsDailyLimits();
   if(!f.tbAutoScanEnabled && f.tradingBots.every(b => b.status !== 'active') && f.tradingBotsRunning){
@@ -4316,6 +4342,7 @@ function renderTradingBotsList(){
           <div class="tb-stat"><span class="l">Profitable Trades</span><span class="n">${m.wins}</span></div>
         </div>
         <div class="tb-card-log">${bot.statusMessage || ''}</div>
+        ${botGapNoticeHtml(bot)}
       </div>
     `;
     }).join('');
@@ -5755,6 +5782,7 @@ function renderSmartBotDetail(id, force){
       </table>
     </div>
     ${bot.statusMessage ? `<div class="tb-card-log" style="margin-top:14px;${bot.statusIsError ? 'color:var(--red);' : ''}">${bot.statusMessage}</div>` : ''}
+    ${botGapNoticeHtml(bot)}
     ${editHtml}
     <div class="tb-card-actions" style="margin-top:18px;gap:10px;flex-wrap:wrap;">
       ${bot.status === 'active' ? `
