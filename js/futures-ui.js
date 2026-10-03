@@ -5004,6 +5004,33 @@ function sbAcctPanelVisible(){
   return sbAcctHosts().some(h => h.offsetParent !== null);
 }
 
+// ---- Day start for the balance card ----
+// "Starting balance (today)" = the first balance reading of the local calendar day for that
+// exchange + Live/Demo account, kept in localStorage (so it survives reloads and travels in a
+// Backup export). "Today's profit" = total USDT balance now (incl. floating PnL) minus that.
+// Limits worth knowing: if the app isn't opened until midday, the day starts from that first
+// reading (the card shows its time), and deposits/withdrawals/transfers or a Demo top-up
+// during the day count as profit or loss because the exchange balance moves.
+const SB_ACCT_DAY_KEY = 'nxtgen_acct_day_v1';
+function sbLocalDayKey(){
+  const d = new Date(), p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function sbAcctDayStart(exchange, mode, totalNow){
+  let store = {};
+  try{ store = JSON.parse(localStorage.getItem(SB_ACCT_DAY_KEY) || '{}') || {}; }catch(e){ store = {}; }
+  const k = `${exchange}:${mode}`, today = sbLocalDayKey();
+  let entry = store[k];
+  if((!entry || entry.day !== today) && Number.isFinite(totalNow)){
+    entry = { day: today, start: totalNow, atMs: Date.now() };
+    store[k] = entry;
+    // drop entries from earlier days so the key doesn't grow
+    for(const key of Object.keys(store)) if(store[key] && store[key].day !== today) delete store[key];
+    try{ localStorage.setItem(SB_ACCT_DAY_KEY, JSON.stringify(store)); }catch(e){}
+  }
+  return entry && entry.day === today ? entry : null;
+}
+
 function sbAcctHtml(){
   const { f, exchange, mode } = sbAcctSel();
   const c = f.sbAcctCache[`${exchange}:${mode}`];
@@ -5019,6 +5046,14 @@ function sbAcctHtml(){
   const val = (n) => (ok && n != null) ? sbFmtBalance(n) : '&mdash;';
   const pct = (ok && !partial && c.total > 0) ? Math.min(100, Math.max(0, (c.inUse / c.total) * 100)) : null;
   if(partial) note = 'Total, floating PnL and margin in use need the latest backend (new /api/futures/account-summary endpoint) \u2014 showing free margin only.';
+  const ds = ok && !partial && c.dayStart && Number.isFinite(c.dayStart.start) ? c.dayStart : null;
+  const dayProfit = ds && Number.isFinite(c.total) ? c.total - ds.start : null;
+  const dayPct = dayProfit != null && ds.start > 0 ? (dayProfit / ds.start) * 100 : null;
+  const dayHtml = `
+      <div class="sb-acct-grid sb-acct-day">
+        <div class="ov-card"><span class="ov-label">Starting balance (USDT) <span class="sb-acct-sub">${ds ? 'day start ' + new Date(ds.atMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : 'today'}</span></span><span class="ov-value">${ds ? sbFmtBalance(ds.start) : '&mdash;'}</span></div>
+        <div class="ov-card"><span class="ov-label">Today\u2019s profit <span class="sb-acct-sub">(incl. floating PnL)</span></span><span class="ov-value">${dayProfit != null ? pnlSpan(dayProfit, dayPct) : '&mdash;'}</span></div>
+      </div>`;
   const modeBtn = (m, label) => `<button type="button" class="mode-btn sb-acct-mode ${mode === m ? 'active' : ''}" data-mode="${m}" aria-pressed="${mode === m ? 'true' : 'false'}">${label}</button>`;
   const refreshBtn = state === 'nocred' ? '' : `<button type="button" class="sbf-icon-btn" id="sbAcctRefresh" aria-label="Refresh account balance" title="Refresh" ${state === 'loading' ? 'disabled' : ''}>${icon('refresh-cw')}</button>`;
   return `
@@ -5044,6 +5079,7 @@ function sbAcctHtml(){
         <div class="ov-card"><span class="ov-label">Margin in use</span><span class="ov-value">${val(c && c.inUse)}</span></div>
         <div class="ov-card"><span class="ov-label">Free margin</span><span class="ov-value sb-acct-free">${val(c && c.available)}</span></div>
       </div>
+      ${dayHtml}
       ${pct != null ? `<div class="sb-acct-bar" role="img" aria-label="${pct.toFixed(1)}% of balance is in use as margin"><span style="width:${pct.toFixed(1)}%"></span></div>` : ''}
       ${ok ? `<div class="sb-acct-foot"><span>${pct != null ? `${pct.toFixed(1)}% of balance in use as margin` : ''}</span><span>Updated ${new Date(c.atMs).toLocaleTimeString()}<span class="sb-acct-auto"> &middot; refreshes automatically</span></span></div>` : ''}
       ${note ? `<div class="sb-acct-note ${state === 'ok' ? 'sb-acct-note--info' : ''}">${note}</div>` : ''}
@@ -5084,6 +5120,7 @@ async function ensureSbAcctLoaded(exchange, mode, force, silent){
     const r = await callProxy('/api/futures/account-summary', args);
     if(r && r.ok && r.available != null){
       next = { status: 'ok', total: r.total, available: r.available, inUse: r.inUse, unrealized: r.unrealized, atMs: Date.now() };
+      next.dayStart = sbAcctDayStart(exchange, mode, r.total);
     }else if(r && r.ok === false && r.message && !/Cannot POST|Not Found|No account-summary/i.test(r.message)){
       next = { status: 'error', message: r.message, atMs: Date.now() };
     }

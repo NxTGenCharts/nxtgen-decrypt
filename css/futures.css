@@ -738,6 +738,8 @@ button.primary.sb-pill-btn:hover{ background:var(--amber); filter:brightness(1.0
 .sb-acct-select{ min-width:130px; }
 .sb-acct-select select{ width:100%; }
 .sb-acct-grid{ display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:12px; }
+.sb-acct-day{ grid-template-columns:repeat(2, minmax(0,1fr)); margin-top:12px; }
+.sb-acct-day .ov-value{ display:flex; flex-wrap:wrap; align-items:baseline; row-gap:2px; }
 .sb-acct-pos{ color:var(--green); }
 .sb-acct-neg{ color:var(--red); }
 .sb-acct-card[data-state="loading"] .ov-value{ opacity:.55; }
@@ -765,6 +767,7 @@ button.primary.sb-pill-btn:hover{ background:var(--amber); filter:brightness(1.0
   .sb-acct-controls .sbf-chip{ justify-self:start; }
   .sb-acct-controls .sbf-icon-btn{ justify-self:end; }
   .sb-acct-grid{ gap:8px; }
+  .sb-acct-day{ margin-top:8px; }
   .sb-acct-grid .ov-card{ padding:10px 12px; min-height:0; gap:6px; }
   .sb-acct-grid .ov-label{ font-size:9px; line-height:1.3; }
   .sb-acct-grid .ov-value{ font-size:clamp(15px, 4.8vw, 19px); }
