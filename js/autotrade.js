@@ -1124,7 +1124,7 @@ function executeCycle(cycle, dailyTarget, testMode){
   if(!testMode && at.dayProfitPct >= dailyTarget){
     at.targetReached = true;
     stopAutotrade();
-    showAtMessage(`Daily target of ${dailyTarget}% reached after ${at.cycles.length} cycle${at.cycles.length===1?'':'s'} — Autotrade stopped for the day. Started at ${money(at.startingBalance)}, ended at ${money(at.currentBalance)} (+${fmtPct(at.dayProfitPct)}). See the cycle summary below.`, 'info', 'target');
+    showAtMessage(`Daily target of ${dailyTarget}% reached after ${at.cycles.length} cycle${at.cycles.length===1?'':'s'} — Autotrade stopped for the day. Started at ${money(at.startingBalance)}, ended at ${money(at.currentBalance)} (${fmtPct(at.dayProfitPct)}). See the cycle summary below.`, 'info', 'target');
   } else if(testMode){
     showAtMessage(`TEST MODE — executed cycle #${at.cycles.length} regardless of profitability: ${cycle.path.join(' → ')} → ${cycle.path[0]} at ${fmtPct(cycle.profitPct)} (${money(profitAmt)}). This trade ignored the profit floor on purpose. Running total: ${fmtPct(at.dayProfitPct)}.`, 'error', 'triangle-alert');
   } else {

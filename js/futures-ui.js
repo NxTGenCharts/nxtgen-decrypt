@@ -230,9 +230,15 @@ function resetSession(){
   render();
 }
 
+// Signed — ONLY for profit/loss figures (realized, floating, net, gross).
 export function fmtUsd(x){
   const sign = x > 0 ? '+' : (x < 0 ? '' : '');
   return sign + '$' + x.toFixed(2);
+}
+// Plain money amount — balances, margin, investment, fees, targets, sizes. Never carries a "+".
+export function fmtMoney(x){
+  const n = Number(x) || 0;
+  return (n < 0 ? '-' : '') + '$' + Math.abs(n).toFixed(2);
 }
 
 function readSettingsFromInputs(){
@@ -1313,7 +1319,7 @@ function renderTradeLog(){
   const netSum = summableRows.reduce((a, t) => a + (t.netUsd || 0), 0);
   if(els.fuLogCount) els.fuLogCount.textContent = String(count);
   if(els.fuLogGross) els.fuLogGross.textContent = (grossKnown.length < summableRows.length ? '~' : '') + fmtUsd(grossSum);
-  if(els.fuLogFees) els.fuLogFees.textContent = (feesKnown.length < summableRows.length ? '~' : '') + fmtUsd(feesSum);
+  if(els.fuLogFees) els.fuLogFees.textContent = (feesKnown.length < summableRows.length ? '~' : '') + fmtMoney(feesSum);
   if(els.fuLogNet) els.fuLogNet.textContent = fmtUsd(netSum);
 
   if(els.fuLogSelectedCount){
@@ -1344,7 +1350,7 @@ function renderTradeLog(){
       <div>${t.leverage}x</div>
       <div>${t.qty}</div>
       <div>${t.grossUsd != null ? fmtUsd(t.grossUsd) : '—'}</div>
-      <div>${t.feesUsd != null ? fmtUsd(t.feesUsd) : '—'}</div>
+      <div>${t.feesUsd != null ? fmtMoney(t.feesUsd) : '—'}</div>
       <div>${fmtUsd(t.netUsd)}</div>
       <div>${t.durationMin != null ? t.durationMin + 'm' : '—'}</div>
     </div>
@@ -2100,7 +2106,7 @@ function renderLiveHistory(){
       <div>${t.leverage}x</div>
       <div>${t.qty}</div>
       <div>${t.grossUsd != null ? fmtUsd(t.grossUsd) : '—'}</div>
-      <div>${t.feesUsd != null ? fmtUsd(t.feesUsd) : '—'}</div>
+      <div>${t.feesUsd != null ? fmtMoney(t.feesUsd) : '—'}</div>
       <div>${fmtUsd(t.netUsd)}</div>
       <div>${t.durationMin != null ? t.durationMin + 'm' : '—'}</div>
       <div style="font-size:11px;color:var(--dim);">${t.orderId || '—'}</div>
@@ -2177,7 +2183,7 @@ function renderLive(){
   if(els.fuLiveTrades) els.fuLiveTrades.textContent = String(trades);
   if(els.fuLiveWinRate) els.fuLiveWinRate.textContent = trades ? ((wins / trades) * 100).toFixed(1) + '%' : '—';
   if(els.fuLiveGrossPnl) els.fuLiveGrossPnl.textContent = fmtUsd(gross);
-  if(els.fuLiveFees) els.fuLiveFees.textContent = fmtUsd(fees);
+  if(els.fuLiveFees) els.fuLiveFees.textContent = fmtMoney(fees);
   if(els.fuLiveNetPnl) els.fuLiveNetPnl.textContent = fmtUsd(net);
   if(els.fuLiveOpenPosition){
     if(Object.keys(f.livePositions).length === 0) els.fuLiveOpenPosition.textContent = 'None';
@@ -2823,7 +2829,7 @@ function renderTradingBotsDailyLimits(){
     <div class="ov-block" style="padding:12px;margin-bottom:12px;">
       <strong style="font-size:12.5px;">Daily Risk Limits — ALL Trading Bots combined</strong>
       <div style="font-size:11px;color:var(--dim);margin:4px 0 8px;line-height:1.5;">
-        Tracked against the total invested across every bot created today (currently ${fmtUsd(f.tbDayAnchorInvestmentUsd)}). The moment either limit is hit, EVERY active bot is force-stopped — no matter what any single bot's own state looks like — and no new bot can be created until the next calendar day.
+        Tracked against the total invested across every bot created today (currently ${fmtMoney(f.tbDayAnchorInvestmentUsd)}). The moment either limit is hit, EVERY active bot is force-stopped — no matter what any single bot's own state looks like — and no new bot can be created until the next calendar day.
       </div>
       <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
         <label style="font-size:11px;color:var(--dim);">Daily Profit Target (%)
@@ -3222,7 +3228,7 @@ async function runTradingBotsGridBacktestFromForm(){
       <div><span style="color:var(--dim);">Profit factor</span> <strong>${summary.profitFactor === Infinity ? '∞' : summary.profitFactor.toFixed(2)}</strong></div>
     </div>
     <div style="color:var(--dim);font-size:11px;">Exits — breakout: ${summary.breakoutExits} · drift-recalc: ${summary.recalculations} · liquidation-risk: ${summary.liquidations} · max loss: ${summary.maxLossExits} · profit target: ${summary.profitTargetExits} · still open at window end: ${summary.openAtEnd}</div>
-    <div style="color:var(--dim);font-size:11px;margin-top:6px;">Simulated over ${data.candles.length.toLocaleString()} real ${symbol} ${timeframe} candles (~${days}d), ${fmtUsd(perBotUsd)} per deployment — same code path as the live bot (which still runs on 5m — see note above), not a separate model. Past performance on this window is not a guarantee of future results.</div>
+    <div style="color:var(--dim);font-size:11px;margin-top:6px;">Simulated over ${data.candles.length.toLocaleString()} real ${symbol} ${timeframe} candles (~${days}d), ${fmtMoney(perBotUsd)} per deployment — same code path as the live bot (which still runs on 5m — see note above), not a separate model. Past performance on this window is not a guarantee of future results.</div>
   `;
 }
 
@@ -3266,7 +3272,7 @@ async function createTradingBotFromForm(){
     // naturally adapts as other bots open/close margin.
     const investmentUsd = cfg.investmentMode === 'pct' ? marginProbe.available * (cfg.investmentPct / 100) : cfg.investmentUsd;
     if(!(investmentUsd > 0)){ tbCreateStatus(`Free margin on ${exchange} is effectively 0 — nothing to allocate.`, true); return; }
-    if(investmentUsd > marginProbe.available){ tbCreateStatus(`Not enough free margin on ${exchange} — this bot needs ~${fmtUsd(investmentUsd)} but only ${fmtUsd(marginProbe.available)} is free right now.`, true); return; }
+    if(investmentUsd > marginProbe.available){ tbCreateStatus(`Not enough free margin on ${exchange} — this bot needs ~${fmtMoney(investmentUsd)} but only ${fmtMoney(marginProbe.available)} is free right now.`, true); return; }
     const plan = buildManualGridPlan({ symbol, direction: cfg.direction, upper: cfg.upper, lower: cfg.lower, levelCount: cfg.levelCount, leverage: cfg.leverage, investmentUsd });
     if(!plan){ tbCreateStatus('Check your grid settings — could not build a valid plan from them.', true); return; }
     bot.direction = cfg.direction; bot.investmentUsd = investmentUsd; bot.leverage = cfg.leverage;
@@ -3414,7 +3420,7 @@ async function applyGridRecovery(bot, plan, snap, proxyArgs){
   rt.recoveryAddedUsd = (rt.recoveryAddedUsd || 0) + addUsd;
   bot.investmentUsd = (bot.investmentUsd || 0) + addUsd; // Max Loss/Profit Target % below are read off bot.investmentUsd, so they recalculate against this larger base automatically
   fu().tbDayAnchorInvestmentUsd += addUsd; // keep the cross-bot daily cap's denominator honest about total capital actually committed
-  tradingBotLog(bot, `Recovery add #${addsUsed}/${maxAdds} — added ~${fmtUsd(addUsd)} ${direction} at market (floating drawdown was ${drawdownPct.toFixed(1)}%). Investment now ${fmtUsd(bot.investmentUsd)}.`, false);
+  tradingBotLog(bot, `Recovery add #${addsUsed}/${maxAdds} — added ~${fmtMoney(addUsd)} ${direction} at market (floating drawdown was ${drawdownPct.toFixed(1)}%). Investment now ${fmtMoney(bot.investmentUsd)}.`, false);
 }
 
 // Resolves ONE closed grid cycle's real net P&L from Bybit itself,
@@ -3981,7 +3987,7 @@ async function runGridAutoScan(){
   const totalBudget = cfg.investmentMode === 'pct' ? marginProbe.available * (cfg.investmentPct / 100) : cfg.investmentUsd;
   const perBotUsd = totalBudget / Math.max(1, cfg.maxConcurrent);
   if(!(perBotUsd > 0) || perBotUsd > marginProbe.available){
-    tbAutoScanStatus(`Waiting on free margin — this bot needs ~${fmtUsd(perBotUsd)} but only ${fmtUsd(marginProbe.available)} is free on ${exchange} right now.`);
+    tbAutoScanStatus(`Waiting on free margin — this bot needs ~${fmtMoney(perBotUsd)} but only ${fmtMoney(marginProbe.available)} is free on ${exchange} right now.`);
     return;
   }
 
@@ -4692,7 +4698,7 @@ function renderSmartBotsList(){
     els.sbSummaryHost.innerHTML = bots.length ? `
       <div class="ov-grid" style="grid-template-columns:repeat(2, 1fr);margin-bottom:14px;">
         <div class="ov-card ov-highlight"><span class="ov-label">Bots Profit</span><span class="ov-value">${pnlSpan(sumPnl, sumInv ? (sumPnl / sumInv) * 100 : null)}</span></div>
-        <div class="ov-card"><span class="ov-label">Committed Margin</span><span class="ov-value">${fmtUsd(sumInv)}</span></div>
+        <div class="ov-card"><span class="ov-label">Committed Margin</span><span class="ov-value">${fmtMoney(sumInv)}</span></div>
       </div>` : '';
   }
   if(els.sbTabsHost){
@@ -4735,13 +4741,13 @@ function renderSmartBotsList(){
         </div>
       </div>
       <div class="tb-stats-row">
-        <div class="tb-stat"><span class="l">Amount</span><span class="n">${fmtUsd(bot.investmentUsd || 0)}</span></div>
+        <div class="tb-stat"><span class="l">Amount</span><span class="n">${fmtMoney(bot.investmentUsd || 0)}</span></div>
         <div class="tb-stat"><span class="l">Total P/L</span><span class="n">${pnlSpan(m.totalPnl, m.pctOfInvestment)}</span></div>
         <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length} · ${fmtBotUptime(bot.createdAtMs)}</span></div>
       </div>
       ${tgt ? `<div class="progress-wrap" style="margin-top:10px;margin-bottom:0;">
         <div class="progress-track progress-track--tall" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(tgt.progressPct)}"><div class="progress-bar progress-bar--green${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div><span class="progress-pct">${Number(tgt.progressPct.toFixed(1))}%</span></div>
-        <div class="progress-label" style="text-align:left;">${tgt.reached ? `Profit Target (${tgt.profitTargetPct}%) reached` : `<strong class="progress-left">${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left of <strong class="progress-left">${tgt.profitTargetPct}% target</strong>`}</div>
+        <div class="progress-label" style="text-align:left;">${tgt.reached ? `Profit Target (${tgt.profitTargetPct}%) reached` : `<strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left of <strong class="progress-left">${tgt.profitTargetPct}% target</strong>`}</div>
       </div>` : ''}
     </div>`;
   }).join('') + createBtnHtml;
@@ -4826,11 +4832,11 @@ function sbPreviewHtml(){
   let html = '<details class="sbf-card sbf-est sbf-rules" data-sbf-section="est"' + (estOpen ? ' open' : '') + '>';
   html += '<summary class="sbf-sec">Estimate before you deploy</summary><div class="sbf-collapse-body">';
   if(pctMode) html += '<div class="sbf-hint" style="margin-bottom:8px;">Based on $100 of margin — your real amount is resolved from free balance when you click Create.</div>';
-  html += row('Position per level', fmtUsd(est.perLevelNotional));
+  html += row('Position per level', fmtMoney(est.perLevelNotional));
   html += row('Range / spacing', est.rangePct.toFixed(2) + '% wide · ' + est.spacingPct.toFixed(2) + '% per level');
   html += row('Net profit per grid', '<strong style="color:var(--green);">~' + fmtUsd(est.avgNet) + '</strong> <span style="color:var(--dim);">(' + fmtUsd(est.minNet) + ' – ' + fmtUsd(est.maxNet) + ')</span>');
   html += row('All ' + est.cycles + ' levels cycled once', '~' + fmtUsd(est.sweepNet));
-  html += row('Loss on one leg if price runs to the range edge', 'up to ~' + fmtUsd(est.worstLegLoss));
+  html += row('Loss on one leg if price runs to the range edge', 'up to ~' + fmtMoney(est.worstLegLoss));
   html += row('Liquidation distance', '~' + est.liqPct.toFixed(1) + '% from entry');
   html += row('Bot liquidation guard', est.guardOk ? '<span style="color:var(--green);">OK</span>' : '<span style="color:var(--red);">would flatten the bot early</span>');
   if(est.maxGuardLeverage != null) html += row('Highest leverage the guard allows here', '~' + est.maxGuardLeverage + 'x');
@@ -4846,7 +4852,7 @@ function sbPreviewHtml(){
     for(let lev = 1; lev <= maxLev; lev++){ if(netAt(levelCount, lev) >= target){ needLev = lev; break; } }
     let needLevels = null;
     for(let n = 20; n >= 3; n--){ if(netAt(n, leverage) >= target){ needLevels = n; break; } }
-    html += '<div class="sbf-est-line" style="margin-top:12px;">To net about ' + fmtUsd(target) + ' per grid:</div>';
+    html += '<div class="sbf-est-line" style="margin-top:12px;">To net about ' + fmtMoney(target) + ' per grid:</div>';
     if(needLev != null){
       html += '<div class="sbf-est-line">• Keep ' + levelCount + ' levels → about <strong>' + needLev + 'x</strong> leverage ' + (needLev === leverage ? '(already set)' : '<button type="button" class="primary ghost sb-apply-suggest sbf-mini-btn" data-levels="' + levelCount + '" data-lev="' + needLev + '">Apply</button>') + '</div>';
     } else {
@@ -5411,7 +5417,7 @@ async function createSmartBotFromForm(){
   if(marginProbe.available == null){ sbCreateStatus(`Could not read free margin on ${exchange} right now — try again in a moment.`, true); return; }
   const fundingUsd = cfg.fundingMode === 'pct' ? marginProbe.available * (cfg.fundingPct / 100) : cfg.fundingUsd;
   if(!(fundingUsd > 0)){ sbCreateStatus(`Free margin on ${exchange} is effectively 0 — nothing to allocate.`, true); return; }
-  if(fundingUsd > marginProbe.available){ sbCreateStatus(`Not enough free margin — this bot needs ~${fmtUsd(fundingUsd)} but only ${fmtUsd(marginProbe.available)} is free on ${exchange} right now.`, true); return; }
+  if(fundingUsd > marginProbe.available){ sbCreateStatus(`Not enough free margin — this bot needs ~${fmtMoney(fundingUsd)} but only ${fmtMoney(marginProbe.available)} is free on ${exchange} right now.`, true); return; }
 
   sbCreateStatus('Fetching live snapshot…');
   const snap = await fetchLiveSnapshot(exchange, symbol, '5m').catch(err => { sbCreateStatus(`Could not fetch ${symbol}: ${err.message}`, true); return null; });
@@ -5729,7 +5735,7 @@ function renderSmartBotDetail(id, force){
     <div class="tb-params-head">Profit Target</div>
     <div class="progress-wrap" style="margin-bottom:14px;">
       <div class="progress-track progress-track--tall" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(tgt.progressPct)}"><div class="progress-bar progress-bar--green${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div><span class="progress-pct">${Number(tgt.progressPct.toFixed(1))}%</span></div>
-      <div class="progress-label"><strong class="progress-left">${fmtUsd(tgt.realizedUsd)} of ${fmtUsd(tgt.targetUsd)}</strong> (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtUsd(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}</div>
+      <div class="progress-label"><strong class="progress-left">${fmtUsd(tgt.realizedUsd)} of ${fmtMoney(tgt.targetUsd)}</strong> (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}</div>
     </div>` : '';
   const editHtml = bot.status === 'active' ? sbEditTargetsHtml(bot, f) : '';
   // The management cycle re-renders this whole view every few seconds; without this the
@@ -5755,7 +5761,7 @@ function renderSmartBotDetail(id, force){
     <div id="sbDetailChart" style="margin:10px 0 16px;"></div>
     <div class="tb-params-head">Stats</div>
     <div class="tb-stats-row" style="margin-top:0;padding-top:0;border-top:none;">
-      <div class="tb-stat"><span class="l">Margin Committed</span><span class="n">${fmtUsd(bot.investmentUsd || 0)}</span></div>
+      <div class="tb-stat"><span class="l">Margin Committed</span><span class="n">${fmtMoney(bot.investmentUsd || 0)}</span></div>
       <div class="tb-stat"><span class="l">Leverage</span><span class="n">${bot.leverage || '—'}x</span></div>
       <div class="tb-stat"><span class="l">Uptime</span><span class="n">${fmtBotUptime(bot.createdAtMs)}</span></div>
       <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length}</span></div>
@@ -5829,7 +5835,7 @@ function renderSbScanner(){
       <td><span style="display:inline-flex;align-items:center;gap:8px;white-space:nowrap;">${tbCoinIconHtml(r.symbol)}<strong>${r.symbol}</strong>${guard}</span></td>
       <td style="color:var(--green);font-weight:700;">~${fmtUsd(r.avgNet)}</td>
       <td style="color:var(--green);">~${fmtUsd(r.sweepNet)}</td>
-      <td style="color:var(--red);">${fmtUsd(r.worstLegLoss)}</td>
+      <td style="color:var(--red);">${fmtMoney(r.worstLegLoss)}</td>
       <td>${r.rangePct.toFixed(1)}%</td>
       <td><span style="color:${kindColor};">${r.regimeText}</span></td>
       <td>${Math.round(r.score)}</td>

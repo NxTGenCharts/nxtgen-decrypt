@@ -8,7 +8,7 @@
 // breakdown, and an exportable trade list).
 // =============================================================
 import { els } from './state.js';
-import { callProxy, fmtUsd } from './futures-ui.js';
+import { callProxy, fmtUsd, fmtMoney } from './futures-ui.js';
 import { TRADEABLE_FUTURES_SYMBOLS } from './futures/engine.js';
 import { WATCHLIST_TOP_N, rankTopByVolume } from './futures/watchlist.js';
 import { STRATEGY_REGISTRY } from './futures/setups.js';
@@ -330,7 +330,7 @@ function renderEquityCurveSvg(equityCurve){
       <polyline points="${points}" fill="none" stroke="${color}" stroke-width="1.6" />
     </svg>
     <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--dim);margin-top:4px;">
-      <span>${fmtUsd(min - equityCurve[0].equity + equityCurve[0].equity).replace('+', '')}</span>
+      <span>${fmtMoney(min)}</span>
       <span>Low $${min.toLocaleString('en-US', { maximumFractionDigits: 0 })} · High $${max.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
       <span></span>
     </div>

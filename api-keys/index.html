@@ -106,10 +106,47 @@
       </div>
       <div id="aiStatusNote" style="font-size:12px;color:var(--dim);margin-top:10px;">No AI provider key saved yet.</div>
     </div>
+
+    <div class="ov-block" style="margin-top:18px;">
+      <div class="ov-block-title">Backup &amp; Transfer <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">PHONE &harr; PC</span></div>
+      <div style="font-size:12px;color:var(--dim);line-height:1.5;margin:10px 0 14px;max-width:760px;">
+        This app keeps its data in this browser only (no account, no server copy). Export it here, then import the file on another device to carry over your
+        trade history, paper/backtest history, Trading Bots and their trades, settings and logs. It does not use cookies.
+        <strong>Only run a bot on one device at a time</strong> &mdash; bots that were active are imported as paused.
+      </div>
+
+      <div style="font-weight:600;margin-bottom:8px;">Export from this device</div>
+      <label class="toggle-check" style="margin-bottom:10px;">
+        <input id="bkIncludeSecrets" type="checkbox">
+        <span>Include API keys &amp; secrets (sensitive &mdash; needs a passphrase, file is encrypted)</span>
+      </label>
+      <div class="field" style="max-width:360px;">
+        <input id="bkExportPass" type="password" autocomplete="new-password" placeholder="Passphrase (optional)">
+      </div>
+      <div class="btn-row" style="margin-top:10px;">
+        <button type="button" class="primary" id="bkExportBtn">Export backup</button>
+        <button type="button" class="primary ghost" id="bkShareBtn" hidden>Share&hellip;</button>
+      </div>
+      <div id="bkExportStatus" style="font-size:12px;color:var(--dim);margin-top:8px;min-height:16px;"></div>
+
+      <div style="font-weight:600;margin:18px 0 8px;border-top:1px solid var(--line);padding-top:16px;">Import on this device</div>
+      <div class="field" style="max-width:420px;">
+        <input id="bkImportFile" type="file" accept=".json,application/json">
+      </div>
+      <div class="field" style="max-width:360px;margin-top:10px;">
+        <input id="bkImportPass" type="password" autocomplete="off" placeholder="Passphrase (if the file is encrypted)">
+      </div>
+      <div class="btn-row" style="margin-top:10px;">
+        <button type="button" class="primary ghost" id="bkImportBtn">Import backup</button>
+      </div>
+      <div id="bkImportStatus" style="font-size:12px;color:var(--dim);margin-top:8px;min-height:16px;"></div>
+      <div style="font-size:11.5px;color:var(--dim);margin-top:10px;max-width:760px;">Importing replaces matching data on this device. Export this device first if it has history you want to keep. API keys already saved here are kept unless the backup includes its own.</div>
+    </div>
   </div>
 </div>
 
 <script type="module" src="/js/app.js"></script>
+<script type="module" src="/js/backup.js"></script>
 
 <script type="module" src="/js/mobile-shell.js"></script>
 
