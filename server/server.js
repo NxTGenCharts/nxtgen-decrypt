@@ -3145,10 +3145,18 @@ async function getBinanceFuturesRealizedResult(mode, apiKey, secretKey, symbol, 
 // full stop otherwise — see the trailing patch to those three
 // functions further down this section.
 // =============================================================
-async function binanceGridCheckHedgeMode(mode, apiKey, secretKey){
+// Returns { on, raw }: `raw` is exactly what Binance sent back, so a "one-way mode" complaint can show
+// the value that triggered it. Accepts true / "true" (some environments send a string) and treats
+// anything else, including a missing field, as NOT hedge mode.
+async function binanceGridReadHedgeMode(mode, apiKey, secretKey){
   const data = await binanceFuturesSignedRequest('GET', '/fapi/v1/positionSide/dual', {}, apiKey, secretKey, mode);
-  return !!data.dualSidePosition;
+  const raw = data && Object.prototype.hasOwnProperty.call(data, 'dualSidePosition') ? data.dualSidePosition : undefined;
+  return { on: raw === true || String(raw).toLowerCase() === 'true', raw };
 }
+async function binanceGridCheckHedgeMode(mode, apiKey, secretKey){
+  return (await binanceGridReadHedgeMode(mode, apiKey, secretKey)).on;
+}
+const BINANCE_ENV_LABEL = { live: 'live Binance Futures (fapi.binance.com)', demo: 'the Binance Futures Testnet (testnet.binancefuture.com)' };
 
 // In hedge mode: `side` (BUY/SELL) is the trade direction, `positionSide`
 // (LONG/SHORT) says which position slot it affects — they're
@@ -4028,9 +4036,14 @@ app.post('/api/futures/close-position', async (req, res) => {
 const GRID_HEDGE_MODE_ENSURE = {
   bybit: async (mode, apiKey, secretKey, symbol) => { await bybitGridEnsureHedgeMode(mode, apiKey, secretKey, symbol); return { hedgeModeReady: true }; },
   binance: async (mode, apiKey, secretKey) => {
-    const on = await binanceGridCheckHedgeMode(mode, apiKey, secretKey);
+    const { on, raw } = await binanceGridReadHedgeMode(mode, apiKey, secretKey);
     if(!on){
-      return { hedgeModeReady: false, message: 'This Binance account is in one-way position mode. NxTGen Grid needs Hedge Mode (holds a long AND short position on the same symbol at once) — switch it on once, yourself, in Binance\'s app under Futures settings > Position Mode, or via POST /fapi/v1/positionSide/dual. This app will not switch it for you since it is an account-wide setting affecting every symbol you trade on Binance, not just Grid\'s.' };
+      const env = BINANCE_ENV_LABEL[mode] || BINANCE_ENV_LABEL.live;
+      const seen = `Binance answered dualSidePosition=${raw === undefined ? 'missing' : JSON.stringify(raw)} for the account behind this API key on ${env}.`;
+      if(mode === 'demo'){
+        return { hedgeModeReady: false, canAutoSwitch: true, message: `${seen} Grid bots need Hedge Mode. This check reads the account your Demo API key belongs to, which is NOT the same as the main Binance app's setting \u2014 change Position Mode to Hedge on testnet.binancefuture.com (Preferences), or let this app switch the Demo account for you when it asks.` };
+      }
+      return { hedgeModeReady: false, canAutoSwitch: false, message: `${seen} Grid bots need Hedge Mode (a long AND a short on the same symbol at once). Switch it on once, yourself, in Binance's Futures settings > Position Mode, or via POST /fapi/v1/positionSide/dual. This app will not switch a LIVE account for you because the setting applies to every symbol you trade.` };
     }
     return { hedgeModeReady: true };
   },
@@ -4049,6 +4062,23 @@ app.post('/api/futures/grid/ensure-mode', async (req, res) => {
   }catch(err){
     if(err instanceof VerifyRejected) return res.json({ ok:false, rejected:true, message: err.message });
     return res.json({ ok:false, rejected:false, message: `Could not confirm hedge mode for ${symbol} on ${exchange}: ${err.message}` });
+  }
+});
+
+// Switches a Binance DEMO (testnet) account to Hedge Mode. Demo only: on a live account the setting is
+// account-wide and the person must change it themselves. Binance refuses the switch while the account
+// has open positions or open orders; that message is passed straight back.
+app.post('/api/futures/grid/set-hedge-mode', async (req, res) => {
+  const { exchange, mode, apiKey, secretKey } = req.body || {};
+  if(exchange !== 'binance') return res.status(400).json({ ok:false, message:'Switching position mode from here is only for Binance Demo \u2014 Bybit is switched automatically per symbol.' });
+  if(mode !== 'demo') return res.status(400).json({ ok:false, message:'This app only switches Binance Demo accounts. For a live account change Position Mode yourself in Binance.' });
+  if(!apiKey || !secretKey) return res.status(400).json({ ok:false, message:'apiKey and secretKey are required.' });
+  try{
+    await binanceFuturesSignedRequest('POST', '/fapi/v1/positionSide/dual', { dualSidePosition: 'true' }, apiKey, secretKey, 'demo');
+    return res.json({ ok:true });
+  }catch(err){
+    if(/no need to change/i.test(err.message)) return res.json({ ok:true, alreadyOn:true });
+    return res.json({ ok:false, message: `Binance refused to switch the Demo account to Hedge Mode: ${err.message}` });
   }
 });
 

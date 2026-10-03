@@ -3336,7 +3336,17 @@ function tbAutoScanStatus(msg){
 // -------------------------------------------------------------
 async function deployGridBotInstance(bot, cred){
   const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
-  const modeCheck = await callProxy('/api/futures/grid/ensure-mode', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  let modeCheck = await callProxy('/api/futures/grid/ensure-mode', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  // Binance Demo only: offer to flip the Demo account to Hedge Mode (a manual deploy only \u2014 an auto-scan
+  // deploy has nobody there to answer, so it just reports the error).
+  if(modeCheck.ok && modeCheck.hedgeModeReady === false && modeCheck.canAutoSwitch && !(bot.config && bot.config.autoScan)){
+    const yes = window.confirm('Your Binance Demo account is in one-way position mode, but grid bots need Hedge Mode.\n\nSwitch the Demo account to Hedge Mode now? It applies to the whole Demo account, and Binance only allows it while that account has no open positions or open orders.');
+    if(yes){
+      const sw = await callProxy('/api/futures/grid/set-hedge-mode', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+      if(sw.ok) modeCheck = await callProxy('/api/futures/grid/ensure-mode', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+      else modeCheck = { ok:true, hedgeModeReady:false, message: sw.message };
+    }
+  }
   if(!modeCheck.ok || modeCheck.hedgeModeReady === false){
     bot.status = 'error';
     tradingBotLog(bot, modeCheck.message || `Could not confirm hedge mode for ${bot.symbol} on ${bot.exchange}.`, true);
@@ -3446,6 +3456,88 @@ async function resolveGridCyclePnl(proxyArgs, orderId, estimate){
   return { grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: row.closedPnl, avgEntryPrice: row.avgEntryPrice || null, avgExitPrice: row.avgExitPrice || null, qty: row.qty || null, closedAtMs: row.createdTime || null, pnlSource: 'exchange' };
 }
 
+const sleepMs = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Books Bybit closed-P&L rows into a grid bot, each row at most once (tracked in
+// bot.runtime.claimedPnl). Row `side` is the CLOSING side: Sell closes a long, Buy closes a short.
+// A row matching a level's resting TP is labelled a normal cycle TP; anything else (a flatten, a
+// stop-out) gets `defaultReason`. Used when the bot flattens and by "Add missing closes".
+function bookGridCloseRows(bot, rows, defaultReason){
+  bot.runtime.claimedPnl = bot.runtime.claimedPnl || [];
+  const claimed = new Set(bot.runtime.claimedPnl.map(String));
+  const levelByClose = new Map((bot.runtime.levels || []).filter(l => l.closeOrderId != null).map(l => [String(l.closeOrderId), l]));
+  let total = 0, count = 0;
+  for(const r of rows){
+    const id = String(r.orderId);
+    if(claimed.has(id)) continue;
+    claimed.add(id); bot.runtime.claimedPnl.push(id);
+    const lvl = levelByClose.get(id);
+    const direction = r.side === 'Sell' ? 'LONG' : 'SHORT';
+    const net = Number(r.closedPnl) || 0;
+    const closedAt = r.createdTime || Date.now();
+    total += net; count++;
+    bot.realizedUsd = (bot.realizedUsd || 0) + net;
+    addTradingBotsRealized(net);
+    appendPersistentTrade({
+      closedAtMs: closedAt, openedAtMs: lvl && lvl.openedAt ? lvl.openedAt : null, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: direction, direction,
+      entry: r.avgEntryPrice, exit: r.avgExitPrice, qty: r.qty, leverage: bot.plan?.leverage ?? null,
+      grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: net, pnlSource: 'exchange',
+      confidence: null, setupType: 'Trading Bot: Grid', exitReason: lvl ? 'GRID_CYCLE_TP' : defaultReason,
+      durationMin: lvl && lvl.openedAt ? Math.max(0, Math.round((closedAt - lvl.openedAt) / 60_000)) : null,
+      gridId: bot.id, gridLevel: lvl ? lvl.levelIndex : null, cycleResult: net > 0 ? 'WIN' : 'LOSS',
+    });
+  }
+  if(bot.runtime.claimedPnl.length > 400) bot.runtime.claimedPnl.splice(0, bot.runtime.claimedPnl.length - 300);
+  return { total, count };
+}
+
+// Flattens a grid bot AND books what actually happened. The old flow only called /grid/flatten and
+// marked the bot closed, so the closing trade (often the biggest loss: every open leg market-closed
+// at once) never reached the bot's Realized figure, trade list or daily totals. Now, on Bybit, the
+// real closed-P&L rows are read back (waiting a few seconds for Bybit to index them) and booked; any
+// TP that filled since the last check but was never processed is swept up in the same pass. Other
+// exchanges have no closed-P&L lookup wired up, so they fall back to the floating P&L read just
+// before the flatten (an estimate that leaves out the closing fee).
+async function flattenGridBot(bot, proxyArgs, exitReason){
+  let hadOpen = (bot.runtime.levels || []).some(l => l.status === 'PENDING_CLOSE'), unrealized = 0, posKnown = false;
+  const pos = await callProxy('/api/futures/grid/positions', proxyArgs).catch(() => ({ ok:false }));
+  if(pos.ok){ posKnown = true; hadOpen = (pos.long?.size > 0) || (pos.short?.size > 0); unrealized = (pos.long?.unrealisedPnl || 0) + (pos.short?.unrealisedPnl || 0); }
+  const tFlat = Date.now();
+  const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+  if(!flat.ok) return { ok:false, message: flat.message, hadOpen, total: 0, count: 0 };
+
+  let total = 0, count = 0, sawFlattenRow = false;
+  if(bot.exchange === 'bybit'){
+    for(let attempt = 0; attempt < 6; attempt++){
+      const r = await callProxy('/api/futures/grid/closed-pnl', proxyArgs).catch(() => null);
+      const claimed = new Set((bot.runtime.claimedPnl || []).map(String));
+      const fresh = r && r.ok ? (r.list || []).filter(x => x.createdTime >= (bot.createdAtMs || 0) - 60_000 && !claimed.has(String(x.orderId))) : [];
+      sawFlattenRow = fresh.some(x => x.createdTime >= tFlat - 15_000);
+      if(sawFlattenRow || !hadOpen || attempt === 5){
+        if(fresh.length){ const b = bookGridCloseRows(bot, fresh, exitReason); total += b.total; count += b.count; }
+        break;
+      }
+      await sleepMs(2000);
+    }
+  } else if(hadOpen && posKnown){
+    total = unrealized; count = 1;
+    bot.realizedUsd = (bot.realizedUsd || 0) + unrealized;
+    addTradingBotsRealized(unrealized);
+    appendPersistentTrade({
+      closedAtMs: Date.now(), exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: bot.direction || 'GRID', netUsd: unrealized, pnlSource: 'estimate',
+      leverage: bot.plan?.leverage ?? null, setupType: 'Trading Bot: Grid', exitReason: `${exitReason}_EST`, gridId: bot.id,
+    });
+  }
+  return { ok:true, hadOpen, total, count, missing: hadOpen && bot.exchange === 'bybit' && !sawFlattenRow };
+}
+
+function logGridFlattenResult(bot, res){
+  if(!res.hadOpen && !res.count) return;
+  const ex = EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange;
+  if(res.missing) tradingBotLog(bot, `Flattened, but ${ex} hasn\u2019t listed the closing trade yet \u2014 open this bot and press Verify with ${ex}, then Add missing closes, to book it.`, true);
+  else tradingBotLog(bot, `Flattened \u2014 ${res.count} close(s) booked${bot.exchange === 'bybit' ? ' from Bybit' : ' (estimated from floating P&L)'}, ${fmtUsd(res.total)} net.`, res.total < 0);
+}
+
 async function manageGridBotInstance(bot, cred, nowMs){
   const plan = bot.plan;
   const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
@@ -3456,8 +3548,9 @@ async function manageGridBotInstance(bot, cred, nowMs){
   const bo = detectGridBreakout(snap, plan, GRID_DEFAULTS);
   if(bo.breakout){
     tradingBotLog(bot, `BREAKOUT detected (${bo.reasons[0] || ''}) — flattening.`, true);
-    const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+    const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_BREAKOUT');
     if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+    else logGridFlattenResult(bot, flat);
     bot.status = 'closed';
     renderTradingBotsList();
     return;
@@ -3476,8 +3569,9 @@ async function manageGridBotInstance(bot, cred, nowMs){
   const driftedDown = snap.price < plan.lower - halfWidth * (GRID_DEFAULTS.recalcDriftPct / 100);
   if(driftedUp || driftedDown){
     tradingBotLog(bot, `Price drifted ${GRID_DEFAULTS.recalcDriftPct}%+ beyond the grid range without a confirmed breakout — flattening (stale range).`, true);
-    const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+    const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_STALE');
     if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+    else logGridFlattenResult(bot, flat);
     bot.status = 'closed';
     renderTradingBotsList();
     return;
@@ -3501,8 +3595,9 @@ async function manageGridBotInstance(bot, cred, nowMs){
     const worstCase = Math.abs(leg.entryPrice - (leg.direction === 'LONG' ? plan.lower : plan.upper));
     if(worstCase > 0 && dist < worstCase * GRID_DEFAULTS.liquidationBufferRatio * 0.35){
       tradingBotLog(bot, `Liquidation risk — a ${leg.direction} leg's est. liquidation (${liqPrice.toFixed(6)}) is too close to mark (${snap.price.toFixed(6)}) — flattening the whole bot.`, true);
-      const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+      const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_LIQ_RISK');
       if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+      else logGridFlattenResult(bot, flat);
       bot.status = 'closed';
       renderTradingBotsList();
       return;
@@ -3693,13 +3788,15 @@ async function manageGridBotInstance(bot, cred, nowMs){
     const profitCeilUsd = profitTargetPct ? bot.investmentUsd * (profitTargetPct / 100) : null;
     if(lossFloorUsd != null && bot.realizedUsd <= lossFloorUsd){
       tradingBotLog(bot, `This bot's Max Loss (${maxLossPct}%) reached — flattening.`, true);
-      const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+      const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_MAX_LOSS');
       if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+      else logGridFlattenResult(bot, flat);
       bot.status = 'closed';
     } else if(profitCeilUsd != null && bot.realizedUsd >= profitCeilUsd){
       tradingBotLog(bot, `This bot's Profit Target (${profitTargetPct}%) reached — flattening.`, false);
-      const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
+      const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_TARGET');
       if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+      else logGridFlattenResult(bot, flat);
       bot.status = 'closed';
     }
   }
@@ -4122,13 +4219,10 @@ async function closeBotPositionForcefully(bot, cred, reasonLabel){
   let netUsd = 0, hadSomethingOpen = false, entry = null, exit = null, qty = null;
 
   if(bot.type === 'grid'){
-    const posResp = await callProxy('/api/futures/grid/positions', proxyArgs).catch(() => ({ ok:false }));
-    if(posResp.ok){
-      hadSomethingOpen = (posResp.long?.size > 0) || (posResp.short?.size > 0);
-      netUsd = (posResp.long?.unrealisedPnl || 0) + (posResp.short?.unrealisedPnl || 0);
-    }
-    const flat = await callProxy('/api/futures/grid/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
-    if(!flat.ok) return { ok:false, message: flat.message };
+    // Books the real closing trade(s) itself (see flattenGridBot), so nothing more to add below.
+    const res = await flattenGridBot(bot, proxyArgs, `GRID_${reasonLabel}`);
+    if(!res.ok) return { ok:false, message: res.message };
+    return { ok:true, netUsd: res.total, hadSomethingOpen: res.hadOpen };
   } else {
     const flat = await callProxy('/api/futures/dca/flatten', proxyArgs).catch(err => ({ ok:false, message: err.message }));
     if(!flat.ok) return { ok:false, message: flat.message };
@@ -5646,8 +5740,25 @@ async function verifyBotWithExchange(id){
   if(!resp.ok){ bot.exchangeCheck = { status: 'error', message: resp.message || 'The server did not accept the request — redeploy the updated server.js on Render first.' }; renderSmartBotsPanel(); return; }
   const rows = (resp.list || []).filter(r => r.createdTime >= bot.createdAtMs - 60_000);
   const sumUsd = rows.reduce((a, r) => a + (r.closedPnl || 0), 0);
-  bot.exchangeCheck = { status: 'ok', atMs: Date.now(), count: rows.length, sumUsd };
+  const claimed = new Set(((bot.runtime && bot.runtime.claimedPnl) || []).map(String));
+  const unbooked = rows.filter(r => !claimed.has(String(r.orderId)));
+  bot.exchangeCheck = { status: 'ok', atMs: Date.now(), count: rows.length, sumUsd, unbookedCount: unbooked.length, unbookedUsd: unbooked.reduce((a, r) => a + (r.closedPnl || 0), 0) };
   renderSmartBotsPanel();
+}
+
+async function bookMissingCloses(id){
+  const bot = fu().tradingBots.find(b => b.id === id);
+  if(!bot || bot.status === 'active') return;
+  const cred = liveCred(bot.exchange, bot.mode);
+  if(!cred) return;
+  const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
+  const resp = await callProxy('/api/futures/grid/closed-pnl', proxyArgs).catch(() => null);
+  if(!resp || !resp.ok) return;
+  const rows = (resp.list || []).filter(r => r.createdTime >= bot.createdAtMs - 60_000);
+  const res = bookGridCloseRows(bot, rows, 'GRID_FLATTEN');
+  if(res.count) tradingBotLog(bot, `Added ${res.count} missing close(s) from Bybit, ${fmtUsd(res.total)} net.`, res.total < 0);
+  saveTradingBotsSnapshot();
+  await verifyBotWithExchange(id);
 }
 
 function exchangeCheckHtml(bot){
@@ -5657,7 +5768,7 @@ function exchangeCheckHtml(bot){
   if(c.status === 'error') return `<span style="color:var(--red);">Could not verify: ${c.message}</span>`;
   const m = computeBotMetrics(bot);
   const diff = (bot.realizedUsd || 0) - c.sumUsd;
-  return `${EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange} booked <strong style="color:var(--ink);">${fmtUsd(c.sumUsd)}</strong> across ${c.count} closes since this bot started (net of fees). The app shows <strong style="color:var(--ink);">${fmtUsd(bot.realizedUsd || 0)}</strong> across ${m.records.length} — difference ${fmtUsd(diff)}. Any trades made by hand or by another bot on this pair in that window are counted on the exchange side too.`;
+  return `${EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange} booked <strong style="color:var(--ink);">${fmtUsd(c.sumUsd)}</strong> across ${c.count} closes since this bot started (net of fees). The app shows <strong style="color:var(--ink);">${fmtUsd(bot.realizedUsd || 0)}</strong> across ${m.records.length} — difference ${fmtUsd(diff)}. Any trades made by hand or by another bot on this pair in that window are counted on the exchange side too.${c.unbookedCount && bot.status !== 'active' ? `<div style=\"margin-top:10px;\"><strong style=\"color:var(--ink);\">${c.unbookedCount}</strong> of those closes (${fmtUsd(c.unbookedUsd)}) were never booked to this bot \u2014 typically the final flatten trade. <button type=\"button\" class=\"primary sb-pill-btn sb-book-missing-btn\" data-id=\"${bot.id}\" style=\"margin-top:8px;\">Add missing closes</button><div class=\"sbf-hint\" style=\"margin-top:6px;\">Only add them if you didn\u2019t trade this pair by hand or with another bot since this bot started.</div></div>` : ''}`;
 }
 
 // -------------------------------------------------------------
@@ -6121,6 +6232,7 @@ function initSmartBots(){
       else if(e.target.classList.contains('sb-copy-btn')) copySmartBot(id);
       else if(e.target.classList.contains('sb-rename-btn')) renameSmartBot(id);
       else if(e.target.classList.contains('sb-verify-btn')) await verifyBotWithExchange(id);
+      else if(e.target.classList.contains('sb-book-missing-btn')) await bookMissingCloses(id);
       else if(e.target.classList.contains('sb-edit-save-btn')) await saveBotTargets(id);
     });
     // Keep what's typed (and whether the section is open) across the periodic re-render.
