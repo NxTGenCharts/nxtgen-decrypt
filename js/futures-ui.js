@@ -5990,10 +5990,20 @@ function renderSmartBotDetail(id, force){
 // It is an ESTIMATE from current volatility  not a promise of future profit.
 // -------------------------------------------------------------
 const SB_SCAN_LEVELS = 10;
+const SB_AUTO_TOPN = 10;           // one-click "Auto-pick best" always scans the top 10 by 24h volume
+const SB_AUTO_LEV_CAP = 15;        // default leverage for any pair that supports more than this
+// Per-pair leverage for the one-click scan: a pair capped at 8x (or any max <= 15x)
+// uses its own max; a pair that supports higher uses 15x. If the exchange doesn't
+// publish a max (e.g. Binance's public API), 15x is used and the server still clamps
+// to the real limit when the order is placed.
+function sbAutoLeverage(maxLev){
+  const m = Math.floor(Number(maxLev));
+  return (m > 0) ? Math.min(SB_AUTO_LEV_CAP, m) : SB_AUTO_LEV_CAP;
+}
 
 function sbScanState(){
   const f = sbState();
-  if(!f.sbScan) f.sbScan = { exchange: 'bybit', margin: 100, leverage: 6, topN: 20, running: false, progress: '', results: null, skipped: 0, scannedAtMs: 0, open: false };
+  if(!f.sbScan) f.sbScan = { exchange: 'bybit', margin: 100, leverage: 6, topN: 10, running: false, progress: '', results: null, skipped: 0, scannedAtMs: 0, open: false };
   return f.sbScan;
 }
 
@@ -6007,7 +6017,8 @@ function renderSbScanner(){
     const guard = r.guardOk ? '' : ' <span title="At this leverage the bot\'s liquidation guard would flatten it early" style="color:var(--red);">&#9888;</span>';
     return `<tr>
       <td>${i + 1}</td>
-      <td><span style="display:inline-flex;align-items:center;gap:8px;white-space:nowrap;">${tbCoinIconHtml(r.symbol)}<strong>${r.symbol}</strong>${guard}</span></td>
+      <td><span style="display:inline-flex;align-items:center;gap:8px;white-space:nowrap;">${tbCoinIconHtml(r.symbol)}<strong>${r.symbol}</strong>${guard}${sc.autoPick === r.symbol ? ' <span style="font-size:9px;font-weight:700;letter-spacing:.06em;color:var(--amber-ink);background:var(--amber);border-radius:999px;padding:2px 7px;">BEST</span>' : ''}</span></td>
+      <td>${r.lev}x</td>
       <td style="color:var(--green);font-weight:700;">~${fmtUsd(r.avgNet)}</td>
       <td style="color:var(--green);">~${fmtUsd(r.sweepNet)}</td>
       <td style="color:var(--red);">${fmtMoney(r.worstLegLoss)}</td>
@@ -6021,7 +6032,7 @@ function renderSbScanner(){
     ? (sc.results.length ? `
       <div class="table-scroll" style="margin-top:12px;">
         <table class="tb-orders-table">
-          <thead><tr><th>#</th><th>Pair</th><th>Per grid</th><th>All ${SB_SCAN_LEVELS} levels</th><th>Worst leg</th><th>Range</th><th>Market</th><th>Score</th><th></th></tr></thead>
+          <thead><tr><th>#</th><th>Pair</th><th>Lev</th><th>Per grid</th><th>All ${SB_SCAN_LEVELS} levels</th><th>Worst leg</th><th>Range</th><th>Market</th><th>Score</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
@@ -6032,7 +6043,7 @@ function renderSbScanner(){
     <details class="sbf-card sbf-rules" id="sbScanDetails" style="margin-top:14px;"${sc.open ? ' open' : ''}>
       <summary class="sbf-sec">Grid opportunities &middot; ${SB_SCAN_LEVELS} levels</summary>
       <div class="sbf-collapse-body">
-        <div class="sbf-hint" style="margin:0 0 12px;">Scans the most-traded pairs and ranks them by the estimated profit of a ${SB_SCAN_LEVELS}-level Grid bot right now, using your margin and leverage.</div>
+        <div class="sbf-hint" style="margin:0 0 12px;">Scans the most-traded pairs and ranks them by the estimated profit of a ${SB_SCAN_LEVELS}-level Grid bot right now, using your margin and leverage. <strong>Auto-pick best</strong> does it all in one click: scans the top ${SB_AUTO_TOPN} by volume, uses each pair&rsquo;s own max leverage (8x pairs use 8x, anything higher uses ${SB_AUTO_LEV_CAP}x), and opens the create form with the most profitable one filled in &mdash; nothing is deployed until you press Create.</div>
         <div class="sbf-fields" style="grid-template-columns:repeat(2, minmax(0,1fr));gap:10px;">
           <div class="sbf-field"><label class="sbf-label" for="sbScanExchange"><span>Exchange</span></label>
             <div class="sbf-select"><select id="sbScanExchange">${opt('bybit', 'Bybit', sc.exchange)}${opt('binance', 'Binance', sc.exchange)}</select>${icon('chevron-down')}</div></div>
@@ -6044,7 +6055,8 @@ function renderSbScanner(){
             <div class="sbf-input"><input id="sbScanLev" type="number" inputmode="numeric" min="1" max="50" step="1" value="${sc.leverage}"><span class="sbf-unit">x</span></div></div>
         </div>
         <div style="display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap;">
-          <button type="button" class="primary sb-pill-btn" id="sbScanBtn"${sc.running ? ' disabled' : ''}>${sc.running ? 'Scanning&hellip;' : (sc.results ? 'Re-scan' : 'Scan pairs')}</button>
+          <button type="button" class="primary sb-pill-btn" id="sbAutoPickBtn"${sc.running ? ' disabled' : ''} title="Scan the top ${SB_AUTO_TOPN} pairs by volume and open the create form with the most profitable grid"><span style="display:inline-flex;align-items:center;gap:6px;">${icon('zap')}${sc.running && sc.auto ? 'Scanning&hellip;' : 'Auto-pick best'}</span></button>
+          <button type="button" class="primary ghost sb-pill-btn" id="sbScanBtn"${sc.running ? ' disabled' : ''}>${sc.running && !sc.auto ? 'Scanning&hellip;' : (sc.results ? 'Re-scan' : 'Scan pairs')}</button>
           <span class="sbf-hint" id="sbScanProgress" style="margin:0;">${sc.progress || ''}</span>
         </div>
         ${table}
@@ -6052,20 +6064,23 @@ function renderSbScanner(){
     </details>`;
 }
 
-async function runSbScan(){
+async function runSbScan(opts){
+  const auto = !!(opts && opts.auto);
   const sc = sbScanState();
   if(sc.running) return;
   const exchange = document.getElementById('sbScanExchange')?.value || sc.exchange;
-  const topN = parseInt(document.getElementById('sbScanTopN')?.value, 10) || sc.topN;
+  const topN = auto ? SB_AUTO_TOPN : (parseInt(document.getElementById('sbScanTopN')?.value, 10) || sc.topN);
   const margin = parseFloat(document.getElementById('sbScanMargin')?.value);
   const leverage = Math.max(1, Math.min(50, parseInt(document.getElementById('sbScanLev')?.value, 10) || 1));
-  Object.assign(sc, { exchange, topN, margin: margin > 0 ? margin : 100, leverage, running: true, progress: 'Loading pair list&hellip;', open: true });
+  Object.assign(sc, { exchange, topN, margin: margin > 0 ? margin : 100, leverage, running: true, auto, autoPick: null, progress: 'Loading pair list&hellip;', open: true });
   renderSbScanner();
   const setProgress = (t) => { sc.progress = t; const el = document.getElementById('sbScanProgress'); if(el) el.innerHTML = t; };
   try{
     const universe = await getFullFuturesUniverse(exchange);
-    const symbols = (universe || []).filter(e => e && /USDT$/.test(e.symbol || ''))
-      .sort((a, b) => (b.volume24hUsd || 0) - (a.volume24hUsd || 0)).slice(0, topN).map(e => e.symbol);
+    const entries = (universe || []).filter(e => e && /USDT$/.test(e.symbol || ''))
+      .sort((a, b) => (b.volume24hUsd || 0) - (a.volume24hUsd || 0)).slice(0, topN);
+    const symbols = entries.map(e => e.symbol);
+    const levFor = new Map(entries.map(e => [e.symbol, auto ? sbAutoLeverage(e.maxLeverage) : leverage]));
     const out = []; let skipped = 0, done = 0;
     const BATCH = 2;
     for(let i = 0; i < symbols.length; i += BATCH){
@@ -6075,11 +6090,12 @@ async function runSbScan(){
           const snap = await fetchLiveSnapshot(exchange, symbol, '5m');
           if(!snap) throw new Error('no snapshot');
           const regime = classifyRegime(snap.h1, snap.m15);
-          const est = estimateGridPreview({ snap, regime, fundingUsd: sc.margin, leverage, levelCount: SB_SCAN_LEVELS, exchange, scanGuard: false });
+          const lev = levFor.get(symbol) || leverage;
+          const est = estimateGridPreview({ snap, regime, fundingUsd: sc.margin, leverage: lev, levelCount: SB_SCAN_LEVELS, exchange, scanGuard: false });
           if(!est) throw new Error('no grid');
           const suit = scoreGridSuitability(snap, regime, GRID_DEFAULTS);
           const label = sbRegimeLabel(regime) || { kind: 'VOLATILE', text: '' };
-          out.push({ symbol, avgNet: est.avgNet, sweepNet: est.sweepNet, worstLegLoss: est.worstLegLoss, rangePct: est.rangePct, guardOk: est.guardOk, kind: label.kind, regimeText: label.text, score: suit.score || 0 });
+          out.push({ symbol, lev, avgNet: est.avgNet, sweepNet: est.sweepNet, worstLegLoss: est.worstLegLoss, rangePct: est.rangePct, guardOk: est.guardOk, kind: label.kind, regimeText: label.text, score: suit.score || 0 });
         }catch(_){ skipped++; }
         done++;
         setProgress(`Scanning ${done}/${symbols.length}&hellip;`);
@@ -6088,6 +6104,15 @@ async function runSbScan(){
     }
     out.sort((a, b) => ((b.guardOk ? 1 : 0) - (a.guardOk ? 1 : 0)) || (b.sweepNet - a.sweepNet));
     Object.assign(sc, { results: out, skipped, scannedAtMs: Date.now(), progress: '' });
+    // One-click mode: out[] is already ranked (liquidation-guard-safe first, then by
+    // estimated profit across all levels), so the winner is simply the top row.
+    if(auto && out.length){
+      sc.autoPick = out[0].symbol;
+      sc.running = false;
+      sbUseScannedPair(out[0].symbol); // opens the create form pre-filled; the person still presses Create
+      return;
+    }
+    if(auto) sc.progress = 'No pairs could be scanned right now. Try again in a moment.';
   }catch(err){
     sc.progress = 'Scan failed: ' + (err && err.message ? err.message : 'unknown error');
   }
@@ -6102,7 +6127,8 @@ function sbUseScannedPair(symbol){
   f.sbCreateSymbol = symbol;
   f.sbCreateType = 'grid';
   f.sbRegimeSuggestion = null;
-  f.sbGridForm = Object.assign({}, f.sbGridForm, { fundingUsd: sc.margin, fundingMode: 'usdt', leverage: sc.leverage, levelCount: SB_SCAN_LEVELS });
+  const picked = (sc.results || []).find(r => r.symbol === symbol);
+  f.sbGridForm = Object.assign({}, f.sbGridForm, { fundingUsd: sc.margin, fundingMode: 'usdt', leverage: (picked && picked.lev) || sc.leverage, levelCount: SB_SCAN_LEVELS });
   f.sbView = 'create';
   renderSmartBotsPanel();
 }
@@ -6115,7 +6141,8 @@ function initSbScanner(){
   host.addEventListener('click', (e) => {
     const t = e.target.closest ? e.target.closest('button') : null;
     if(!t) return;
-    if(t.id === 'sbScanBtn') runSbScan();
+    if(t.id === 'sbAutoPickBtn') runSbScan({ auto: true });
+    else if(t.id === 'sbScanBtn') runSbScan();
     else if(t.classList.contains('sb-scan-use')) sbUseScannedPair(t.dataset.symbol);
   });
 }

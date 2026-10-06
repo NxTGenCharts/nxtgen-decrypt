@@ -3587,9 +3587,12 @@ async function bybitFuturesUniverse(){
   const tradeable = new Set((info?.result?.list || [])
     .filter(s => s.status === 'Trading' && s.quoteCoin === 'USDT' && String(s.contractType || '').includes('Perpetual') && !tradfiSymbols.has(s.symbol))
     .map(s => s.symbol));
+  // Per-symbol max leverage (Bybit's leverageFilter, already in the instruments-info
+  // response above) so the Smart Bots scanner can pick a sensible leverage per pair.
+  const maxLevBySymbol = new Map((info?.result?.list || []).map(s => [s.symbol, parseFloat(s.leverageFilter?.maxLeverage || '0') || null]));
   return (tickers?.result?.list || [])
     .filter(t => tradeable.has(t.symbol))
-    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.turnover24h || '0'), lastPrice: parseFloat(t.lastPrice || '0') }));
+    .map(t => ({ symbol: t.symbol, volume24hUsd: parseFloat(t.turnover24h || '0'), lastPrice: parseFloat(t.lastPrice || '0'), maxLeverage: maxLevBySymbol.get(t.symbol) || null }));
 }
 
 async function gateioFuturesUniverse(){
