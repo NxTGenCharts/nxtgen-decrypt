@@ -1168,8 +1168,36 @@ function appendPersistentTrade(record){
     log.unshift({ id: newTradeLogId(record), ...record });
     if(log.length > PERSISTENT_TRADE_LOG_MAX) log.length = PERSISTENT_TRADE_LOG_MAX;
     localStorage.setItem(PERSISTENT_TRADE_LOG_KEY, JSON.stringify(log));
+    try{ window.dispatchEvent(new CustomEvent('nxtgen-trade-logged')); }catch(_){ /* lets the Trading Bots trade log refresh live */ }
   }catch(e){ /* storage full/unavailable — the session-scoped history above still has it */ }
 }
+
+// One definition of the Trade Log summary maths, shared by the Futures page's Trade Log
+// and the Trading Bots page's one, so the two can never disagree.
+// Partial-fill rows (TP1/TP2 legs) are informational line items, not separate trades —
+// their dollars are already inside the final close row's net — so they're excluded from
+// every total here (see renderTradeLog). Win = net > 0; a break-even or losing trade is
+// not a win. Win rate = wins / trades that have a known net.
+function summarizeTradeRows(rows){
+  const summable = rows.filter(t => !t.partial);
+  const grossKnown = summable.filter(t => t.grossUsd != null);
+  const feesKnown = summable.filter(t => t.feesUsd != null);
+  const decided = summable.filter(t => t.netUsd != null);
+  const wins = decided.filter(t => t.netUsd > 0).length;
+  const losses = decided.filter(t => t.netUsd < 0).length;
+  return {
+    count: rows.length,
+    wins, losses, flat: decided.length - wins - losses,
+    winRatePct: decided.length ? (wins / decided.length) * 100 : null,
+    grossSum: grossKnown.reduce((a, t) => a + t.grossUsd, 0),
+    feesSum: feesKnown.reduce((a, t) => a + t.feesUsd, 0),
+    netSum: summable.reduce((a, t) => a + (t.netUsd || 0), 0),
+    grossApprox: grossKnown.length < summable.length,
+    feesApprox: feesKnown.length < summable.length,
+  };
+}
+function winRateText(sum){ return sum.winRatePct == null ? '\u2014' : sum.winRatePct.toFixed(1) + '%'; }
+function winRateColor(sum){ return sum.winRatePct == null ? '' : (sum.winRatePct >= 50 ? 'var(--green)' : 'var(--red)'); }
 
 // =============================================================
 // Paper Trade Log — the Live/Demo Trade Log's counterpart for Paper
@@ -1304,23 +1332,13 @@ function renderTradeLog(){
   if(els.fuLogCustomRow) els.fuLogCustomRow.style.display = preset === 'custom' ? 'flex' : 'none';
 
   const count = rows.length;
-  // Partial-fill rows (TP1/TP2 legs — see the partial-fill detector in
-  // runLiveCycleInner) are informational line items, not separate trades:
-  // the eventual full-close row's netUsd is a balance-diff over the
-  // WHOLE position's lifetime and already includes whatever these
-  // partials realized, so they're excluded here to avoid double-counting
-  // the same realized dollars twice in the summary. They still appear in
-  // the row list below (and in exports) — just not in these totals.
-  const summableRows = rows.filter(t => !t.partial);
-  const grossKnown = summableRows.filter(t => t.grossUsd != null);
-  const feesKnown = summableRows.filter(t => t.feesUsd != null);
-  const grossSum = grossKnown.reduce((a, t) => a + t.grossUsd, 0);
-  const feesSum = feesKnown.reduce((a, t) => a + t.feesUsd, 0);
-  const netSum = summableRows.reduce((a, t) => a + (t.netUsd || 0), 0);
+  const sum = summarizeTradeRows(rows);
   if(els.fuLogCount) els.fuLogCount.textContent = String(count);
-  if(els.fuLogGross) els.fuLogGross.textContent = (grossKnown.length < summableRows.length ? '~' : '') + fmtUsd(grossSum);
-  if(els.fuLogFees) els.fuLogFees.textContent = (feesKnown.length < summableRows.length ? '~' : '') + fmtMoney(feesSum);
-  if(els.fuLogNet) els.fuLogNet.textContent = fmtUsd(netSum);
+  if(els.fuLogGross) els.fuLogGross.textContent = (sum.grossApprox ? '~' : '') + fmtUsd(sum.grossSum);
+  if(els.fuLogFees) els.fuLogFees.textContent = (sum.feesApprox ? '~' : '') + fmtMoney(sum.feesSum);
+  if(els.fuLogNet) els.fuLogNet.textContent = fmtUsd(sum.netSum);
+  if(els.fuLogWinRate){ els.fuLogWinRate.textContent = winRateText(sum); els.fuLogWinRate.style.color = winRateColor(sum); }
+  if(els.fuLogWinLoss) els.fuLogWinLoss.textContent = sum.winRatePct == null ? '' : `${sum.wins}W \u00b7 ${sum.losses}L${sum.flat ? ` \u00b7 ${sum.flat} flat` : ''}`;
 
   if(els.fuLogSelectedCount){
     els.fuLogSelectedCount.textContent = selectedTradeLogIds.size > 0
@@ -6150,9 +6168,101 @@ function initSbScanner(){
   });
 }
 
+// -------------------------------------------------------------
+// Trading Bots trade log — the Futures page's Trade Log, narrowed to trades the
+// Smart Bots placed (setupType "Trading Bot: Grid" / "Trading Bot: DCA"). It reads the
+// SAME persistent log, so nothing is stored twice, and uses the same summary maths
+// (summarizeTradeRows) so Trades / Win Rate / Gross / Fees / Net match the Futures page.
+// Collapsible, closed by default, sits under Grid Opportunities.
+// -------------------------------------------------------------
+function sbLogState(){
+  const f = sbState();
+  if(!f.sbLog) f.sbLog = { open: false, preset: 'today', from: '', to: '' };
+  return f.sbLog;
+}
+
+function sbLogRows(){
+  const sl = sbLogState();
+  const { fromMs, toMs } = computeTradeLogRange(sl.preset, sl.from, sl.to);
+  return loadPersistentTradeLog()
+    .filter(t => /^Trading Bot:/.test(t.setupType || '') && t.closedAtMs >= fromMs && t.closedAtMs <= toMs);
+}
+
+function renderSbTradeLog(){
+  const host = document.getElementById('sbTradeLogHost');
+  if(!host) return;
+  const sl = sbLogState();
+  const rows = sl.open ? sbLogRows() : [];
+  const sum = summarizeTradeRows(rows);
+  const presets = [['today', 'Today'], ['week', 'Last 7 Days'], ['month', 'Last 30 Days'], ['all', 'All Time'], ['custom', 'Custom']];
+  const body = !sl.open ? '' : `
+    <div class="mode-toggle" role="group" aria-label="Trading bot trade log time range" style="margin-bottom:10px;">
+      ${presets.map(([k, label]) => `<button type="button" class="mode-btn${sl.preset === k ? ' active' : ''}" data-sblog-range="${k}">${label}</button>`).join('')}
+    </div>
+    ${sl.preset === 'custom' ? `<div class="btn-row" style="margin-bottom:10px;">
+      <div class="field" style="max-width:180px;"><label for="sbLogFrom">From</label><input id="sbLogFrom" type="date" value="${sl.from}"></div>
+      <div class="field" style="max-width:180px;"><label for="sbLogTo">To</label><input id="sbLogTo" type="date" value="${sl.to}"></div>
+      <button type="button" class="primary ghost" id="sbLogApply" style="align-self:flex-end;">Apply</button>
+    </div>` : ''}
+    <div class="ov-grid" style="grid-template-columns:repeat(5, 1fr);margin-bottom:12px;">
+      <div class="ov-card"><span class="ov-label">Trades</span><span class="ov-value">${rows.length}</span></div>
+      <div class="ov-card"><span class="ov-label">Win Rate</span><span class="ov-value" style="color:${winRateColor(sum)};">${winRateText(sum)}</span><span style="font-size:10.5px;color:var(--dim);">${sum.winRatePct == null ? '' : `${sum.wins}W &middot; ${sum.losses}L${sum.flat ? ` &middot; ${sum.flat} flat` : ''}`}</span></div>
+      <div class="ov-card"><span class="ov-label">Gross P&amp;L</span><span class="ov-value">${sum.grossApprox ? '~' : ''}${fmtUsd(sum.grossSum)}</span></div>
+      <div class="ov-card"><span class="ov-label">Fees</span><span class="ov-value">${sum.feesApprox ? '~' : ''}${fmtMoney(sum.feesSum)}</span></div>
+      <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value">${fmtUsd(sum.netSum)}</span></div>
+    </div>
+    ${rows.length ? `<div class="table-scroll"><table class="tb-orders-table">
+      <thead><tr><th>Time</th><th>Exchange</th><th>Pair</th><th>Bot</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Lev</th><th>Net</th></tr></thead>
+      <tbody>${rows.slice(0, 200).map(t => `<tr>
+        <td>${new Date(t.closedAtMs).toLocaleString()}</td>
+        <td>${t.exchange || '\u2014'}${t.mode ? ` (${t.mode})` : ''}</td>
+        <td><strong>${t.symbol || '\u2014'}</strong></td>
+        <td>${String(t.setupType || '').replace(/^Trading Bot:\s*/, '')}</td>
+        <td>${t.side || '\u2014'}${t.partial ? ` (${t.tag || 'partial'})` : ''}</td>
+        <td>${t.entry != null ? Number(t.entry).toFixed(4) : '\u2014'}</td>
+        <td>${t.exit != null ? Number(t.exit).toFixed(4) : '\u2014'}</td>
+        <td>${t.leverage != null ? t.leverage + 'x' : '\u2014'}</td>
+        <td style="color:${(t.netUsd || 0) >= 0 ? 'var(--green)' : 'var(--red)'};font-weight:700;">${t.netUsd != null ? fmtUsd(t.netUsd) : '\u2014'}</td>
+      </tr>`).join('')}</tbody></table></div>
+      <div class="sbf-hint" style="margin-top:8px;">${rows.length > 200 ? `Showing the latest 200 of ${rows.length}. ` : ''}Trades placed by your Smart Bots only, kept in this browser. Win rate = trades with a positive net &divide; all trades with a known net. Delete or export from the Futures Engine Trade Log.</div>`
+      : '<div class="sbf-hint">No bot trades recorded in this browser for this range.</div>'}`;
+  host.innerHTML = `
+    <details class="sbf-card sbf-rules" id="sbLogDetails" style="margin-top:14px;"${sl.open ? ' open' : ''}>
+      <summary class="sbf-sec">Trade log &middot; bot trades</summary>
+      <div class="sbf-collapse-body">${body}</div>
+    </details>`;
+}
+
+function initSbTradeLog(){
+  const host = document.getElementById('sbTradeLogHost');
+  if(!host) return;
+  renderSbTradeLog();
+  const sl = sbLogState();
+  host.addEventListener('toggle', (e) => {
+    if(!e.target || e.target.id !== 'sbLogDetails') return;
+    if(sl.open === e.target.open) return; // our own re-render re-fires toggle; ignore it
+    sl.open = e.target.open;
+    if(sl.open) renderSbTradeLog();
+  }, true);
+  host.addEventListener('click', (e) => {
+    const rangeBtn = e.target.closest ? e.target.closest('[data-sblog-range]') : null;
+    if(rangeBtn){ sl.preset = rangeBtn.dataset.sblogRange; renderSbTradeLog(); return; }
+    if(e.target.id === 'sbLogApply'){
+      sl.from = document.getElementById('sbLogFrom')?.value || '';
+      sl.to = document.getElementById('sbLogTo')?.value || '';
+      renderSbTradeLog();
+    }
+  });
+  // New bot trade closed (this tab) or another tab wrote to the log -> refresh if it's showing.
+  const refresh = () => { if(sl.open) renderSbTradeLog(); };
+  window.addEventListener('nxtgen-trade-logged', refresh);
+  window.addEventListener('storage', (e) => { if(e.key === PERSISTENT_TRADE_LOG_KEY) refresh(); });
+}
+
 function initSmartBots(){
   renderSmartBotsPanel();
   initSbScanner();
+  initSbTradeLog();
   initSbAcctBalance();
 
   if(els.sbListHost){

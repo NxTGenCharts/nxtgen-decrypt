@@ -184,6 +184,8 @@ export const els = {
   fuLogCustomTo: document.getElementById('fuLogCustomTo'),
   fuLogCustomApply: document.getElementById('fuLogCustomApply'),
   fuLogCount: document.getElementById('fuLogCount'),
+  fuLogWinRate: document.getElementById('fuLogWinRate'),
+  fuLogWinLoss: document.getElementById('fuLogWinLoss'),
   fuLogGross: document.getElementById('fuLogGross'),
   fuLogFees: document.getElementById('fuLogFees'),
   fuLogNet: document.getElementById('fuLogNet'),
