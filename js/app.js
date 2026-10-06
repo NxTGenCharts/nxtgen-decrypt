@@ -19,6 +19,7 @@ import { initFuturesEngine } from './futures-ui.js';
 import { initAiSignal } from './ai-signal.js';
 import { initBacktestUI } from './backtest-ui.js';
 import { initMobileNav } from './nav.js';
+import { initServerClock } from './server-clock.js';
 
 // ---- Overview page ----
 // "Run Full Scan" runs both engines to refresh the dashboard cards. Overview
@@ -61,6 +62,7 @@ const initSteps = [
   ['ai signal', initAiSignal],
   ['backtest UI', initBacktestUI],
   ['mobile nav', initMobileNav],
+  ['server clock', initServerClock],
 ];
 for(const [label, fn] of initSteps){
   try{ fn(); }

@@ -160,6 +160,9 @@ h1,h2,h3{ font-family:var(--disp); margin:0; letter-spacing:.005em; }
 .xbadge[data-state="down"]{ color:var(--red); border-color:var(--red-line); background:var(--red-soft); }
 .xbadge[data-state="down"] .xbadge-dot{ background:var(--red); }
 .last-update{ font-size:10.5px; color:var(--dim2); white-space:nowrap; }
+.server-clock{ font-size:10.5px; color:var(--dim2); white-space:nowrap; font-variant-numeric:tabular-nums; cursor:default; }
+.server-clock .sc-time{ color:var(--ink-dim); font-weight:600; letter-spacing:.02em; }
+.server-clock[data-state="local"] .sc-time{ color:var(--dim2); }
 
 /* -------------------- 6. Navigation -------------------- */
 .term-nav{
