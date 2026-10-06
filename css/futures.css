@@ -524,6 +524,7 @@ button.primary.sb-pill-btn:hover{ background:var(--amber); filter:brightness(1.0
   font-size:17px; color:var(--ink-dim); background:var(--panel); border:1px solid var(--line); border-radius:var(--r-md);
   cursor:pointer; transition:color .15s, border-color .15s, background .15s;
 }
+.sbf-icon-btn--sm{ width:28px; height:28px; font-size:14px; border-radius:var(--r-sm, 6px); }
 .sbf-icon-btn:hover{ color:var(--amber); border-color:var(--amber-dim); background:rgba(240,180,41,.06); }
 .sbf-icon-btn:focus-visible{ outline:2px solid var(--amber); outline-offset:2px; }
 .sbf-icon-btn:disabled{ cursor:progress; opacity:.6; }

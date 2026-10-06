@@ -4818,7 +4818,7 @@ function renderSmartBotsList(){
         <div class="ov-card" style="position:relative;">
           <span class="ov-label">Committed Margin</span>
           <span class="ov-value">${fmtMoney(sumInv)}</span>
-          <button type="button" id="sbResetMarginBtn" class="sb-pill-btn" title="Reset committed margin to what active bots are using now" style="position:absolute;top:10px;right:12px;font-size:10px;padding:3px 10px;">Reset</button>
+          <button type="button" id="sbResetMarginBtn" class="sbf-icon-btn sbf-icon-btn--sm" aria-label="Reset committed margin" title="Reset committed margin (keeps running bots)" style="position:absolute;top:10px;right:12px;">${icon('rotate-ccw')}</button>
         </div>
       </div>` : '';
   }
@@ -6134,7 +6134,7 @@ function initSmartBots(){
   }
   if(els.sbSummaryHost){
     els.sbSummaryHost.addEventListener('click', (e) => {
-      if(e.target.id === 'sbResetMarginBtn') resetSmartBotsCommittedMargin();
+      if(e.target.closest('#sbResetMarginBtn')) resetSmartBotsCommittedMargin();
     });
   }
   if(els.sbTabsHost){
