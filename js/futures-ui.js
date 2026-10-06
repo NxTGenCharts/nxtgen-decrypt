@@ -6109,6 +6109,8 @@ async function runSbScan(opts){
     if(auto && out.length){
       sc.autoPick = out[0].symbol;
       sc.running = false;
+      sc.auto = false;
+      renderSbScanner(); // redraw FIRST so the buttons/progress aren't left frozen in their "Scanning…" state
       sbUseScannedPair(out[0].symbol); // opens the create form pre-filled; the person still presses Create
       return;
     }
@@ -6117,6 +6119,7 @@ async function runSbScan(opts){
     sc.progress = 'Scan failed: ' + (err && err.message ? err.message : 'unknown error');
   }
   sc.running = false;
+  sc.auto = false;
   renderSbScanner();
 }
 
