@@ -4777,6 +4777,21 @@ function renderSmartBotsPanel(){
   else renderSmartBotsList();
 }
 
+// Zeroes the Committed Margin counter for everything that is no longer
+// running. Bots that are still active/deploying keep counting (that margin
+// really is committed right now). Non-destructive: bots, their history and
+// their P&L stay put — each reset bot just gets marginExcluded = true, which
+// is persisted with the rest of the bot snapshot.
+function resetSmartBotsCommittedMargin(){
+  const bots = smartBots();
+  const toReset = bots.filter(b => !(b.status === 'active' || b.status === 'deploying') && !b.marginExcluded && (b.investmentUsd || 0) > 0);
+  const amount = toReset.reduce((a, b) => a + (b.investmentUsd || 0), 0);
+  if(!toReset.length){ window.alert('Nothing to reset \u2014 Committed Margin only includes bots that are currently running.'); return; }
+  if(!window.confirm(`Reset Committed Margin?\n\nThis removes ${fmtMoney(amount)} from ${toReset.length} stopped bot${toReset.length === 1 ? '' : 's'} from the counter. Bots, trade history and Bots Profit are not touched. Running bots keep counting.`)) return;
+  toReset.forEach(b => { b.marginExcluded = true; });
+  renderSmartBotsPanel(); // also persists the snapshot
+}
+
 function renderSmartBotsList(){
   if(!els.sbListHost) return;
   const f = fu();
@@ -4786,13 +4801,25 @@ function renderSmartBotsList(){
 
   renderSbAcctBalance();
 
-  let sumPnl = 0, sumInv = 0;
-  bots.forEach(b => { const m = computeBotMetrics(b); sumPnl += (m.totalPnl || 0); sumInv += (b.investmentUsd || 0); });
+  // sumInv = Committed Margin card (skips bots cleared by resetSmartBotsCommittedMargin);
+  // sumInvAll = every bot ever, kept as the Bots Profit % denominator so that
+  // resetting the margin card doesn't inflate the profit percentage.
+  let sumPnl = 0, sumInv = 0, sumInvAll = 0;
+  bots.forEach(b => {
+    const m = computeBotMetrics(b);
+    sumPnl += (m.totalPnl || 0);
+    sumInvAll += (b.investmentUsd || 0);
+    if(!b.marginExcluded) sumInv += (b.investmentUsd || 0);
+  });
   if(els.sbSummaryHost){
     els.sbSummaryHost.innerHTML = bots.length ? `
       <div class="ov-grid" style="grid-template-columns:repeat(2, 1fr);margin-bottom:14px;">
-        <div class="ov-card ov-highlight"><span class="ov-label">Bots Profit</span><span class="ov-value">${pnlSpan(sumPnl, sumInv ? (sumPnl / sumInv) * 100 : null)}</span></div>
-        <div class="ov-card"><span class="ov-label">Committed Margin</span><span class="ov-value">${fmtMoney(sumInv)}</span></div>
+        <div class="ov-card ov-highlight"><span class="ov-label">Bots Profit</span><span class="ov-value">${pnlSpan(sumPnl, sumInvAll ? (sumPnl / sumInvAll) * 100 : null)}</span></div>
+        <div class="ov-card" style="position:relative;">
+          <span class="ov-label">Committed Margin</span>
+          <span class="ov-value">${fmtMoney(sumInv)}</span>
+          <button type="button" id="sbResetMarginBtn" class="sb-pill-btn" title="Reset committed margin to what active bots are using now" style="position:absolute;top:10px;right:12px;font-size:10px;padding:3px 10px;">Reset</button>
+        </div>
       </div>` : '';
   }
   if(els.sbTabsHost){
@@ -6103,6 +6130,11 @@ function initSmartBots(){
       if(e.target.id === 'sbCreateBtn'){ fu().sbView = 'create'; renderSmartBotsPanel(); return; }
       const card = e.target.closest('.sb-card');
       if(card){ fu().sbView = 'detail'; fu().sbDetailId = card.dataset.id; renderSmartBotsPanel(); }
+    });
+  }
+  if(els.sbSummaryHost){
+    els.sbSummaryHost.addEventListener('click', (e) => {
+      if(e.target.id === 'sbResetMarginBtn') resetSmartBotsCommittedMargin();
     });
   }
   if(els.sbTabsHost){
