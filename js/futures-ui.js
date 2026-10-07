@@ -3723,7 +3723,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
           fundingUsd: pnl.fundingUsd != null ? pnl.fundingUsd : estimate.fundingUsd, slippageUsd: pnl.slippageUsd != null ? pnl.slippageUsd : estimate.slippageUsd,
           netUsd: pnl.netUsd, pnlSource: pnl.pnlSource,
           confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_CYCLE_TP', durationMin: Math.max(0, Math.round((closedAt - level.openedAt) / 60_000)), durationSec: Math.max(0, Math.round((closedAt - level.openedAt) / 1000)),
-          gridId: bot.id, gridLevel: level.levelIndex, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
+          gridId: bot.id, gridLevel: level.levelIndex, entryOrderId: level.entryOrderId, closeOrderId: level.closeOrderId, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
         });
         level.missTicks = 0;
         const rePlaced = await callProxy('/api/futures/grid/place-level', { ...proxyArgs, direction: level.direction, price: level.price, qty, leverage: plan.leverage, orderLinkTag: `${bot.id}-${level.levelIndex}-r`, stopLoss: level.direction === 'LONG' ? plan.lower : plan.upper }).catch(err => ({ ok:false, message: err.message }));
@@ -3749,7 +3749,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
             entry: r.avgEntryPrice, exit: r.avgExitPrice, qty: r.qty, leverage: plan.leverage,
             grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: r.closedPnl, pnlSource: 'exchange',
             confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_SIDE_STOP', durationMin: Math.max(0, Math.round(((r.createdTime || nowMs) - level.openedAt) / 60_000)),
-            gridId: bot.id, gridLevel: level.levelIndex, cycleResult: r.closedPnl > 0 ? 'WIN' : 'LOSS',
+            gridId: bot.id, gridLevel: level.levelIndex, entryOrderId: level.entryOrderId, closeOrderId: r.orderId, cycleResult: r.closedPnl > 0 ? 'WIN' : 'LOSS',
           });
         }
         // Every leg on this side whose TP vanished was closed by that same stop.
@@ -3779,7 +3779,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
         entry: level.entryPrice, exit: exitPx, qty, leverage: plan.leverage,
         grossUsd: estimate.grossUsd, feesUsd: estimate.feesUsd, fundingUsd: estimate.fundingUsd, slippageUsd: estimate.slippageUsd, netUsd: estimate.netUsd, pnlSource: 'estimate',
         confidence: null, setupType: 'Trading Bot: Grid', exitReason: stoppedOut ? 'GRID_SIDE_STOP' : 'GRID_CYCLE_TP', durationMin: Math.round((nowMs - level.openedAt) / 60_000),
-        gridId: bot.id, gridLevel: level.levelIndex, cycleResult: estimate.netUsd > 0 ? 'WIN' : 'LOSS',
+        gridId: bot.id, gridLevel: level.levelIndex, entryOrderId: level.entryOrderId, closeOrderId: level.closeOrderId, cycleResult: estimate.netUsd > 0 ? 'WIN' : 'LOSS',
       });
       level.missTicks = 0;
       level.status = 'IDLE'; level.entryOrderId = null; level.closeOrderId = null;
@@ -5954,11 +5954,56 @@ function renderSmartBotDetail(id, force){
       <div class="progress-label"><strong class="progress-left">${fmtUsd(tgt.realizedUsd)} of ${fmtMoney(tgt.targetUsd)}</strong> (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}</div>
     </div>` : '';
   const editHtml = bot.status === 'active' ? sbEditTargetsHtml(bot, f) : '';
+  // ---- Open trades: what the bot is holding RIGHT NOW (the table below only lists closed cycles) ----
+  const rtNow = bot.runtime || {};
+  const markNow = rtNow.markPrice;
+  const botKind = bot.type === 'dca' ? 'DCA' : 'Grid';
+  const shortOrderId = id => id ? String(id).slice(0, 8) : '—'; // Bybit's app shows an order's first 8 characters in Order History
+  const openRows = [];
+  let waitingEntries = 0;
+  if(bot.type === 'grid'){
+    const gp = bot.plan || {};
+    const perLevelUsd = gp.allocationUsd && gp.levelCount ? gp.allocationUsd / gp.levelCount : 0;
+    (rtNow.levels || []).forEach(l => {
+      if(l.status === 'PENDING_ENTRY') waitingEntries++;
+      if(l.status !== 'PENDING_CLOSE' || !l.entryPrice) return;
+      const q = perLevelUsd * (gp.leverage || bot.leverage || 1) / l.entryPrice;
+      const sign = l.direction === 'LONG' ? 1 : -1;
+      openRows.push({ label: `Grid · L${l.levelIndex}`, openedAt: l.openedAt, side: l.direction, entry: l.entryPrice, target: l.targetPrice, qty: q, lev: gp.leverage || bot.leverage, upnl: markNow != null ? (markNow - l.entryPrice) * q * sign : null, id: l.closeOrderId || l.entryOrderId });
+    });
+  } else if(bot.type === 'dca'){
+    waitingEntries = (rtNow.safetyOrders || []).filter(o => o.status === 'PENDING').length;
+    if(rtNow.totalQty > 0 && rtNow.avgEntryPrice){
+      const ex = computeDcaExitPrices({ direction: bot.direction, avgEntryPrice: rtNow.avgEntryPrice, takeProfitPct: bot.plan?.takeProfitPct, stopLossPct: bot.plan?.stopLossPct });
+      openRows.push({ label: 'DCA · avg', openedAt: rtNow.openedAtMs, side: bot.direction, entry: rtNow.avgEntryPrice, target: ex.takeProfitPrice, qty: rtNow.totalQty, lev: bot.plan?.leverage || bot.leverage, upnl: rtNow.unrealizedUsd, id: null });
+    }
+  }
+  const openTradesHtml = (bot.status === 'active' || openRows.length) ? `
+    <div class="tb-params-head">Open Trades${openRows.length ? ` · ${openRows.length}` : ''}</div>
+    <div class="table-scroll">
+      <table class="tb-orders-table">
+        <thead><tr><th>Opened</th><th>Bot</th><th>Side</th><th>Entry</th><th>Target</th><th>Qty</th><th>Lev</th><th>Unrealized</th><th>Bybit ID</th></tr></thead>
+        <tbody>
+          ${openRows.length ? openRows.map(r => `
+            <tr>
+              <td>${r.openedAt ? fmtBotDateTime(r.openedAt) : '—'}</td>
+              <td><span class="tb-badge">${r.label}</span></td>
+              <td style="color:${r.side === 'LONG' ? 'var(--green)' : 'var(--red)'};">${r.side || '—'}</td>
+              <td>${r.entry != null ? r.entry : '—'}</td>
+              <td>${r.target != null ? r.target : '—'}</td>
+              <td>${r.qty != null ? (+r.qty).toFixed(6) : '—'}</td>
+              <td>${r.lev != null ? r.lev + 'x' : '—'}</td>
+              <td style="color:${(r.upnl || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${r.upnl != null ? fmtUsd(r.upnl) : '—'}</td>
+              <td title="${r.id || ''}">${shortOrderId(r.id)}</td>
+            </tr>`).join('') : `<tr><td colspan="9" style="color:var(--dim);text-align:center;padding:14px 0;">No open position right now${waitingEntries ? ` — ${waitingEntries} entry order${waitingEntries === 1 ? '' : 's'} waiting to fill` : ''}.</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+    ${openRows.length && waitingEntries ? `<div style="font-size:11px;color:var(--dim);margin-top:6px;">${waitingEntries} more entry order${waitingEntries === 1 ? '' : 's'} waiting to fill.</div>` : ''}
+  ` : '';
   // The management cycle re-renders this whole view every few seconds; without this the
   // trades table (horizontally scrollable on mobile) snaps back to its left edge each time.
-  const prevScroll = els.sbDetailHost.querySelector('.table-scroll');
-  const keepLeft = prevScroll ? prevScroll.scrollLeft : 0;
-  const keepTop = prevScroll ? prevScroll.scrollTop : 0;
+  const prevScrolls = [...els.sbDetailHost.querySelectorAll('.table-scroll')].map(el => [el.scrollLeft, el.scrollTop]);
   els.sbDetailHost.innerHTML = `
     <button type="button" class="primary ghost sb-back-btn" style="font-size:11px;padding:4px 10px;margin-bottom:14px;">&larr; Back to My Bots</button>
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
@@ -5983,10 +6028,11 @@ function renderSmartBotDetail(id, force){
       <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length}</span></div>
     </div>
     ${targetProgressHtml}
-    <div class="tb-params-head">Trades</div>
+    ${openTradesHtml}
+    <div class="tb-params-head">Closed Trades</div>
     <div class="table-scroll">
       <table class="tb-orders-table">
-        <thead><tr><th>Closed</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Lev</th><th>Net P&amp;L</th><th>Duration</th><th>Reason</th></tr></thead>
+        <thead><tr><th>Closed</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Lev</th><th>Net P&amp;L</th><th>Duration</th><th>Reason</th><th>Bybit ID</th></tr></thead>
         <tbody>
           ${m.records.length ? [...m.records].sort((a, b) => b.closedAtMs - a.closedAtMs).map(r => `
             <tr>
@@ -5999,7 +6045,8 @@ function renderSmartBotDetail(id, force){
               <td style="color:${(r.netUsd || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${fmtUsd(r.netUsd || 0)}${r.pnlSource === 'exchange' ? ' <span style="color:var(--dim);font-size:10px;" title="Bybit\'s own realized P&L for this close">✓</span>' : r.pnlSource === 'estimate' ? ' <span style="color:var(--dim);font-size:10px;" title="App fee-model estimate — exchange figure wasn\'t available yet">≈</span>' : ''}</td>
               <td>${fmtTradeDuration(r) || '—'}</td>
               <td>${r.exitReason || (bot.type === 'dca' ? 'TP/SL' : '—')}</td>
-            </tr>`).join('') : `<tr><td colspan="9" style="color:var(--dim);text-align:center;padding:14px 0;">No closed trades yet.</td></tr>`}
+              <td title="${r.closeOrderId || ''}">${shortOrderId(r.closeOrderId)}</td>
+            </tr>`).join('') : `<tr><td colspan="10" style="color:var(--dim);text-align:center;padding:14px 0;">No closed trades yet.</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -6015,8 +6062,7 @@ function renderSmartBotDetail(id, force){
       <button type="button" class="primary ghost sb-rename-btn" data-id="${bot.id}">Rename</button>
     </div>
   `;
-  const nextScroll = els.sbDetailHost.querySelector('.table-scroll');
-  if(nextScroll && (keepLeft || keepTop)){ nextScroll.scrollLeft = keepLeft; nextScroll.scrollTop = keepTop; }
+  els.sbDetailHost.querySelectorAll('.table-scroll').forEach((el, i) => { const k = prevScrolls[i]; if(k && (k[0] || k[1])){ el.scrollLeft = k[0]; el.scrollTop = k[1]; } });
   renderSmartBotChart(bot, range);
 }
 
