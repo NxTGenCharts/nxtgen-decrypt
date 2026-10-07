@@ -5243,7 +5243,7 @@ function sbAcctHtml(){
       </div>
       ${dayHtml}
       ${pct != null ? `<div class="sb-acct-bar" role="img" aria-label="${pct.toFixed(1)}% of balance is in use as margin"><span style="width:${pct.toFixed(1)}%"></span></div>` : ''}
-      ${ok ? `<div class="sb-acct-foot"><span>${pct != null ? `${pct.toFixed(1)}% of balance in use as margin` : ''}</span><span>Updated ${new Date(c.atMs).toLocaleTimeString()}<span class="sb-acct-auto"> &middot; refreshes automatically</span></span></div>` : ''}
+      ${ok ? `<div class="sb-acct-foot"><span>${pct != null ? `${pct.toFixed(1)}% of balance in use as margin` : ''}</span></div>` : ''}
       ${note ? `<div class="sb-acct-note ${state === 'ok' ? 'sb-acct-note--info' : ''}">${note}</div>` : ''}
     </div>`;
 }
