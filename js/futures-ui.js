@@ -3442,7 +3442,7 @@ async function applyGridRecovery(bot, plan, snap, proxyArgs){
   const baseLevelUsd = plan.allocationUsd / plan.levelCount;
   const addUsd = baseLevelUsd * Math.pow(cfg.recoverySizeMult || 1.5, addsUsed + 1);
   const qty = (addUsd * plan.leverage) / snap.price;
-  const placed = await callProxy('/api/futures/dca/place', { ...proxyArgs, direction, orderType: 'MARKET', qty, leverage: plan.leverage }).catch(err => ({ ok:false, message: err.message }));
+  const placed = await callProxy('/api/futures/dca/place', { ...proxyArgs, direction, orderType: 'MARKET', qty, leverage: plan.leverage, botTag: bot.id, role: 'add' }).catch(err => ({ ok:false, message: err.message }));
   if(!placed.ok){ tradingBotLog(bot, `Recovery add #${addsUsed + 1} failed: ${placed.message}`, true); return; }
   rt.recoveryAddsUsed = addsUsed + 1;
   rt.recoveryAddedUsd = (rt.recoveryAddedUsd || 0) + addUsd;
@@ -3846,13 +3846,13 @@ async function deployDcaBotInstance(bot, cred){
   bot.runtime.openedAtMs = Date.now();
 
   const baseQty = (plan.baseOrderUsd * plan.leverage) / snap.price;
-  const baseResult = await callProxy('/api/futures/dca/place', { ...proxyArgs, direction: bot.direction, orderType: 'MARKET', qty: baseQty, leverage: plan.leverage }).catch(err => ({ ok:false, message: err.message }));
+  const baseResult = await callProxy('/api/futures/dca/place', { ...proxyArgs, direction: bot.direction, orderType: 'MARKET', qty: baseQty, leverage: plan.leverage, botTag: bot.id, role: 'base' }).catch(err => ({ ok:false, message: err.message }));
   if(!baseResult.ok){ bot.status = 'error'; tradingBotLog(bot, `Base order failed: ${baseResult.message}`, true); return; }
 
   bot.runtime.safetyOrders = [];
   for(const level of plan.safetyLevels){
     const qty = (level.sizeUsd * plan.leverage) / level.price;
-    const placed = await callProxy('/api/futures/dca/place', { ...proxyArgs, direction: bot.direction, orderType: 'LIMIT', price: level.price, qty, leverage: plan.leverage }).catch(err => ({ ok:false, message: err.message }));
+    const placed = await callProxy('/api/futures/dca/place', { ...proxyArgs, direction: bot.direction, orderType: 'LIMIT', price: level.price, qty, leverage: plan.leverage, botTag: bot.id, role: 'so' }).catch(err => ({ ok:false, message: err.message }));
     if(!placed.ok){ tradingBotLog(bot, `Safety order ${level.index} skipped: ${placed.message}`, false); continue; }
     bot.runtime.safetyOrders.push({ index: level.index, orderId: placed.orderId, price: level.price, status: 'PENDING' });
   }
@@ -3896,7 +3896,7 @@ async function manageDcaBotInstance(bot, cred, nowMs){
       leverage: bot.plan.leverage, qty: bot.runtime.totalQty,
       grossUsd: closed && closed.grossPnl != null ? closed.grossPnl : null,
       feesUsd: closed && closed.feesUsd != null ? closed.feesUsd : null,
-      netUsd: closed ? closed.closedPnl : 0,
+      netUsd: closed ? closed.closedPnl : 0, pnlSource: closed && closed.pnlSource ? closed.pnlSource : null,
       setupType: 'Trading Bot: DCA', durationMin: Math.round((nowMs - bot.runtime.openedAtMs) / 60_000), gridId: bot.id,
     };
     bot.realizedUsd = record.netUsd || 0;
