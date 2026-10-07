@@ -3569,7 +3569,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
     const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_BREAKOUT');
     if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
     else logGridFlattenResult(bot, flat);
-    bot.status = 'closed';
+    bot.status = 'closed'; bot.stoppedAtMs = Date.now();
     renderTradingBotsList();
     return;
   }
@@ -3590,7 +3590,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
     const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_STALE');
     if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
     else logGridFlattenResult(bot, flat);
-    bot.status = 'closed';
+    bot.status = 'closed'; bot.stoppedAtMs = Date.now();
     renderTradingBotsList();
     return;
   }
@@ -3616,7 +3616,7 @@ async function manageGridBotInstance(bot, cred, nowMs){
       const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_LIQ_RISK');
       if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
       else logGridFlattenResult(bot, flat);
-      bot.status = 'closed';
+      bot.status = 'closed'; bot.stoppedAtMs = Date.now();
       renderTradingBotsList();
       return;
     }
@@ -3809,13 +3809,13 @@ async function manageGridBotInstance(bot, cred, nowMs){
       const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_MAX_LOSS');
       if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
       else logGridFlattenResult(bot, flat);
-      bot.status = 'closed';
+      bot.status = 'closed'; bot.stoppedAtMs = Date.now();
     } else if(profitCeilUsd != null && bot.realizedUsd >= profitCeilUsd){
       tradingBotLog(bot, `This bot's Profit Target (${profitTargetPct}%) reached — flattening.`, false);
       const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_TARGET');
       if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
       else logGridFlattenResult(bot, flat);
-      bot.status = 'closed';
+      bot.status = 'closed'; bot.stoppedAtMs = Date.now();
     }
   }
   if(bot.status === 'active'){
@@ -3902,7 +3902,7 @@ async function manageDcaBotInstance(bot, cred, nowMs){
     bot.realizedUsd = record.netUsd || 0;
     addTradingBotsRealized(bot.realizedUsd);
     appendPersistentTrade(record);
-    bot.status = 'closed';
+    bot.status = 'closed'; bot.stoppedAtMs = Date.now();
     tradingBotLog(bot, `Position closed — ${fmtUsd(bot.realizedUsd)} realized.`, false);
     return;
   }
@@ -4280,7 +4280,7 @@ async function stopTradingBot(id){
     if(!result.ok) tradingBotLog(bot, `Stop/flatten failed: ${result.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
     else tradingBotLog(bot, result.hadSomethingOpen ? `Stopped — every pending order cancelled, open position closed at ${fmtUsd(result.netUsd)} realized (regardless of win/loss).` : 'Stopped — pending orders cancelled; nothing was open.', false);
   }
-  bot.status = 'stopped';
+  bot.status = 'stopped'; bot.stoppedAtMs = Date.now();
   if(f.tradingBots.every(b => b.status !== 'active') && f.tradingBotsRunning) toggleTradingBotsRunning();
   renderTradingBotsList();
 }
@@ -4309,9 +4309,27 @@ function deleteTradingBot(id){
 // same convention Bybit's own UI uses for an unset TP/SL ("--").
 // -------------------------------------------------------------
 
-function fmtBotUptime(startMs){
+// When a bot stopped/closed. New bots carry stoppedAtMs; bots stopped before that
+// field existed fall back to their last booked trade (closest record we have).
+function botStoppedAtMs(bot){
+  if(!bot || bot.status === 'active' || bot.status === 'deploying') return null;
+  if(bot.stoppedAtMs) return bot.stoppedAtMs;
+  let last = 0;
+  try { (getBotTradeRecords(bot) || []).forEach(r => { if((r.closedAtMs || 0) > last) last = r.closedAtMs; }); } catch(e){}
+  return last || null;
+}
+// Run time of a bot: frozen at the stop time once stopped, still ticking while live.
+function fmtBotRunTime(bot){ return fmtBotUptime(bot.createdAtMs, botStoppedAtMs(bot)); }
+// "2026/10/07 18:32" style stamp for the Deployed / Stopped line.
+function fmtBotStamp(ms){
+  if(!ms) return '—';
+  const d = new Date(ms), pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function fmtBotUptime(startMs, endMs){
   if(!startMs) return '0D 0h 0m';
-  const ms = Math.max(0, Date.now() - startMs);
+  const ms = Math.max(0, (endMs || Date.now()) - startMs);
   const totalMin = Math.floor(ms / 60000);
   const d = Math.floor(totalMin / 1440), h = Math.floor((totalMin % 1440) / 60), m = totalMin % 60;
   return `${d}D ${h}h ${m}m`;
@@ -4443,7 +4461,7 @@ function renderTradingBotsList(){
               <div class="tb-card-sub">
                 <span class="dot ${bot.status === 'active' ? 'live' : bot.status === 'error' ? 'err' : ''}" style="${bot.status !== 'active' && bot.status !== 'error' ? 'background:var(--dim2);' : ''}"></span>
                 <span style="color:${statusColor};text-transform:capitalize;">${bot.status}</span>
-                <span style="color:var(--dim2);">· ${fmtBotUptime(bot.createdAtMs)} · ${EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange} (${bot.mode})</span>
+                <span style="color:var(--dim2);">· ${fmtBotRunTime(bot)} · ${EXCHANGE_DISPLAY_NAMES[bot.exchange] || bot.exchange} (${bot.mode})</span>
               </div>
             </div>
           </div>
@@ -4530,6 +4548,7 @@ function renderTradingBotDetailsModal(){
       ${metric('Taker/Maker Fees', '—')}
       ${metric('Bot ID', bot.id)}
       ${metric('Start-up time', fmtBotDateTime(bot.createdAtMs))}
+      ${botStoppedAtMs(bot) ? metric('Stopped time', fmtBotDateTime(botStoppedAtMs(bot))) : ''}
     </div>
     <div class="tb-params-head">Parameters</div>
     <div class="tb-metrics-grid">
@@ -4581,7 +4600,7 @@ function renderTradingBotDetailsModal(){
               <div class="tb-card-sub">
                 <span class="dot ${bot.status === 'active' ? 'live' : bot.status === 'error' ? 'err' : ''}" style="${bot.status !== 'active' && bot.status !== 'error' ? 'background:var(--dim2);' : ''}"></span>
                 <span style="color:${statusColor};text-transform:capitalize;">${bot.status}</span>
-                <span style="color:var(--dim2);">· ${fmtBotUptime(bot.createdAtMs)}</span>
+                <span style="color:var(--dim2);">· ${fmtBotRunTime(bot)}</span>
               </div>
             </div>
           </div>
@@ -4882,8 +4901,12 @@ function renderSmartBotsList(){
       <div class="tb-stats-row">
         <div class="tb-stat"><span class="l">Amount</span><span class="n">${fmtMoney(bot.investmentUsd || 0)}</span></div>
         <div class="tb-stat"><span class="l">Total P/L</span><span class="n">${pnlSpan(m.totalPnl, m.pctOfInvestment)}</span></div>
-        <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length} · ${fmtBotUptime(bot.createdAtMs)}</span></div>
+        <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length} · ${fmtBotRunTime(bot)}</span></div>
       </div>
+      ${(bot.status !== 'active' && bot.status !== 'deploying') ? `<div class="tb-stats-row" style="margin-top:8px;">
+        <div class="tb-stat"><span class="l">Deployed</span><span class="n">${fmtBotStamp(bot.createdAtMs)}</span></div>
+        <div class="tb-stat"><span class="l">Stopped</span><span class="n">${fmtBotStamp(botStoppedAtMs(bot))}</span></div>
+      </div>` : ''}
       ${tgt ? `<div class="progress-wrap" style="margin-top:10px;margin-bottom:0;">
         <div class="progress-track progress-track--tall" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(tgt.progressPct)}"><div class="progress-bar progress-bar--green${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div><span class="progress-pct">${Number(tgt.progressPct.toFixed(1))}%</span></div>
         <div class="progress-label" style="text-align:left;">${tgt.reached ? `Profit Target (${tgt.profitTargetPct}%) reached` : `<strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left of <strong class="progress-left">${tgt.profitTargetPct}% target</strong>`}</div>
@@ -5956,7 +5979,7 @@ function renderSmartBotDetail(id, force){
     <div class="tb-stats-row" style="margin-top:0;padding-top:0;border-top:none;">
       <div class="tb-stat"><span class="l">Margin Committed</span><span class="n">${fmtMoney(bot.investmentUsd || 0)}</span></div>
       <div class="tb-stat"><span class="l">Leverage</span><span class="n">${bot.leverage || '—'}x</span></div>
-      <div class="tb-stat"><span class="l">Uptime</span><span class="n">${fmtBotUptime(bot.createdAtMs)}</span></div>
+      <div class="tb-stat"><span class="l">Uptime</span><span class="n">${fmtBotRunTime(bot)}</span></div>
       <div class="tb-stat"><span class="l">Trades</span><span class="n">${m.records.length}</span></div>
     </div>
     ${targetProgressHtml}
