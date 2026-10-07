@@ -1187,7 +1187,10 @@ async function bybitDcaEnsureOneWayMode(mode, apiKey, secretKey, symbol){
   }
 }
 
-async function placeBybitDcaOrder(mode, apiKey, secretKey, { symbol, direction, orderType, price, qty, leverage }){
+// orderLinkId is the only custom tag Bybit lets an order carry (max 36 chars).
+// Format: nxdca-<role>-<short bot id>-<rand>, role = base | so (safety order) | add (recovery).
+function dcaLinkTag(botTag){ return String(botTag || '').replace(/^BOT-(DCA|GRID)-/i, '').replace(/[^A-Za-z0-9]/g, '').slice(-12) || 'x'; }
+async function placeBybitDcaOrder(mode, apiKey, secretKey, { symbol, direction, orderType, price, qty, leverage, botTag, role }){
   const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
   await bybitDcaEnsureOneWayMode(mode, apiKey, secretKey, symbol);
   const filters = await bybitFuturesSymbolFilters(base, symbol);
@@ -1203,7 +1206,7 @@ async function placeBybitDcaOrder(mode, apiKey, secretKey, { symbol, direction, 
   const body = {
     category: 'linear', symbol, side, orderType: orderType === 'MARKET' ? 'Market' : 'Limit',
     qty: roundedQty.toString(), positionIdx: 0,
-    orderLinkId: `nxdca-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    orderLinkId: `nxdca-${role || (orderType === 'MARKET' ? 'base' : 'so')}-${dcaLinkTag(botTag)}-${Math.random().toString(36).slice(2, 6)}`.slice(0, 36),
   };
   if(orderType !== 'MARKET'){
     const roundedPrice = Math.round(price / filters.tickSize) * filters.tickSize;
@@ -1295,18 +1298,40 @@ async function getBybitExecutionFees(mode, apiKey, secretKey, symbol, openedAtMs
   return { feesUsd, entries: list.length };
 }
 
+// Real realized result for the position that just closed on SYMBOL.
+// This used to be (balance now - balance when the bot deployed), which is
+// the WHOLE account's change — so every other bot/strategy that booked
+// profit while this one was open got credited to it (a DCA bot Bybit
+// shows at +$14.36 was recorded as +$77.73). It now sums Bybit's own
+// /v5/position/closed-pnl rows for THIS symbol created since the bot
+// opened — the same numbers as Bybit's P&L > Closed Orders, already net
+// of opening/closing fees and funding. The balance diff is only a last
+// resort if Bybit returns no closed-pnl rows at all.
 async function getBybitClosedPnl(mode, apiKey, secretKey, symbol, passphrase, openedAtMs, balanceBeforeUsd){
-  if(balanceBeforeUsd == null) return null; // caller didn't have a starting balance to diff against — can't compute this safely
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const startTime = Math.max(0, (openedAtMs || (Date.now() - 24 * 60 * 60 * 1000)) - 60_000);
+  let rows = [];
+  for(let attempt = 0; attempt < 3 && rows.length === 0; attempt++){
+    if(attempt > 0) await new Promise(r => setTimeout(r, 1200)); // Bybit can lag a moment after a close before the row appears
+    const data = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/position/closed-pnl', `category=linear&symbol=${symbol}&startTime=${startTime}&limit=100`).catch(() => null);
+    rows = (data?.result?.list || []).filter(r => parseInt(r.createdTime || '0', 10) >= startTime);
+  }
+  const fees = await getBybitExecutionFees(mode, apiKey, secretKey, symbol, openedAtMs).catch(() => null);
+  if(rows.length > 0){
+    const closedPnl = rows.reduce((a, r) => a + parseFloat(r.closedPnl || '0'), 0);
+    const totalQty = rows.reduce((a, r) => a + parseFloat(r.closedSize || r.qty || '0'), 0);
+    const wavg = key => totalQty > 0 ? rows.reduce((a, r) => a + parseFloat(r[key] || '0') * parseFloat(r.closedSize || r.qty || '0'), 0) / totalQty : null;
+    return {
+      closedPnl, grossPnl: fees ? closedPnl - fees.feesUsd : null, feesUsd: fees ? fees.feesUsd : null,
+      avgEntryPrice: wavg('avgEntryPrice'), avgExitPrice: wavg('avgExitPrice'), qty: totalQty || null,
+      entries: rows.length, pnlSource: 'exchange',
+    };
+  }
+  if(balanceBeforeUsd == null) return null;
   const afterUsd = await bybitAssetBalance(mode, apiKey, secretKey, 'USDT');
   const closedPnl = afterUsd - balanceBeforeUsd;
-  // Best-effort: if the execution list can't be read for any reason (rate
-  // limit, transient error, a Demo-account restriction that turns out to
-  // apply after all), fall back to the net-only figure exactly as before
-  // rather than blocking the result on it.
-  const fees = await getBybitExecutionFees(mode, apiKey, secretKey, symbol, openedAtMs).catch(() => null);
-  if(!fees) return { closedPnl, grossPnl: null, feesUsd: null, entries: 1 };
-  const grossPnl = closedPnl - fees.feesUsd; // feesUsd is negative, so this adds the cost back to get the pre-fee result
-  return { closedPnl, grossPnl, feesUsd: fees.feesUsd, entries: fees.entries };
+  if(!fees) return { closedPnl, grossPnl: null, feesUsd: null, entries: 1, pnlSource: 'balance-diff' };
+  return { closedPnl, grossPnl: closedPnl - fees.feesUsd, feesUsd: fees.feesUsd, entries: fees.entries, pnlSource: 'balance-diff' };
 }
 
 // =============================================================
@@ -4182,7 +4207,7 @@ function dcaRoute(path, table, argsFromBody){
     }
   });
 }
-dcaRoute('/api/futures/dca/place', DCA_PLACE, b => ({ symbol: b.symbol, direction: b.direction, orderType: b.orderType, price: b.price != null ? parseFloat(b.price) : null, qty: parseFloat(b.qty), leverage: b.leverage != null ? parseFloat(b.leverage) : null }));
+dcaRoute('/api/futures/dca/place', DCA_PLACE, b => ({ symbol: b.symbol, direction: b.direction, orderType: b.orderType, price: b.price != null ? parseFloat(b.price) : null, qty: parseFloat(b.qty), leverage: b.leverage != null ? parseFloat(b.leverage) : null, botTag: b.botTag, role: b.role }));
 dcaRoute('/api/futures/dca/set-tp', DCA_SET_TP, b => ({ symbol: b.symbol, direction: b.direction, takeProfitPrice: b.takeProfitPrice != null ? parseFloat(b.takeProfitPrice) : null, stopLossPrice: b.stopLossPrice != null ? parseFloat(b.stopLossPrice) : null, existingTpAlgoId: b.existingTpAlgoId, existingSlAlgoId: b.existingSlAlgoId }));
 dcaRoute('/api/futures/dca/cancel', DCA_CANCEL, b => ({ symbol: b.symbol, orderId: b.orderId }));
 
