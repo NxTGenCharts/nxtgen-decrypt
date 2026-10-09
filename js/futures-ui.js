@@ -1180,20 +1180,29 @@ function appendPersistentTrade(record){
 // not a win. Win rate = wins / trades that have a known net.
 function summarizeTradeRows(rows){
   const summable = rows.filter(t => !t.partial);
-  const grossKnown = summable.filter(t => t.grossUsd != null);
-  const feesKnown = summable.filter(t => t.feesUsd != null);
+  // Per-row gross/fees. Exchange-verified rows carry Bybit's real NET; their stored gross used to be a
+  // modelled figure for a hypothetical cycle, so Gross, Fees and Net didn't add up (net > gross).
+  // For those rows (and any row with a net but no gross) gross = net + fees, so Gross - Fees = Net.
+  // Fees are stored with either sign across exchanges, so they are always treated as a cost.
+  const parts = summable.map(t => {
+    const fee = t.feesUsd != null ? Math.abs(t.feesUsd) : null;
+    const derived = t.netUsd != null && (t.pnlSource === 'exchange' || t.grossUsd == null);
+    const gross = derived ? t.netUsd + (fee || 0) : (t.grossUsd != null ? t.grossUsd : null);
+    return { fee, gross, approx: derived && fee == null };
+  });
   const decided = summable.filter(t => t.netUsd != null);
   const wins = decided.filter(t => t.netUsd > 0).length;
   const losses = decided.filter(t => t.netUsd < 0).length;
+  const feesMissing = parts.some(x => x.fee == null);
   return {
     count: rows.length,
     wins, losses, flat: decided.length - wins - losses,
     winRatePct: decided.length ? (wins / decided.length) * 100 : null,
-    grossSum: grossKnown.reduce((a, t) => a + t.grossUsd, 0),
-    feesSum: feesKnown.reduce((a, t) => a + t.feesUsd, 0),
+    grossSum: parts.reduce((a, x) => a + (x.gross != null ? x.gross : 0), 0),
+    feesSum: parts.reduce((a, x) => a + (x.fee != null ? x.fee : 0), 0),
     netSum: summable.reduce((a, t) => a + (t.netUsd || 0), 0),
-    grossApprox: grossKnown.length < summable.length,
-    feesApprox: feesKnown.length < summable.length,
+    grossApprox: parts.some(x => x.gross == null || x.approx),
+    feesApprox: feesMissing || summable.some(t => t.pnlSource === 'exchange' && !t.feesReal),
   };
 }
 function winRateText(sum){ return sum.winRatePct == null ? '\u2014' : sum.winRatePct.toFixed(1) + '%'; }
@@ -3471,7 +3480,7 @@ async function resolveGridCyclePnl(proxyArgs, orderId, estimate){
   if(!row) return { ...estimate, pnlSource: 'estimate' };
   // Bybit's closedPnl is already net of both real fees — don't also
   // subtract the estimate's modeled fees/slippage/funding on top of it.
-  return { grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: row.closedPnl, avgEntryPrice: row.avgEntryPrice || null, avgExitPrice: row.avgExitPrice || null, qty: row.qty || null, closedAtMs: row.createdTime || null, pnlSource: 'exchange' };
+  return { grossUsd: row.feesUsd != null ? row.closedPnl + row.feesUsd : null, feesUsd: row.feesUsd != null ? row.feesUsd : null, fundingUsd: null, slippageUsd: null, netUsd: row.closedPnl, avgEntryPrice: row.avgEntryPrice || null, avgExitPrice: row.avgExitPrice || null, qty: row.qty || null, closedAtMs: row.createdTime || null, pnlSource: 'exchange' };
 }
 
 const sleepMs = (ms) => new Promise(r => setTimeout(r, ms));
@@ -3895,7 +3904,7 @@ async function manageDcaBotInstance(bot, cred, nowMs){
       exit: closed && closed.avgExitPrice != null ? closed.avgExitPrice : null,
       leverage: bot.plan.leverage, qty: bot.runtime.totalQty,
       grossUsd: closed && closed.grossPnl != null ? closed.grossPnl : null,
-      feesUsd: closed && closed.feesUsd != null ? closed.feesUsd : null,
+      feesUsd: closed && closed.feesUsd != null ? Math.abs(closed.feesUsd) : null,
       netUsd: closed ? closed.closedPnl : 0, pnlSource: closed && closed.pnlSource ? closed.pnlSource : null,
       setupType: 'Trading Bot: DCA', durationMin: Math.round((nowMs - bot.runtime.openedAtMs) / 60_000), gridId: bot.id,
     };
@@ -4415,6 +4424,26 @@ function tbTypeBadgeLabel(bot){ return bot.type === 'grid' ? 'Futures Grid Bot' 
 // total, so a progress readout there wouldn't reflect anything real —
 // callers get null and should just skip showing it for DCA bots.
 function sbProfitTargetProgress(bot){
+  if(bot.type === 'dca'){
+    // A DCA bot's target is its take-profit: how far price has moved in the bot's favour from the
+    // average entry, against the take-profit %. Live bots use the open position's unrealized P&L;
+    // stopped bots use the entry/exit of their closing trade.
+    const tp = parseFloat(bot.plan?.takeProfitPct);
+    if(!(tp > 0)) return null;
+    const rt = bot.runtime || {};
+    let movePct = null;
+    if(bot.status === 'active' || bot.status === 'deploying'){
+      if(rt.avgEntryPrice > 0 && rt.totalQty > 0 && rt.unrealizedUsd != null) movePct = rt.unrealizedUsd / (rt.avgEntryPrice * rt.totalQty) * 100;
+      else movePct = 0;
+    } else {
+      let last = null;
+      try { (getBotTradeRecords(bot) || []).forEach(r => { if(!last || (r.closedAtMs || 0) > (last.closedAtMs || 0)) last = r; }); } catch(e){}
+      if(last && last.entry > 0 && last.exit > 0) movePct = ((bot.direction === 'SHORT' ? last.entry - last.exit : last.exit - last.entry) / last.entry) * 100;
+    }
+    if(movePct == null) return null;
+    const progressPct = Math.max(0, Math.min(100, (movePct / tp) * 100));
+    return { kind: 'dca', profitTargetPct: tp, movePct, remainingPct: Math.max(0, tp - movePct), progressPct, reached: movePct >= tp * 0.98 };
+  }
   const profitTargetPct = bot.type === 'grid' ? parseFloat(bot.config?.profitTargetPct) : NaN;
   if(!Number.isFinite(profitTargetPct) || profitTargetPct <= 0 || !(bot.investmentUsd > 0)) return null;
   const targetUsd = bot.investmentUsd * (profitTargetPct / 100);
@@ -4909,7 +4938,7 @@ function renderSmartBotsList(){
       </div>` : ''}
       ${tgt ? `<div class="progress-wrap" style="margin-top:10px;margin-bottom:0;">
         <div class="progress-track progress-track--tall" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(tgt.progressPct)}"><div class="progress-bar progress-bar--green${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div><span class="progress-pct">${Number(tgt.progressPct.toFixed(1))}%</span></div>
-        <div class="progress-label" style="text-align:left;">${tgt.reached ? `Profit Target (${tgt.profitTargetPct}%) reached` : `<strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left of <strong class="progress-left">${tgt.profitTargetPct}% target</strong>`}</div>
+        <div class="progress-label" style="text-align:left;">${tgt.kind === 'dca' ? (tgt.reached ? `Take Profit (${tgt.profitTargetPct}%) reached` : `Price ${tgt.movePct >= 0 ? 'moved' : 'is'} <strong class="progress-left">${tgt.movePct.toFixed(2)}%</strong> vs <strong class="progress-left">${tgt.profitTargetPct}% take-profit</strong>`) : tgt.reached ? `Profit Target (${tgt.profitTargetPct}%) reached` : `<strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left of <strong class="progress-left">${tgt.profitTargetPct}% target</strong>`}</div>
       </div>` : ''}
     </div>`;
   }).join('') + createBtnHtml;
@@ -5948,10 +5977,10 @@ function renderSmartBotDetail(id, force){
   const range = f.sbChartRange || 'all';
   const tgt = sbProfitTargetProgress(bot);
   const targetProgressHtml = tgt ? `
-    <div class="tb-params-head">Profit Target</div>
+    <div class="tb-params-head">${tgt.kind === 'dca' ? 'Take-Profit Progress' : 'Profit Target'}</div>
     <div class="progress-wrap" style="margin-bottom:14px;">
       <div class="progress-track progress-track--tall" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(tgt.progressPct)}"><div class="progress-bar progress-bar--green${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div><span class="progress-pct">${Number(tgt.progressPct.toFixed(1))}%</span></div>
-      <div class="progress-label"><strong class="progress-left">${fmtUsd(tgt.realizedUsd)} of ${fmtMoney(tgt.targetUsd)}</strong> (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}</div>
+      <div class="progress-label">${tgt.kind === 'dca' ? `<strong class="progress-left">${tgt.movePct.toFixed(2)}%</strong> price move toward the <strong class="progress-left">${tgt.profitTargetPct}%</strong> take-profit${tgt.reached ? ' — take-profit reached' : ` — <strong class="progress-left">${tgt.remainingPct.toFixed(2)}%</strong> to go`}` : `<strong class="progress-left">${fmtUsd(tgt.realizedUsd)} of ${fmtMoney(tgt.targetUsd)}</strong> (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}`}</div>
     </div>` : '';
   const editHtml = bot.status === 'active' ? sbEditTargetsHtml(bot, f) : '';
   // ---- Open trades: what the bot is holding RIGHT NOW (the table below only lists closed cycles) ----
