@@ -788,3 +788,13 @@ button.primary.sb-pill-btn:hover{ background:var(--amber); filter:brightness(1.0
   .fu-summary-grid .ov-value, .fu-log-stats .ov-value{ font-size:clamp(15px, 4.8vw, 19px); }
   .fu-log-stats{ gap:8px !important; }
 }
+
+/* Trade Log actions: Delete + 3 exports always sit on ONE row (desktop and mobile). */
+.log-actions{ display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:8px; align-items:stretch; margin-bottom:10px; }
+.log-actions button{ width:100%; min-width:0; margin:0; padding:9px 6px; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.log-actions .log-sel-count{ grid-column:1 / -1; min-height:0; }
+.log-actions .log-sel-count:empty{ display:none; }
+@media (max-width:480px){
+  .log-actions{ gap:6px; }
+  .log-actions button{ padding:9px 2px; font-size:10.5px; letter-spacing:0; }
+}
