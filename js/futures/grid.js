@@ -993,7 +993,8 @@ export function runTradingBotsGridBacktest({ symbol, candles, cfg, exchange, met
         closeAllLegs(bar.c, 'MAX_LOSS_EXIT', nowMs);
         counters.maxLossExits++;
         bot = null;
-      } else if(profitCeilUsd != null && bot.realizedUsd >= profitCeilUsd){
+      } else if(profitCeilUsd != null && (bot.realizedUsd + bot.openLegs.reduce((a, l) => a + (l.direction === 'LONG' ? bar.c - l.entry : l.entry - bar.c) * l.qty, 0)) >= profitCeilUsd){
+        // realized + open-leg floating P&L (marked at this bar's close), same rule as live
         closeAllLegs(bar.c, 'PROFIT_TARGET_EXIT', nowMs);
         counters.profitTargetExits++;
         bot = null;
