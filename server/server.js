@@ -1098,12 +1098,25 @@ async function getBybitGridPositions(mode, apiKey, secretKey, symbol){
 // close against the position's AVERAGE entry price, so individual rows
 // can differ from a per-level model even when the totals agree.
 async function getBybitGridClosedPnlList(mode, apiKey, secretKey, symbol){
-  const data = await bybitSignedRequest(BYBIT_BASE[mode] || BYBIT_BASE.live, apiKey, secretKey, 'GET', '/v5/position/closed-pnl', `category=linear&symbol=${symbol}&limit=100`);
-  return (data.result?.list || []).map(r => ({
-    orderId: r.orderId, side: r.side, qty: parseFloat(r.closedSize || r.qty || '0'),
-    avgEntryPrice: parseFloat(r.avgEntryPrice || '0'), avgExitPrice: parseFloat(r.avgExitPrice || '0'),
-    closedPnl: parseFloat(r.closedPnl || '0'), createdTime: parseInt(r.createdTime || '0', 10),
-  }));
+  const base = BYBIT_BASE[mode] || BYBIT_BASE.live;
+  const data = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/position/closed-pnl', `category=linear&symbol=${symbol}&limit=100`);
+  // Real per-order fees from the execution list, so the Trade Log's Gross/Fees can reconcile with Bybit's net.
+  const feeByOrder = new Map();
+  try {
+    const ex = await bybitSignedRequest(base, apiKey, secretKey, 'GET', '/v5/execution/list', `category=linear&symbol=${symbol}&limit=100`);
+    for(const e of (ex.result?.list || [])) feeByOrder.set(String(e.orderId), (feeByOrder.get(String(e.orderId)) || 0) + parseFloat(e.execFee || '0'));
+  } catch(e){ /* fees are optional */ }
+  return (data.result?.list || []).map(r => {
+    const closeFee = feeByOrder.get(String(r.orderId));
+    const entryVal = parseFloat(r.cumEntryValue || '0'), exitVal = parseFloat(r.cumExitValue || '0');
+    // Closing fee is exact; the opening fee (a different order) is taken at the same rate on the entry notional.
+    const feesUsd = closeFee != null && exitVal > 0 ? closeFee * (1 + entryVal / exitVal) : null;
+    return {
+      orderId: r.orderId, side: r.side, qty: parseFloat(r.closedSize || r.qty || '0'),
+      avgEntryPrice: parseFloat(r.avgEntryPrice || '0'), avgExitPrice: parseFloat(r.avgExitPrice || '0'),
+      closedPnl: parseFloat(r.closedPnl || '0'), createdTime: parseInt(r.createdTime || '0', 10), feesUsd,
+    };
+  });
 }
 // Real exchange fill times for recent FILLED orders on SYMBOL: { orderId, filledAtMs }.
 // The Trading Bots manager only runs while the page is open, so when it "notices" a filled
