@@ -10,9 +10,7 @@
 
   function markHTML(extra){
     return '<span class="bm" ' + (extra || '') + '><span class="bm-stage"><span class="bm-glow"></span>' +
-      '<span class="bm-p bm-icon"><img src="/assets/brand/icon.png" alt="" width="236" height="225" decoding="async">' +
-      '<span class="bm-sheen bm-sheen-teal"></span><span class="bm-sheen bm-sheen-gold"></span></span>' +
-      '<span class="bm-p bm-word"><img src="/assets/brand/word.png" alt="" width="671" height="209" decoding="async"></span>' +
+      '<span class="bm-p bm-word"><img src="/assets/brand/word.png" alt="" width="671" height="209" decoding="async" fetchpriority="high"><span class="bm-sheen"></span></span>' +
       '<span class="bm-p bm-tag"><img src="/assets/brand/tag.png" alt="" width="671" height="20" decoding="async"></span>' +
       '</span></span>';
   }
