@@ -6,13 +6,13 @@
 //   confirmStopSheet({ detail })           bottom sheet: "Close all orders at market price" → Cancel / Confirm
 //
 // Pure UI — no trading logic lives here. Styles are injected once, so there is no CSS file to ship.
-// To match your brand, change --nxfx-accent below (or define --accent in your own CSS).
+// Colours follow the site's amber/gold (--amber, fallback #f0b429); change --nxfx-accent below to restyle.
 // =============================================================
 
 const STYLE_ID = 'nxfxStyles';
 
 const CSS = `
-:root{ --nxfx-accent: var(--accent, #8b5cf6); }
+:root{ --nxfx-accent: var(--amber, #f0b429); --nxfx-ink: var(--amber-ink, #1a1300); }
 
 /* ---------- overlay ---------- */
 .nxfx-overlay{ position:fixed; inset:0; z-index:10000; display:flex; align-items:center; justify-content:center;
@@ -47,7 +47,6 @@ const CSS = `
 .is-stop .nxfx-robot{ animation-duration:2.6s; }
 .is-stop .nxfx-robot .eye{ animation:nxfx-sleep .55s .35s ease-in forwards; }
 .is-stop .nxfx-robot .bulb{ animation:nxfx-fade 1.4s .5s ease-out forwards; }
-.is-stop .nxfx-ring .arc{ stroke:var(--amber,#f0b429); }
 
 /* finished */
 .is-done .nxfx-ring .arc{ animation:none; stroke:var(--green,#2ebd85); stroke-dasharray:276 0; }
@@ -76,7 +75,7 @@ const CSS = `
 .nxfx-toast .dot{ flex:0 0 20px; width:20px; height:20px; border-radius:50%; display:flex; align-items:center; justify-content:center;
   font-size:12px; font-weight:700; color:#0b0c10; background:var(--green,#2ebd85); }
 .nxfx-toast[data-type="error"] .dot{ background:var(--red,#f6465d); color:#fff; }
-.nxfx-toast[data-type="info"] .dot{ background:var(--nxfx-accent); color:#fff; }
+.nxfx-toast[data-type="info"] .dot{ background:var(--nxfx-accent); color:var(--nxfx-ink); }
 
 /* ---------- stop confirm sheet ---------- */
 .nxfx-scrim{ position:fixed; inset:0; z-index:10001; background:rgba(0,0,0,.55); opacity:0; transition:opacity .22s ease; }
@@ -96,7 +95,7 @@ const CSS = `
 .nxfx-btns{ display:flex; gap:10px; }
 .nxfx-btns button{ flex:1; padding:12px 10px; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer; border:1px solid var(--line,#2a2e38); }
 .nxfx-btns .cancel{ background:transparent; color:var(--nxfx-accent); }
-.nxfx-btns .confirm{ background:var(--nxfx-accent); color:#fff; border-color:var(--nxfx-accent); }
+.nxfx-btns .confirm{ background:var(--nxfx-accent); color:var(--nxfx-ink); border-color:var(--nxfx-accent); }
 
 @media (prefers-reduced-motion: reduce){
   .nxfx-card, .nxfx-toast, .nxfx-sheet{ transition:none; }
