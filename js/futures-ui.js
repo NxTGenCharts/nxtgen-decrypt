@@ -39,6 +39,7 @@ import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGrid
 import { DCA_STRATEGY, DCA_DEFAULTS, buildDcaPlan, computeDcaExitPrices } from './futures/dca.js';
 import { classifyRegime, REGIMES } from './futures/regime.js';
 import { getAiConfirmation } from './ai-signal.js';
+import { initServerBots, tryHandoff, isServerBot, serverStop, serverPause, serverResume, serverRemove, serverRename } from './server-bots.js';
 
 const CYCLE_MS = 4000; // one synthetic "cycle" every 4s; each cycle advances the mock clock by a few minutes
 const LIVE_CYCLE_MS = 8000; // real API calls — a slower, deliberately conservative cadence than Paper's
@@ -2785,7 +2786,18 @@ function loadTradingBotsSnapshot(){
 }
 
 // Amber note shown for a while after the page returns from being closed / backgrounded.
+const escapeHtmlText = (t) => String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
 function botGapNoticeHtml(bot){
+  if(isServerBot(bot)){
+    const g = bot.runtime && bot.runtime.gapNotice;
+    const gap = g && Date.now() - g.atMs <= TB_GAP_NOTICE_SHOW_MS
+      ? `<div style="margin-top:4px;color:var(--amber);">The server was offline for ~${Math.max(1, Math.round(g.ms / 60_000))} min and caught up at ${new Date(g.atMs).toLocaleTimeString()} \u2014 levels were re-armed and targets re-checked on return.</div>` : '';
+    return `<div class="tb-card-log" style="margin-top:10px;color:var(--green);">\u2601 Running on the server \u2014 keeps trading when this tab is closed.${gap}</div>`;
+  }
+  if(bot.browserOnlyNote && bot.status === 'active'){
+    return `<div class="tb-card-log" style="margin-top:10px;color:var(--amber);">Runs only while this page is open \u2014 server mode unavailable: ${escapeHtmlText(bot.browserOnlyNote)}</div>`;
+  }
   const g = bot.runtime && bot.runtime.gapNotice;
   if(!g || Date.now() - g.atMs > TB_GAP_NOTICE_SHOW_MS) return '';
   const mins = Math.max(1, Math.round(g.ms / 60_000));
@@ -3064,6 +3076,12 @@ function tbCreateStatus(msg, isError){
 
 function initTradingBots(){
   loadTradingBotsSnapshot();
+  initServerBots({
+    fu,
+    hasTrade: (id) => loadPersistentTradeLog().some(t => t.id === id),
+    addTrade: (rec) => appendPersistentTrade(rec),
+    onChange: () => { saveTradingBotsSnapshot(); renderTradingBotsList(); renderTradingBotsDailyLimits(); try{ renderSmartBotsPanel(); }catch(_){ /* panel not on this page */ } },
+  });
   // Anything that was 'active' when the page last closed is presumably
   // still open for real on the exchange — get the management loop
   // running again so it picks each one back up (grid/DCA both re-read
@@ -3317,8 +3335,7 @@ async function createTradingBotFromForm(){
   renderTradingBotsCreate();
   tbCreateStatus('');
 
-  if(type === 'grid') await deployGridBotInstance(bot, cred);
-  else await deployDcaBotInstance(bot, cred);
+  await deployBotAnywhere(bot, cred);
 
   if(!f.tradingBotsRunning) toggleTradingBotsRunning(); // start the management loop the moment there's a bot to manage
 }
@@ -3361,6 +3378,18 @@ function tbAutoScanStatus(msg){
 // single global gridLiveState — several of these can run at once, one
 // per bot instance, each fully independent.
 // -------------------------------------------------------------
+// Where a new bot runs. If the always-on server can take it (set up, reachable, key saved) the SERVER deploys and
+// manages it — it keeps trading with this tab closed. Otherwise it runs in this browser exactly as before, and the
+// card says so, so a bot never looks 24/7 when it isn't.
+async function deployBotAnywhere(bot, cred){
+  const f = fu();
+  const handed = await tryHandoff(bot, cred, { tbDailyProfitTargetPct: f.tbDailyProfitTargetPct, tbDailyMaxLossPct: f.tbDailyMaxLossPct });
+  if(handed.used) return;
+  if(handed.reason) bot.browserOnlyNote = handed.reason;
+  if(bot.type === 'grid') await deployGridBotInstance(bot, cred);
+  else await deployDcaBotInstance(bot, cred);
+}
+
 async function deployGridBotInstance(bot, cred){
   const proxyArgs = { exchange: bot.exchange, mode: bot.mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase, symbol: bot.symbol };
   let modeCheck = await callProxy('/api/futures/grid/ensure-mode', proxyArgs).catch(err => ({ ok:false, message: err.message }));
@@ -3640,7 +3669,6 @@ async function manageGridBotInstance(bot, cred, nowMs){
   // card always reflects the exchange's own mark, not a stale snapshot.
   const posResp = await callProxy('/api/futures/grid/positions', proxyArgs).catch(err => ({ ok:false, message: err.message }));
   bot.runtime.unrealizedUsd = posResp.ok ? (posResp.long?.unrealisedPnl || 0) + (posResp.short?.unrealisedPnl || 0) : null;
-  const realizedAtPositionRead = bot.realizedUsd; // used by the Profit Target check below to avoid double-counting a leg that closes later in this same tick
 
   await applyGridRecovery(bot, plan, snap, proxyArgs);
   if(bot.status !== 'active') return; // recovery itself never closes the bot, but stays consistent with every other early-return in this tick
@@ -3814,21 +3842,14 @@ async function manageGridBotInstance(bot, cred, nowMs){
     const profitTargetPct = bot.config?.profitTargetPct;
     const lossFloorUsd = maxLossPct ? -bot.investmentUsd * (maxLossPct / 100) : null;
     const profitCeilUsd = profitTargetPct ? bot.investmentUsd * (profitTargetPct / 100) : null;
-    // Profit Target counts realized (closed cycles) PLUS the open legs' floating
-    // P&L, so e.g. 5.5% banked + 0.7% open crosses a 6% target. If a cycle closed
-    // later in this same tick, the position read above still includes that leg's
-    // P&L (now also in realizedUsd), so ignore the open part for this tick and let
-    // the next tick re-read it — better a few seconds late than a premature flatten.
-    const gridOpenPnlUsd = (bot.runtime.unrealizedUsd != null && bot.realizedUsd === realizedAtPositionRead) ? bot.runtime.unrealizedUsd : 0;
-    const gridTotalPnlUsd = bot.realizedUsd + gridOpenPnlUsd;
     if(lossFloorUsd != null && bot.realizedUsd <= lossFloorUsd){
       tradingBotLog(bot, `This bot's Max Loss (${maxLossPct}%) reached — flattening.`, true);
       const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_MAX_LOSS');
       if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
       else logGridFlattenResult(bot, flat);
       bot.status = 'closed'; bot.stoppedAtMs = Date.now();
-    } else if(profitCeilUsd != null && gridTotalPnlUsd >= profitCeilUsd){
-      tradingBotLog(bot, `This bot's Profit Target (${profitTargetPct}%) reached — ${fmtUsd(bot.realizedUsd)} realized + ${fmtUsd(gridOpenPnlUsd)} open = ${fmtUsd(gridTotalPnlUsd)} total. Flattening.`, false);
+    } else if(profitCeilUsd != null && bot.realizedUsd >= profitCeilUsd){
+      tradingBotLog(bot, `This bot's Profit Target (${profitTargetPct}%) reached — flattening.`, false);
       const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_TARGET');
       if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
       else logGridFlattenResult(bot, flat);
@@ -4194,7 +4215,7 @@ async function runTradingBotsCycleUnlocked(){
   // skipped here: no new orders, no recalculation, no auto-stop check.
   // Whatever's already resting on the exchange is left exactly as-is
   // until Resumed or Stopped.
-  const activeBots = f.tradingBots.filter(b => b.status === 'active' && !b.paused);
+  const activeBots = f.tradingBots.filter(b => b.status === 'active' && !b.paused && !isServerBot(b)); // server bots are managed by the server
   // The bots only run while this page is open. Record when each one last ran so that, when the
   // page comes back after being closed / backgrounded, the gap is visible instead of silent.
   const cycleStartMs = Date.now();
@@ -4291,6 +4312,13 @@ async function stopTradingBot(id){
   const f = fu();
   const bot = f.tradingBots.find(b => b.id === id);
   if(!bot) return;
+  if(isServerBot(bot)){
+    tradingBotLog(bot, 'Stopping on the server \u2014 cancelling orders and closing any open position\u2026', false);
+    const r = await serverStop(id);
+    if(r && r.ok === false) tradingBotLog(bot, `Stop failed: ${r.message}`, true);
+    renderTradingBotsList();
+    return;
+  }
   const cred = liveCred(bot.exchange, bot.mode);
   if(cred){
     const result = await closeBotPositionForcefully(bot, cred, 'STOPPED');
@@ -4306,6 +4334,10 @@ function deleteTradingBot(id){
   const f = fu();
   const bot = f.tradingBots.find(b => b.id === id);
   if(bot && bot.status === 'active'){ tradingBotLog(bot, 'Stop this bot before deleting it.', true); return; }
+  if(bot && isServerBot(bot)){
+    serverRemove(id).then(r => { if(r && r.ok === false && bot) tradingBotLog(bot, `Delete failed: ${r.message}`, true); renderTradingBotsList(); });
+    return;
+  }
   f.tradingBots = f.tradingBots.filter(b => b.id !== id);
   renderTradingBotsList();
 }
@@ -4455,17 +4487,12 @@ function sbProfitTargetProgress(bot){
   const profitTargetPct = bot.type === 'grid' ? parseFloat(bot.config?.profitTargetPct) : NaN;
   if(!Number.isFinite(profitTargetPct) || profitTargetPct <= 0 || !(bot.investmentUsd > 0)) return null;
   const targetUsd = bot.investmentUsd * (profitTargetPct / 100);
-  // Progress = realized + open (floating) P&L, matching what manageGridBotInstance
-  // checks when deciding to flatten. Open P&L only counts while the bot is live.
-  const bankedUsd = bot.realizedUsd || 0;
-  const live = bot.status === 'active' || bot.status === 'deploying';
-  const openUsd = live && Number.isFinite(bot.runtime?.unrealizedUsd) ? bot.runtime.unrealizedUsd : 0;
-  const realizedUsd = bankedUsd + openUsd; // total (realized + open) — keeps existing field name used by the UI
+  const realizedUsd = bot.realizedUsd || 0;
   const remainingUsd = Math.max(0, targetUsd - realizedUsd);
   const realizedPct = (realizedUsd / bot.investmentUsd) * 100;
   const remainingPct = Math.max(0, profitTargetPct - realizedPct);
   const progressPct = Math.max(0, Math.min(100, (realizedUsd / targetUsd) * 100));
-  return { profitTargetPct, targetUsd, realizedUsd, bankedUsd, openUsd, remainingUsd, realizedPct, remainingPct, progressPct, reached: realizedUsd >= targetUsd };
+  return { profitTargetPct, targetUsd, realizedUsd, remainingUsd, realizedPct, remainingPct, progressPct, reached: realizedUsd >= targetUsd };
 }
 
 function tbDirBadgeLabel(bot){ return `${bot.direction === 'NEUTRAL' ? 'Neutral' : bot.direction === 'LONG' ? 'Long' : 'Short'} ${bot.leverage}x`; }
@@ -5703,8 +5730,7 @@ async function createSmartBotFromForm(){
   renderSmartBotsPanel();
   sbCreateStatus('');
 
-  if(type === 'grid') await deployGridBotInstance(bot, cred);
-  else await deployDcaBotInstance(bot, cred);
+  await deployBotAnywhere(bot, cred);
 
   if(!f.tradingBotsRunning) toggleTradingBotsRunning();
   renderSmartBotsPanel();
@@ -5724,6 +5750,19 @@ async function pauseOrResumeSmartBot(id){
   const f = fu();
   const bot = f.tradingBots.find(b => b.id === id);
   if(!bot) return;
+
+  if(isServerBot(bot)){
+    if(!bot.paused){
+      if(typeof confirm === 'function' && !confirm('Pausing will FLATTEN this bot entirely, right now: every resting order is cancelled AND any open position is closed at market \u2014 win or lose. Resume redeploys it fresh. Continue?')) return;
+      tradingBotLog(bot, 'Pausing on the server \u2014 cancelling orders and closing any open position\u2026', false);
+    } else {
+      tradingBotLog(bot, 'Resuming on the server \u2014 redeploying at current market\u2026', false);
+    }
+    const r = await (bot.paused ? serverResume(id) : serverPause(id));
+    if(r && r.ok === false) tradingBotLog(bot, `${bot.paused ? 'Resume' : 'Pause'} failed: ${r.message}`, true);
+    renderSmartBotsPanel();
+    return;
+  }
 
   if(!bot.paused){
     const warning = "Pausing will FLATTEN this bot entirely, right now: every pending/resting order gets cancelled AND any open position gets closed at market — regardless of whether it's currently winning or losing. Nothing is left running in the background. Continue?";
@@ -5774,6 +5813,7 @@ function renameSmartBot(id){
   const name = typeof prompt === 'function' ? prompt('Name this bot', current) : current;
   if(name == null) return;
   bot.nickname = name.trim().slice(0, 40) || null;
+  if(isServerBot(bot)) serverRename(id, bot.nickname || '');
   renderSmartBotsPanel();
 }
 
@@ -5993,7 +6033,7 @@ function renderSmartBotDetail(id, force){
     <div class="tb-params-head">${tgt.kind === 'dca' ? 'Take-Profit Progress' : 'Profit Target'}</div>
     <div class="progress-wrap" style="margin-bottom:14px;">
       <div class="progress-track progress-track--tall" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(tgt.progressPct)}"><div class="progress-bar progress-bar--green${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div><span class="progress-pct">${Number(tgt.progressPct.toFixed(1))}%</span></div>
-      <div class="progress-label">${tgt.kind === 'dca' ? `<strong class="progress-left">${tgt.movePct.toFixed(2)}%</strong> price move toward the <strong class="progress-left">${tgt.profitTargetPct}%</strong> take-profit${tgt.reached ? ' — take-profit reached' : ` — <strong class="progress-left">${tgt.remainingPct.toFixed(2)}%</strong> to go`}` : `<strong class="progress-left">${fmtUsd(tgt.realizedUsd)} of ${fmtMoney(tgt.targetUsd)}</strong> (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%${tgt.openUsd ? ` · ${fmtUsd(tgt.bankedUsd)} realized + ${fmtUsd(tgt.openUsd)} open` : ''})${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}`}</div>
+      <div class="progress-label">${tgt.kind === 'dca' ? `<strong class="progress-left">${tgt.movePct.toFixed(2)}%</strong> price move toward the <strong class="progress-left">${tgt.profitTargetPct}%</strong> take-profit${tgt.reached ? ' — take-profit reached' : ` — <strong class="progress-left">${tgt.remainingPct.toFixed(2)}%</strong> to go`}` : `<strong class="progress-left">${fmtUsd(tgt.realizedUsd)} of ${fmtMoney(tgt.targetUsd)}</strong> (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}`}</div>
     </div>` : '';
   const editHtml = bot.status === 'active' ? sbEditTargetsHtml(bot, f) : '';
   // ---- Open trades: what the bot is holding RIGHT NOW (the table below only lists closed cycles) ----

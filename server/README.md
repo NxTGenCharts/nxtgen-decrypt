@@ -135,3 +135,83 @@ with `NODE_OPTIONS=--dns-result-order=ipv4first`, put HTTPS in front of it, and 
 This app's own Binance scan cost is kept low by sharing bookTicker/premiumIndex/24h-volume calls across symbols and
 caching the 15m/1h context candles briefly (see "Binance scan-weight reduction" in `server.js`) — about 650-800
 weight/min for a 25-pair watchlist.
+
+## 24/7 Trading Bots (they keep trading with no browser open)
+
+Grid, DCA and Smart bots used to be managed by a timer inside the web page, so closing the tab stopped
+them. They now run **on this server**: `botEngine.js` is the same management logic, driven by bots saved
+on disk (`botVault.js`) and the **same API keys you verify on the API Keys tab** — the browser sends each
+key once and the server keeps it encrypted; there is no second set of keys to maintain. The page just
+creates/stops bots and mirrors what the server is doing.
+
+### One-time setup (Render)
+
+1. **Paid, always-on instance.** A free Render web service sleeps after ~15 minutes without traffic, which
+   silently stops every bot. Use a paid plan (or any VPS).
+2. **Persistent disk.** Render's default disk is wiped on every deploy/restart. Add a Disk (1 GB is plenty)
+   mounted at e.g. `/var/data`.
+3. **Environment variables** (Render → Environment):
+
+   | Variable | Value |
+   |---|---|
+   | `WORKER_TOKEN` | already set for the Futures worker — the page reuses it, so you enter it once |
+   | `BOT_VAULT_KEY` | **32+ random characters** (e.g. `openssl rand -base64 36`). Encrypts the saved API keys. Keep a copy: change or lose it and the saved keys can't be read (just re-sync them from the page). |
+   | `BOT_DATA_DIR` | `/var/data` (the disk's mount path) |
+
+4. Make sure the service starts from a checkout that includes the `js/` folder (`node server/server.js`
+   from the repo root) — the engine and the worker import `../js/futures/*`.
+5. Redeploy. The log should say the vault is on; if not it prints exactly what's missing
+   (`[bots] server-side bots are OFF: ...`). Until it is on, bots keep running in the browser as before and
+   the page says so.
+
+### Using it
+
+Open **Utilities & Tools → Trading Bots**. The green bar at the top shows server mode. Create a bot as usual:
+the first time you'll be asked for your access token (`WORKER_TOKEN`); your verified key for that
+exchange/mode is sent over HTTPS, checked against the exchange, then stored encrypted. After that the bot
+runs on the server — close the tab, shut the laptop, it keeps going. Reopen the page any time and the
+bots, daily totals and closed trades are synced back into the lists and the Trade Log. Stop / Pause /
+Resume / Delete / Rename from the page act on the server. "Sync API keys" re-sends every verified
+Bybit/Binance key; replacing a key on the API Keys tab updates the server copy automatically.
+
+### What runs where
+
+| | Runs on |
+|---|---|
+| Manual Trading Bots + Smart Bots (Grid, DCA) on Bybit / Binance, Live or Demo | **the server** (when server mode is on) |
+| Grid **Auto-Scan** (the bot that creates other bots) | still the browser — it needs the page's scanner |
+| Futures Engine **Auto** mode | the Futures worker (`worker.js`), armed from the Futures Engine tab (see below) |
+| Paper trading / backtests | the browser (no real orders) |
+
+### Safety notes — read these
+
+- **Use a trade-only key.** Create the exchange key with *Trade* permission only (no Withdraw), and whitelist
+  this server's outbound IP on the exchange if it has a fixed one. Anyone who gets into this server could
+  trade with the saved keys; withdrawal permission must never be on them.
+- Keys are encrypted at rest (AES-256-GCM, key derived from `BOT_VAULT_KEY`), the file is owner-only, and
+  keys are never returned by any endpoint (the status route only shows the last 4 characters).
+- Every `/api/bots/*` route needs the access token and fails closed if `WORKER_TOKEN` is unset or short.
+- **After a restart** the engine reloads the bots and simply keeps managing them — it re-reads open orders and
+  positions from the exchange on its first tick, so fills that happened while it was down are picked up. A bot
+  that was caught *mid-deployment* is flagged as an error instead of resumed (some orders may be resting on the
+  exchange: press Stop to cancel them).
+- The server and the browser never manage the same bot: a bot handed to the server is skipped by the page's
+  own timer.
+- The Futures worker and the bots share one exchange account and its margin. They are separate engines — don't
+  point both at the same symbol.
+- `bots.json` in `BOT_DATA_DIR` holds bots + trade history. Back it up if you care about the history.
+
+### Futures Engine (Auto) 24/7
+
+`worker.js` is now mounted by `server.js` (`/api/worker/*`). Arm it from the Futures Engine tab. Its session
+lives in server memory (by design — see the top of `worker.js`), so a server restart disarms it unless you set
+`WORKER_AUTOARM=true` with the `WORKER_*` credential variables (see the worker's header).
+
+### Tests
+
+```
+node tests/bots.test.mjs                                                        # engine vs a simulated exchange
+node --import ./tests/_stubs/register.mjs tests/botRoutes.test.mjs              # HTTP layer (no express needed)
+```
+These prove the engine's logic and the key handling. They do **not** prove the real Bybit/Binance endpoints
+behave like the simulator — run on **Demo with a small amount** before trusting real money to it.

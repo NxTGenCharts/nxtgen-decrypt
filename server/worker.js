@@ -28,6 +28,7 @@ import {
 import { RISK_DEFAULTS } from '../js/futures/risk.js';
 
 export { ARM_PHRASE };
+export { requireRole };
 
 const MAX_LOG_LINES = 300;
 

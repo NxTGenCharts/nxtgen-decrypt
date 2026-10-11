@@ -20,10 +20,18 @@ import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
+import { attachWorker } from './worker.js';
+import { attachBots } from './bots.js';
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '10kb' }));
+// The in-process bot engine calls this server's own routes over loopback; this secret (new every boot, never sent
+// anywhere) lets those calls skip the per-IP rate limits that exist to slow down strangers.
+const INTERNAL_KEY = crypto.randomBytes(24).toString('hex');
+const isInternalCall = (req) => req.get('x-nxtgen-internal') === INTERNAL_KEY;
+const smallJson = express.json({ limit: '10kb' });
+// /api/bots/* carries whole bot objects (plan + log), so it parses its own body with a larger limit (see bots.js).
+app.use((req, res, next) => req.path.startsWith('/api/bots') ? next() : smallJson(req, res, next));
 
 // Lock this down to your actual front-end origin(s) in production — a
 // comma-separated list, e.g. "https://nxtgendecrypt.site,https://www.nxtgendecrypt.site".
@@ -37,7 +45,7 @@ app.use(cors({
 // Basic abuse guard — each caller gets a modest number of verify attempts
 // per minute. This is not a substitute for putting this behind your own
 // infra-level rate limiting/WAF if you expose it publicly.
-app.use('/api/verify', rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true, legacyHeaders: false }));
+app.use('/api/verify', rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true, legacyHeaders: false, skip: isInternalCall }));
 
 function hmacSha256Hex(secret, message){
   return crypto.createHmac('sha256', secret).update(message).digest('hex');
@@ -1674,7 +1682,7 @@ async function getFuturesSnapshotCached(exchange, symbol, timeframe){
   }
 }
 
-app.use('/api/futures/snapshot', rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
+app.use('/api/futures/snapshot', rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false, skip: isInternalCall }));
 app.get('/api/futures/snapshot', async (req, res) => {
   const symbol = req.query.symbol;
   const exchange = String(req.query.exchange || 'bybit');
@@ -4787,4 +4795,8 @@ app.use((err, req, res, next) => {
 });
 
 const port = process.env.PORT || 8787;
+const selfBaseUrl = `http://127.0.0.1:${port}`;
+// Always-on pieces that keep trading with no browser open: the Futures Engine worker (Auto mode) and the server-side Trading Bots.
+attachWorker(app, selfBaseUrl);
+attachBots(app, { baseUrl: selfBaseUrl, internalKey: INTERNAL_KEY });
 app.listen(port, () => console.log(`nxtgen-verify-proxy listening on :${port}`));
