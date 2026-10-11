@@ -39,6 +39,8 @@ const MAX_LOG_LINES = 300;
 // can only ever have one armed session at a time.
 const runners = new Map();
 let selfBaseUrl = 'http://127.0.0.1:8787';
+// Proves to server.js that these loopback calls come from this process (it skips the per-IP limits and the optional login gate for them).
+let internalKey = '';
 
 function log(runner, msg, kind){
   const session = runner.session;
@@ -59,7 +61,7 @@ function buildAdapter(runner){
   return {
     async proxyCall(path, body){
       const res = await fetch(selfBaseUrl + path, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...(internalKey ? { 'x-nxtgen-internal': internalKey } : {}) }, body: JSON.stringify(body || {}),
       });
       const data = await res.json().catch(() => null);
       if(!data) throw new Error('Internal call to ' + path + ' returned an unreadable response.');
@@ -67,7 +69,7 @@ function buildAdapter(runner){
     },
     async fetchSnapshot(exchange, symbol, timeframe){
       const tf = timeframe || '5m';
-      const res = await fetch(`${selfBaseUrl}/api/futures/snapshot?exchange=${exchange}&symbol=${symbol}&interval=${tf}`);
+      const res = await fetch(`${selfBaseUrl}/api/futures/snapshot?exchange=${exchange}&symbol=${symbol}&interval=${tf}`, internalKey ? { headers: { 'x-nxtgen-internal': internalKey } } : undefined);
       const data = await res.json().catch(() => null);
       if(!data || !data.ok) throw new Error((data && data.message) || `Snapshot fetch failed (HTTP ${res.status}).`);
       return data.snapshot;
@@ -443,8 +445,9 @@ export function getLogs(sinceMs, exchange){
 // app.use(express.json()) is set up (server.js already does that).
 // `baseUrl` is where the worker calls back into THIS SAME server's own
 // /api/futures/* routes — normally http://127.0.0.1:<port>.
-export function attachWorker(app, baseUrl){
+export function attachWorker(app, baseUrl, opts = {}){
   selfBaseUrl = baseUrl;
+  internalKey = String(opts.internalKey || '');
 
   app.post('/api/worker/arm', requireRole('admin'), (req, res) => {
     const body = req.body || {};

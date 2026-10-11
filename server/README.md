@@ -283,8 +283,8 @@ server whether or not any device is open.
 3. Render → Environment, add `SUPABASE_ANON_KEY` (that key). `BOT_SUPABASE_URL`, `BOT_SUPABASE_KEY` and `BOT_VAULT_KEY` stay as they are.
 4. Optional but recommended: `ALLOWED_EMAILS` (e.g. `you@mail.com, @yourcompany.com`) to keep it invite-only, and
    `BOT_MAX_USERS` (default 25 — every account runs its own 8-second engine loop on your instance).
-5. Redeploy the server **and** the site (the service worker is bumped to v49, so devices pick up the new code).
-6. Open **API Keys → Your Account**, create the account, confirm the email, sign in.
+5. Redeploy the server **and** the site (the service worker is bumped to v50, so devices pick up the new code).
+6. Open **/register/**, create the account, confirm the email, then sign in at **/login/** (API Keys → Your Account links there too).
 7. **Keep your existing bots:** Utilities & Tools → Trading Bots → **Move my earlier bots & keys here**, enter `WORKER_TOKEN`
    once. The bots, their trade history and saved keys are copied into your account and confirmed saved *before* the old copy
    is retired; the bots keep their orders on the exchange and the account's engine simply resumes managing them. Only one
@@ -309,6 +309,62 @@ server whether or not any device is open.
   device's local log stay there; use a private window on a shared computer.
 - The Futures Engine worker (`/api/worker/*`) is still single-owner (shared token) — accounts cover Trading Bots and saved keys.
 
+### Sign-in pages and route protection
+
+Accounts have their own pages (all static files, same design system as the terminal):
+
+| Page | Purpose |
+|---|---|
+| `/login/` | Email + password, "Remember me", forgot-password link, optional Google. Honours `?next=` (same-site dashboard paths only). |
+| `/register/` | Email + password (10+ chars, letters and numbers), strength meter, Terms/Privacy acceptance, "check your inbox" state with resend. |
+| `/forgot-password/` | Requests a reset link. Always answers the same way, whether or not the address has an account. |
+| `/reset-password/` | Opened from the reset email. Sets the new password, then **revokes every session** of the account (all devices). |
+| `/verify-email/` | Landing page for the confirmation link; shows "confirmed", or an expired/invalid-link state with a resend form. |
+
+The six dashboard pages load `js/auth-gate.js`: with no stored login they redirect to `/login/` (remembering the page), and `js/account.js`
+sends you back there if the session later expires or you sign out (in this tab or another). A header chip shows who is signed in.
+The landing page, docs, legal pages and the market-data endpoints stay public.
+
+**What the page guard is, and is not.** The site is static files, so anyone can still download a page's HTML/JS — the guard is a
+convenience, not a lock. The real enforcement is on this server: bots, trades and saved exchange keys already require a valid account
+session and are isolated per account, and `PROXY_REQUIRES_LOGIN=true` extends that to the key-bearing proxy routes (below).
+
+**Supabase dashboard settings these flows depend on** (Authentication, in your project):
+
+1. *Sign In / Providers → Email*: enabled, **Confirm email = on**. The server already refuses unconfirmed accounts.
+2. *URL Configuration*: **Site URL** = `https://nxtgendecrypt.site`, and add these to **Redirect URLs**: `https://nxtgendecrypt.site/verify-email/`,
+   `https://nxtgendecrypt.site/reset-password/`, `https://nxtgendecrypt.site/login/` (plus your localhost origin when testing locally).
+   If they are missing, Supabase sends people to the Site URL instead and the email links will not land on the right page.
+3. *Password policy* (Sign In / Providers → Email): set the **minimum length to at least 10** and require letters + digits. The page checks
+   this in the browser for feedback, but **only Supabase enforces it** — a direct API call skips the page.
+4. *SMTP*: the built-in Supabase mailer is heavily rate-limited (a handful of emails per hour for the whole project) and meant for testing.
+   For real users configure your own SMTP provider, or sign-up/reset/resend emails will be refused ("Too many attempts").
+5. Optional hardening Supabase offers on paid plans: leaked-password protection, session time-box / inactivity timeout, CAPTCHA on sign-up.
+6. Optional **Google**: enable the Google provider in Supabase (Client ID/secret from Google Cloud, with Supabase's callback URL authorised),
+   then set `AUTH_GOOGLE_ENABLED=true` on this server. Without it no Google button is shown.
+
+| Variable | Meaning |
+|---|---|
+| `PROXY_REQUIRES_LOGIN` | `true` = `/api/verify`, `/balance`, `/order`, `/futures/*`, `/ai/confirm`, `/backtest/klines` need a signed-in account session (the pages send it automatically). Off by default. Fails closed (503) if accounts are not configured. |
+| `AUTH_GOOGLE_ENABLED` | `true` = show "Continue with Google" on the sign-in pages. Set only after the provider is enabled in Supabase. |
+
+Turn `PROXY_REQUIRES_LOGIN` on only after you and your users are signing in: until then the Futures worker (`/api/worker/*`, shared token)
+and bots keep working either way — the worker's own loopback calls carry the per-boot internal key and are exempt from the gate.
+
+**How "Remember me" works.** On: the login is kept in this browser's localStorage and survives closing it. Off: it is kept in
+sessionStorage and ends when the tab/browser closes. How long Supabase keeps the *refresh token* valid is a project setting
+(Supabase's default is until sign-out); the page cannot shorten that.
+
+**Known limits.**
+- Login tokens live in browser storage (that is how the existing account module and Supabase's own client work), so a cross-site-scripting bug
+  on this site would expose them. The auth pages ship a strict Content-Security-Policy (`script-src 'self'`) for that reason; the dashboard pages
+  do not yet (their inline handlers/styles would need to be removed first). GitHub Pages cannot set HTTP headers, so framing protection
+  (`X-Frame-Options`/`frame-ancestors`) is not available unless you put the site behind Cloudflare or similar.
+- Cookies are not used, so CSRF does not apply to the API; it authenticates with a bearer token in the `Authorization` header.
+- Rate limiting of sign-in/sign-up/reset attempts is Supabase's (per IP/email), not this server's, because the browser talks to Supabase directly.
+- The Futures worker (`/api/worker/*`) is still single-owner (shared `WORKER_TOKEN`), as noted above.
+- Terms and Privacy pages have not been updated for the fact that you now store emails and encrypted exchange credentials — that wording is yours to write.
+
 ### Tests
 
 ```
@@ -316,6 +372,10 @@ node tests/bots.test.mjs                                                        
 node --import ./tests/_stubs/register.mjs tests/botRoutes.test.mjs              # HTTP layer (no express needed)
 node --import ./tests/_stubs/register.mjs tests/accounts.test.mjs               # accounts: isolation, saved-key swap, claim, invites
 node tests/account-client.test.mjs                                              # browser account module (stubbed DOM)
+node tests/auth-utils.test.mjs                                                  # sign-in helpers: open-redirect guard, password rules, email-link parsing
+node tests/auth-gate.test.mjs                                                   # PROXY_REQUIRES_LOGIN gate, negative token cache, public auth config
+node tests/auth-flows.test.mjs                                                  # remember-me storage, sign-up/reset/resend, recovery, Google marker
+node tests/auth-gate-client.test.mjs                                            # dashboard redirect on missing/expired session, token attachment with the gate on
 ```
 These prove the engine's logic and the key handling. They do **not** prove the real Bybit/Binance endpoints
 behave like the simulator — run on **Demo with a small amount** before trusting real money to it.

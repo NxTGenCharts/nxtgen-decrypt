@@ -18,6 +18,11 @@
 //   BOT_SUPABASE_URL      (already used for the bot database)
 //   SUPABASE_ANON_KEY     the project's publishable/anon key (Project Settings → API Keys). Enables accounts.
 //   ACCOUNTS_REQUIRED     optional "true": refuse the old shared-token path entirely (see bots.js)
+//   PROXY_REQUIRES_LOGIN  optional "true": every key-bearing POST (/api/verify, /balance, /order, /futures/*, …) needs a signed-in
+//                         account session, so strangers cannot use this server as a free exchange-signing proxy. Off by default
+//                         so the rollout cannot break anything; see gateProxy() below and the README.
+//   AUTH_GOOGLE_ENABLED   optional "true": tells the sign-in pages to offer "Continue with Google". Only set it once the Google
+//                         provider is enabled in Supabase (Authentication -> Providers) — it is not checked from here.
 //   ALLOWED_EMAILS        optional invite list: comma-separated addresses and/or @domains. When set, only those emails get a
 //                         vault and a bot engine on this server (anyone can still create a Supabase login — they just can't use this).
 //                         When unset, any confirmed account can — see the README before leaving it open.
@@ -25,6 +30,7 @@
 import crypto from 'node:crypto';
 
 const CACHE_MS = 60_000;
+const NEGATIVE_CACHE_MS = 15_000;
 const PLACEHOLDER_RE = /^srv:(bybit|binance):(live|demo):/;
 
 export function createAuth({ env = process.env, log = console } = {}){
@@ -48,7 +54,8 @@ export function createAuth({ env = process.env, log = console } = {}){
     const hit = cache.get(id);
     if(hit && hit.exp > Date.now()) return hit.user;
     const res = await fetch(`${url}/auth/v1/user`, { headers: { apikey: anonKey, Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
-    if(res.status === 401 || res.status === 403){ cache.delete(id); return null; }
+    // Remember a rejection briefly, so a flood of requests with a bad token costs one lookup, not one per request.
+    if(res.status === 401 || res.status === 403){ cache.set(id, { user: null, exp: Date.now() + NEGATIVE_CACHE_MS }); return null; }
     if(!res.ok) throw new Error(`auth service ${res.status}`);
     const u = await res.json();
     if(!u || !u.id) return null;
@@ -100,11 +107,30 @@ export function createAuth({ env = process.env, log = console } = {}){
     }catch(e){ res.status(e.status || 503).json({ ok: false, code: e.code, message: e.status ? e.message : `Could not check your session (${e.message}).` }); }
   }
 
+  const proxyGateOn = String(env.PROXY_REQUIRES_LOGIN || '') === 'true';
   function mountConfig(app){
-    app.get('/api/auth/config', (req, res) => res.json(enabled ? { ok: true, enabled: true, url, anonKey } : { ok: true, enabled: false }));
+    const google = String(env.AUTH_GOOGLE_ENABLED || '') === 'true';
+    app.get('/api/auth/config', (req, res) => res.json(enabled ? { ok: true, enabled: true, url, anonKey, oauth: { google }, proxyGate: proxyGateOn } : { ok: true, enabled: false }));
+  }
+
+  // Opt-in (PROXY_REQUIRES_LOGIN=true). Without it these routes are stateless signing proxies that anyone can call with THEIR OWN
+  // exchange keys — they can never reach another user's saved keys (the srv: placeholder path always needs the owner's session).
+  // With it, the caller must also hold a valid account session. Skipped for: reads (market data), routes that run their own
+  // access control (/api/bots, /api/account, /api/worker, /api/auth), CORS preflights (answered earlier), and this server's own
+  // loopback calls from the bot engine / futures worker (they carry the per-boot internal key). Fails CLOSED when the flag is
+  // on but accounts are not configured, rather than silently leaving the routes open.
+  const OWN_AUTH = ['/api/bots', '/api/account', '/api/worker', '/api/auth'];
+  function gateProxy({ isInternal } = {}){
+    return (req, res, next) => {
+      if(!proxyGateOn || req.method !== 'POST' || !String(req.path).startsWith('/api/')) return next();
+      if(OWN_AUTH.some(p => req.path === p || req.path.startsWith(p + '/'))) return next();
+      if(isInternal && isInternal(req)) return next();
+      return requireUser(req, res, next);
+    };
   }
 
   if(enabled && !allow.length) log.warn && log.warn('[accounts] ALLOWED_EMAILS is not set — anyone who signs up can store exchange keys and run bots on this server. Set it to keep this invite-only.');
+  if(proxyGateOn && !enabled) log.warn && log.warn('[accounts] PROXY_REQUIRES_LOGIN is on but accounts are not configured — key-bearing routes will answer 503 until SUPABASE_ANON_KEY is set.');
   if(!enabled) log.info && log.info('[accounts] OFF — set BOT_SUPABASE_URL and SUPABASE_ANON_KEY to enable sign-in. The shared WORKER_TOKEN still works.');
-  return { enabled, userFromReq, requireUser, heldKeyMiddleware, mountConfig, hasBearer: (req) => !!bearer(req), setCredResolver(fn){ credResolver = fn; } };
+  return { enabled, proxyGateOn, userFromReq, requireUser, heldKeyMiddleware, gateProxy, mountConfig, hasBearer: (req) => !!bearer(req), setCredResolver(fn){ credResolver = fn; } };
 }

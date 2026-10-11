@@ -10,9 +10,13 @@
 //     That is how balances, margin checks and bot creation work on a phone that has never seen your key.
 //   * Placeholders are in-memory only (autotrade.js never persists them) and are removed on sign-out.
 //   * The login session is stored under "nxtgen-acct-session" — a HYPHEN, deliberately: backup.js only exports "nxtgen_"
-//     keys, so a login can never end up inside a backup file.
+//     keys, so a login can never end up inside a backup file. "Remember me" ON keeps it in localStorage (survives closing the
+//     browser); OFF keeps it in sessionStorage (gone when the tab/browser closes).
+//   * The sign-in PAGES (/login/, /register/, …) live in js/auth-pages.js and use the exports below; dashboard pages are
+//     guarded by js/auth-gate.js (no stored session -> /login/) plus the redirects at the bottom of this file.
 // =============================================================
 import { state } from './state.js';
+import { safeNext, DEFAULT_DESTINATION } from './auth-utils.js';
 
 const SESSION_KEY = 'nxtgen-acct-session';
 const LAST_USER_KEY = 'nxtgen-acct-last-user';
@@ -24,6 +28,10 @@ let session = null;           // { access_token, refresh_token, expires_at (ms),
 let keys = [];                // masked key summaries saved on the account: [{ exchange, mode, last4, fp, updatedAt }]
 let keysState = { loaded: false, enabled: true, reason: '' };
 let refreshTimer = null, refreshing = null, started = false;
+let persist = true;           // true = localStorage ("remember me"), false = sessionStorage (this browser session only)
+let endReason = '';           // why the last session ended: 'user' | 'expired'
+let configProblem = '';       // '' | 'unreachable' | 'disabled' — why accounts are not usable, when they are not
+const OAUTH_PENDING_KEY = 'nxtgen-oauth-pending';
 const listeners = new Set();
 
 const proxyBase = () => (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
@@ -37,22 +45,51 @@ export const savedKeys = () => keys.slice();
 export const hasSavedKey = (exchange, mode) => keys.some(k => k.exchange === exchange && k.mode === mode);
 
 // ---------- storage ----------
-function readStored(){ try{ return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); }catch(e){ return null; } }
-function writeStored(s){ try{ if(s) localStorage.setItem(SESSION_KEY, JSON.stringify(s)); else localStorage.removeItem(SESSION_KEY); }catch(e){ /* storage unavailable: the session just won't survive a reload */ } }
+function readStored(){
+  for(const [get, p] of [[() => localStorage, true], [() => sessionStorage, false]]){
+    try{ const v = JSON.parse(get().getItem(SESSION_KEY) || 'null'); if(v && v.access_token){ persist = p; return v; } }catch(e){ /* storage unavailable or corrupt: try the next one */ }
+  }
+  return null;
+}
+function writeStored(s){
+  // Never leave a copy in the store we are NOT using (that would silently turn "this session only" into "remembered").
+  // Only that other store is cleared first, so other tabs never see a transient "signed out" state during a refresh.
+  try{ (persist ? sessionStorage : localStorage).removeItem(SESSION_KEY); }catch(e){ /* */ }
+  try{
+    const store = persist ? localStorage : sessionStorage;
+    if(s) store.setItem(SESSION_KEY, JSON.stringify(s)); else store.removeItem(SESSION_KEY);
+  }catch(e){ /* storage unavailable: the session just won't survive a reload */ }
+}
 
 // ---------- Supabase Auth (GoTrue REST) ----------
-async function gotrue(path, body, token){
-  if(!config || !config.enabled) throw new Error('Accounts are not enabled on this server.');
-  const res = await fetch(`${config.url}/auth/v1${path}`, {
-    method: 'POST',
-    headers: { apikey: config.anonKey, 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    body: JSON.stringify(body || {}),
-  });
+const RATE_LIMITED = /rate.?limit|too many/i;
+function friendlyError(status, msg, code){
+  if(/invalid login credentials/i.test(msg) || code === 'invalid_credentials') return 'Wrong email or password.';   // deliberately the same whether or not the address has an account
+  if(code === 'email_not_confirmed' || /email not confirmed/i.test(msg)) return 'Confirm your email address first — check your inbox for the link.';
+  if(status === 429 || RATE_LIMITED.test(code || '') || RATE_LIMITED.test(msg)) return 'Too many attempts. Please wait a minute and try again.';
+  if(status >= 500) return 'The sign-in service is having trouble. Please try again shortly.';
+  return msg;
+}
+async function gotrue(path, body, token, method){
+  if(!config || !config.enabled) throw Object.assign(new Error('Accounts are not enabled on this server.'), { code: 'accounts_disabled' });
+  let res;
+  try{
+    res = await fetch(`${config.url}/auth/v1${path}`, {
+      method: method || 'POST',
+      headers: { apikey: config.anonKey, 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: method === 'GET' ? undefined : JSON.stringify(body || {}),
+    });
+  }catch(err){
+    throw Object.assign(new Error('Could not reach the sign-in service. Check your connection and try again.'), { code: 'network', status: 0 });
+  }
   const data = await res.json().catch(() => ({}));
   if(!res.ok){
-    const msg = data.error_description || data.msg || data.message || data.error || `Sign-in service error (${res.status})`;
-    const e = new Error(/invalid login credentials/i.test(msg) ? 'Wrong email or password.' : msg);
-    e.status = res.status; throw e;
+    const raw = data.error_description || data.msg || data.message || data.error || `Sign-in service error (${res.status})`;
+    const code = data.error_code || data.code || '';
+    const e = new Error(friendlyError(res.status, String(raw), String(code)));
+    e.status = res.status; e.code = typeof code === 'string' ? code : '';
+    if(/email not confirmed/i.test(String(raw))) e.code = 'email_not_confirmed';
+    throw e;
   }
   return data;
 }
@@ -96,6 +133,11 @@ function needsAuth(url, init){
   if(!base || !url.startsWith(base + '/')) return false;
   const path = url.slice(base.length);
   if(path.startsWith('/api/bots') || path.startsWith('/api/account')) return true;
+  if(path.startsWith('/api/worker') || path.startsWith('/api/auth')) return false;   // the worker has its own token; auth config is public
+  // Only when the server says it requires a login for key-bearing POSTs (PROXY_REQUIRES_LOGIN=true, advertised as
+  // config.proxyGate) do those requests carry the session. Otherwise they stay exactly as before, and public GETs
+  // (market data) are always plain, preflight-free requests.
+  if(config && config.proxyGate && init && String(init.method || 'GET').toUpperCase() === 'POST') return true;
   return !!(init && typeof init.body === 'string' && init.body.includes('"srv:'));
 }
 function installFetchAuth(){
@@ -118,16 +160,58 @@ function installFetchAuth(){
 }
 
 // ---------- sign up / in / out ----------
+const here = () => (typeof location !== 'undefined' && location.origin) || '';
+const redirectTo = (path) => `redirect_to=${encodeURIComponent(here() + path)}`;
+
 export async function signUp(email, password){
-  const d = await gotrue('/signup', { email: String(email).trim(), password });
-  if(d.access_token){ await beginSession(toSession(d)); return { signedIn: true }; }
-  return { signedIn: false, message: 'Account created. Check your email and confirm the address, then sign in.' };
+  const d = await gotrue(`/signup?${redirectTo('/verify-email/')}`, { email: String(email).trim(), password });
+  if(d.access_token){ persist = true; await beginSession(toSession(d)); return { signedIn: true }; }
+  // Same wording whether the address is new or already registered — Supabase answers both the same way, and so do we.
+  return { signedIn: false, message: 'If this address can be registered, a confirmation link is on its way.' };
 }
-export async function signIn(email, password){
+export async function signIn(email, password, opts){
   const d = await gotrue('/token?grant_type=password', { email: String(email).trim(), password });
+  persist = !(opts && opts.remember === false);
   await beginSession(toSession(d));
 }
-export async function resetPassword(email){ await gotrue('/recover', { email: String(email).trim() }); }
+export async function resendVerification(email){ await gotrue(`/resend?${redirectTo('/verify-email/')}`, { type: 'signup', email: String(email).trim() }); }
+export async function resetPassword(email){ await gotrue(`/recover?${redirectTo('/reset-password/')}`, { email: String(email).trim() }); }
+
+// Sets a new password using the short-lived token from a recovery email, then revokes every session of that account (all
+// devices, including any open in this browser). The recovery token is never turned into a login: the user signs in afresh.
+export async function setNewPassword(recoveryToken, newPassword){
+  await gotrue('/user', { password: newPassword }, recoveryToken, 'PUT');
+  let allSignedOut = true;
+  try{ await gotrue('/logout?scope=global', {}, recoveryToken); }catch(e){ allSignedOut = false; }
+  if(isSignedIn()) await endSession(false);
+  return { allSignedOut };
+}
+
+// ---------- Google (optional; the server only advertises it when AUTH_GOOGLE_ENABLED=true and Supabase has the provider on) ----------
+export const oauthAvailable = (provider) => !!(config && config.enabled && config.oauth && config.oauth[provider]);
+export function startOAuth(provider){
+  if(!oauthAvailable(provider)) throw new Error('That sign-in method is not available.');
+  // A marker that only THIS browser tab holds. We refuse to finish an OAuth sign-in from a URL fragment unless we started it,
+  // so a crafted link cannot sign a victim into someone else's account (login fixation).
+  try{ sessionStorage.setItem(OAUTH_PENDING_KEY, String(Date.now())); }catch(e){ throw new Error('Your browser blocked storage, which sign-in needs.'); }
+  location.assign(`${config.url}/auth/v1/authorize?provider=${encodeURIComponent(provider)}&${redirectTo('/login/')}`);
+}
+export async function finishOAuth(tokens){
+  let started = 0;
+  try{ started = Number(sessionStorage.getItem(OAUTH_PENDING_KEY)) || 0; sessionStorage.removeItem(OAUTH_PENDING_KEY); }catch(e){ /* */ }
+  if(!started || Date.now() - started > 10 * 60_000) throw new Error('That sign-in link is not valid here. Please start again.');
+  if(!tokens || !tokens.accessToken || !tokens.refreshToken) throw new Error('The sign-in did not complete. Please try again.');
+  const user = await gotrue('/user', null, tokens.accessToken, 'GET');
+  persist = true;
+  await beginSession(toSession({ access_token: tokens.accessToken, refresh_token: tokens.refreshToken, expires_in: tokens.expiresIn, expires_at: tokens.expiresAt, user }));
+}
+
+// After signing in: can this account actually use the server? (e.g. the invite list may not include it)
+export async function checkAccess(){
+  try{ const r = await accountApi('/api/account/me'); return { ok: !!r.ok, code: r.code || '', message: r.message || '' }; }
+  catch(e){ return { ok: false, code: 'unreachable', message: e.message }; }
+}
+
 export async function signOut(){
   const t = session && session.access_token;
   if(t) gotrue('/logout', {}, t).catch(() => {});
@@ -151,6 +235,7 @@ async function beginSession(s){
   await refreshKeys();
 }
 async function endSession(userInitiated){
+  endReason = userInitiated ? 'user' : 'expired';
   if(refreshTimer){ clearTimeout(refreshTimer); refreshTimer = null; }
   session = null; keys = []; keysState = { loaded: false, enabled: true, reason: '' };
   writeStored(null);
@@ -313,7 +398,7 @@ function mountAccountCard(host){
       say('Accounts are not switched on for this server yet. Add SUPABASE_ANON_KEY to the server\u2019s environment (see server/README.md) and redeploy \u2014 until then keys stay on this device only.');
     } else if(!isSignedIn()){
       say('Sign in to carry your exchange keys, bots and trade history to any device. Keys you save to your account are stored encrypted on the server and are never sent back to a browser \u2014 other devices use them through the server.');
-      btn('Sign in', () => openAuthModal('signin'), true); btn('Create account', () => openAuthModal('signup'));
+      btn('Sign in', () => { location.assign(loginUrl('/api-keys/')); }, true); btn('Create account', () => { location.assign('/register/'); });
     } else {
       say(`Signed in as ${accountEmail()}`, 'font-weight:600;');
       const ks = savedKeys();
@@ -336,7 +421,9 @@ export async function initAccount(){
   try{
     const res = await fetch(`${proxyBase()}/api/auth/config`);
     config = await res.json();
-  }catch(e){ config = { enabled: false }; }
+    configProblem = config && config.enabled ? '' : 'disabled';
+  }catch(e){ config = { enabled: false }; configProblem = 'unreachable'; }
+  mountUserChip();
   if(!config || !config.enabled){ emit('ready'); return; }
   const stored = readStored();
   if(stored && stored.access_token){
@@ -348,8 +435,42 @@ export async function initAccount(){
     if(e.key !== SESSION_KEY) return;
     const s = readStored();
     if(s && s.access_token){ const was = isSignedIn(); session = s; schedule(); if(!was){ emit('signin'); refreshKeys(); } }
-    else if(isSignedIn()){ session = null; keys = []; clearHeldKeys(); emit('signout'); }
+    else if(isSignedIn()){ endReason = 'user'; session = null; keys = []; clearHeldKeys(); emit('signout'); }
   });
   document.addEventListener('visibilitychange', () => { if(!document.hidden && isSignedIn()) freshToken().catch(() => {}); });
+  // Dashboard pages (js/auth-gate.js marks them): leave for the login page whenever there is no valid session — now, or later
+  // when it expires or the user signs out (here or in another tab).
+  onAccountChange((type) => { if(type === 'signout') gateRedirect(endReason === 'user' ? 'signedout' : 'expired'); });
+  if(!isSignedIn()) gateRedirect(endReason === 'expired' ? 'expired' : 'required');
   emit('ready');
+}
+
+// ---------- page protection helpers ----------
+export const accountsProblem = () => configProblem;      // '' | 'unreachable' | 'disabled'
+export function loginUrl(next, reason){
+  const q = new URLSearchParams();
+  const n = safeNext(next || (typeof location !== 'undefined' ? location.pathname + location.search : ''), here() || undefined);
+  if(n !== DEFAULT_DESTINATION) q.set('next', n);
+  if(reason) q.set('reason', reason);
+  const qs = q.toString();
+  return '/login/' + (qs ? '?' + qs : '');
+}
+function gateRedirect(reason){
+  if(typeof window === 'undefined' || !window.__nxtgenProtected || !accountsAvailable()) return;
+  location.replace(loginUrl(location.pathname + location.search, reason));
+}
+
+// Small "who am I / sign out" chip in the dashboard header.
+function mountUserChip(){
+  const host = document.querySelector && document.querySelector('.status-cluster');
+  if(!host || !window.__nxtgenProtected || document.getElementById('nxUserChip')) return;
+  const chip = css(h('div'), 'display:none;align-items:center;gap:8px;font-family:var(--mono,monospace);font-size:11px;color:var(--dim,#7f9385);max-width:100%;');
+  chip.id = 'nxUserChip';
+  const who = css(h('span'), 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(240px,50vw);');
+  const out = css(h('button', null, 'Sign out'), 'background:none;border:1px solid var(--line,#212a23);border-radius:6px;color:var(--ink-dim,#aebcb2);cursor:pointer;font:inherit;padding:4px 8px;min-height:28px;');
+  out.type = 'button'; out.setAttribute('aria-label', 'Sign out of NxTGen DeCrypt');
+  out.addEventListener('click', () => { out.disabled = true; signOut(); });
+  chip.append(who, out); host.insertBefore(chip, host.firstChild);
+  const paint = () => { const on = isSignedIn(); chip.style.display = on ? 'flex' : 'none'; who.textContent = on ? accountEmail() : ''; who.title = on ? accountEmail() : ''; };
+  paint(); onAccountChange(paint);
 }

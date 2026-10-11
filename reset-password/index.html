@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src https: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'self'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Choose a new password — NxTGen DeCrypt</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#f0b429">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/css/main.css">
+<link rel="stylesheet" href="/css/components.css">
+<link rel="stylesheet" href="/css/brand.css">
+<link rel="stylesheet" href="/css/auth.css">
+</head>
+<body class="auth-body" data-auth-page="reset">
+<main class="auth-shell solo" id="main">
+  <section class="auth-card" aria-labelledby="authTitle">
+    <a class="auth-brand" href="/" aria-label="NxTGen DeCrypt — Crypto Terminal, home"><span class="bm" data-still role="img" aria-label="NxTGen DeCrypt — Crypto Terminal"><span class="bm-stage"><span class="bm-glow"></span><span class="bm-p bm-word"><img src="/assets/brand/word.png" alt="" width="671" height="209" decoding="async" fetchpriority="high"><span class="bm-sheen"></span></span><span class="bm-p bm-tag"><img src="/assets/brand/tag.png" alt="" width="671" height="20" decoding="async"></span></span></span></a>
+    <h1 id="authTitle">Choose a New Password</h1>
+    <p class="auth-sub" id="authSub">Set a new password for your account.</p>
+    <div id="authAlert" class="auth-alert" role="status" aria-live="polite" hidden></div>
+    <form class="auth-form" id="authForm" novalidate>
+        <div class="field">
+          <label for="password">New password</label>
+          <div class="pw-wrap">
+            <input id="password" name="password" type="password" autocomplete="new-password" autocapitalize="none" spellcheck="false" maxlength="256" required aria-describedby="passwordErr passwordHint">
+            <button class="pw-toggle" type="button" data-pw-toggle="password" aria-label="Show password" aria-pressed="false">SHOW</button>
+          </div>
+          <div class="field-error" id="passwordErr"></div>
+          <div class="field-hint" id="passwordHint">At least 10 characters, with letters and numbers.</div><div class="pw-meter" id="pwMeter" data-score="0" aria-hidden="true"><i></i><i></i><i></i><i></i></div><div class="pw-strength" id="pwStrength" aria-live="polite"></div>
+        </div>
+        <div class="field">
+          <label for="confirm">Confirm new password</label>
+          <div class="pw-wrap">
+            <input id="confirm" name="confirm" type="password" autocomplete="new-password" autocapitalize="none" spellcheck="false" maxlength="256" required aria-describedby="confirmErr">
+            <button class="pw-toggle" type="button" data-pw-toggle="confirm" aria-label="Show password" aria-pressed="false">SHOW</button>
+          </div>
+          <div class="field-error" id="confirmErr"></div>
+          
+        </div>
+        <button class="primary auth-submit" id="submitBtn" type="submit">Update Password</button>
+    </form>
+    <div class="auth-state" id="stateDone" hidden>
+      <div class="state-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></div>
+      <p><strong>Your password has been updated.</strong> <span id="allSignedOut"></span></p>
+      <a class="primary-link" href="/login/?reason=reset" data-focus>Go to sign in</a>
+    </div>
+    <div class="auth-state" id="stateExpired" hidden>
+      <div class="state-icon is-warn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4M12 17h.01"/><path d="m10.3 3.9-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3l-8-14a2 2 0 0 0-3.4 0z"/></svg></div>
+      <p><strong>This reset link has expired or was already used.</strong> Reset links work once and only for a short time.</p>
+      <a class="primary-link" href="/forgot-password/" data-focus>Request a new link</a>
+    </div>
+    <div class="auth-state" id="stateInvalid" hidden>
+      <div class="state-icon is-warn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4M12 17h.01"/><path d="m10.3 3.9-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3l-8-14a2 2 0 0 0-3.4 0z"/></svg></div>
+      <p><strong>This page opens from the link in your password reset email.</strong> If you have not requested one yet, start here.</p>
+      <a class="primary-link" href="/forgot-password/" data-focus>Reset my password</a>
+    </div>
+    <a class="auth-link auth-open" id="openTerminal" href="/overview/" hidden>Continue to the terminal &rarr;</a>
+    <p class="auth-switch"><a class="auth-link" href="/login/">&larr; Back to sign in</a></p>
+  </section>
+  
+</main>
+<footer class="auth-foot">
+  <span>&copy; <span id="year">2026</span> NxTGen DeCrypt</span>
+  <a href="/privacy/">Privacy Policy</a>
+  <a href="/terms/">Terms of Service</a>
+  <a href="/contact/">Contact</a>
+</footer>
+<script type="module" src="/js/auth-pages.js"></script>
+</body>
+</html>

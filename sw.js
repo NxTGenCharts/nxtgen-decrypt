@@ -13,7 +13,7 @@
 // on the very next load (no stale-app trap), while a slow or dead
 // connection still opens the app from cache after ~3.5s.
 // =============================================================
-const VERSION = 'nxtgen-shell-v49';
+const VERSION = 'nxtgen-shell-v50';
 const NETWORK_TIMEOUT_MS = 3500;
 const PRECACHE = [
   "/",
@@ -30,6 +30,15 @@ const PRECACHE = [
   "/autotrade-futures/",
   "/utilities-tools/",
   "/api-keys/",
+  "/login/",
+  "/register/",
+  "/forgot-password/",
+  "/reset-password/",
+  "/verify-email/",
+  "/css/auth.css",
+  "/js/auth-pages.js",
+  "/js/auth-utils.js",
+  "/js/auth-gate.js",
   "/manifest.webmanifest",
   "/assets/logo.png",
   "/assets/brand/word.png",

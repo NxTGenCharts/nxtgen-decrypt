@@ -48,7 +48,18 @@ app.use(cors({
 const auth = createAuth();
 auth.mountConfig(app);
 app.use('/api/account', rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
+// API responses are JSON for programs, never pages: no sniffing, no referrer leakage, and nothing account-related is cached.
+app.use((req, res, next) => {
+  res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
+  if(req.path.startsWith('/api/account') || req.path.startsWith('/api/bots') || req.path.startsWith('/api/auth')) res.set('Cache-Control', 'no-store');
+  next();
+});
 app.use(auth.heldKeyMiddleware);
+// Optional (PROXY_REQUIRES_LOGIN=true): key-bearing POST routes need an account session. Only FAILED attempts are counted here
+// (skipSuccessfulRequests), so signed-in users are never throttled by this, but a flood of bad tokens can't turn into a flood of
+// lookups against the auth service.
+if(auth.proxyGateOn) app.use('/api', rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false, skipSuccessfulRequests: true, skip: (req) => req.method !== 'POST' || isInternalCall(req) }));
+app.use(auth.gateProxy({ isInternal: isInternalCall }));
 
 // Basic abuse guard — each caller gets a modest number of verify attempts
 // per minute. This is not a substitute for putting this behind your own
@@ -4809,6 +4820,6 @@ app.get('/health', (req, res) => res.json({ ok: true, t: Date.now() }));
 const port = process.env.PORT || 8787;
 const selfBaseUrl = `http://127.0.0.1:${port}`;
 // Always-on pieces that keep trading with no browser open: the Futures Engine worker (Auto mode) and the server-side Trading Bots.
-attachWorker(app, selfBaseUrl);
+attachWorker(app, selfBaseUrl, { internalKey: INTERNAL_KEY });
 attachBots(app, { baseUrl: selfBaseUrl, internalKey: INTERNAL_KEY, auth });
 app.listen(port, () => console.log(`nxtgen-verify-proxy listening on :${port}`));

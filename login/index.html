@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src https: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'self'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Sign in — NxTGen DeCrypt</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#f0b429">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/css/main.css">
+<link rel="stylesheet" href="/css/components.css">
+<link rel="stylesheet" href="/css/brand.css">
+<link rel="stylesheet" href="/css/auth.css">
+</head>
+<body class="auth-body" data-auth-page="login">
+<main class="auth-shell" id="main">
+  <section class="auth-card" aria-labelledby="authTitle">
+    <a class="auth-brand" href="/" aria-label="NxTGen DeCrypt — Crypto Terminal, home"><span class="bm" data-still role="img" aria-label="NxTGen DeCrypt — Crypto Terminal"><span class="bm-stage"><span class="bm-glow"></span><span class="bm-p bm-word"><img src="/assets/brand/word.png" alt="" width="671" height="209" decoding="async" fetchpriority="high"><span class="bm-sheen"></span></span><span class="bm-p bm-tag"><img src="/assets/brand/tag.png" alt="" width="671" height="20" decoding="async"></span></span></span></a>
+    <h1 id="authTitle">Welcome Back</h1>
+    <p class="auth-sub" id="authSub">Sign in to access your crypto terminal.</p>
+    <div id="authAlert" class="auth-alert" role="status" aria-live="polite" hidden></div>
+    <form class="auth-form" id="authForm" novalidate>
+        <div class="field">
+          <label for="email">Email address</label>
+          <input id="email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" spellcheck="false" placeholder="you@example.com" maxlength="254" required aria-describedby="emailErr">
+          <div class="field-error" id="emailErr"></div>
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <div class="pw-wrap">
+            <input id="password" name="password" type="password" autocomplete="current-password" autocapitalize="none" spellcheck="false" maxlength="256" required aria-describedby="passwordErr">
+            <button class="pw-toggle" type="button" data-pw-toggle="password" aria-label="Show password" aria-pressed="false">SHOW</button>
+          </div>
+          <div class="field-error" id="passwordErr"></div>
+          
+        </div>
+        <div class="auth-row">
+          <label class="auth-check"><input id="remember" type="checkbox" checked><span>Remember me on this device</span></label>
+          <a class="auth-link" href="/forgot-password/">Forgot password?</a>
+        </div>
+        <button class="primary auth-submit" id="submitBtn" type="submit">Sign In</button>
+        <div class="auth-divider" id="orDivider" hidden><span>OR CONTINUE WITH</span></div>
+        <button class="primary ghost auth-google" id="googleBtn" type="button" hidden>Continue with Google</button>
+    </form>
+    <a class="auth-link auth-open" id="openTerminal" href="/overview/" hidden>Continue to the terminal &rarr;</a>
+    <p class="auth-switch">New to NxTGen DeCrypt? <a class="auth-link" href="/register/">Create an account</a></p>
+  </section>
+  <aside class="auth-panel" aria-label="About NxTGen DeCrypt">
+      <div class="term-panel">
+        <div class="caption">Crypto Terminal</div>
+        <h2>Arbitrage scanning, futures tooling and 24/7 server-side bots.</h2>
+        <p>One account carries your bots, trade history and saved exchange keys to every device you sign in from.</p>
+        <ul class="term-list">
+          <li><b>Triangular Arbitrage</b><span>Cycle scanner across the spot pairs loaded from your exchanges.</span></li>
+          <li><b>Cross-Exchange</b><span>Spread scanner across Bitget, Binance, Bybit, MEXC and Gate.io.</span></li>
+          <li><b>Futures Engine</b><span>Signal scoring, paper trading and Live/Demo execution.</span></li>
+          <li><b>Trading Bots</b><span>Grid, DCA and Smart bots that keep running on the server (Bybit and Binance).</span></li>
+        </ul>
+        <div class="term-note">Exchange secrets saved to your account are encrypted on the server and never sent back to your browser. Use trade-only API keys with withdrawals disabled.</div>
+      </div>
+    </aside>
+</main>
+<footer class="auth-foot">
+  <span>&copy; <span id="year">2026</span> NxTGen DeCrypt</span>
+  <a href="/privacy/">Privacy Policy</a>
+  <a href="/terms/">Terms of Service</a>
+  <a href="/contact/">Contact</a>
+</footer>
+<script type="module" src="/js/auth-pages.js"></script>
+</body>
+</html>
