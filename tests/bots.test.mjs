@@ -258,3 +258,112 @@ test('delete is refused while a bot runs, allowed once stopped; trade history is
   assert.equal(store.state.tradingBots.length, 0);
   assert.equal(store.state.trades.length, trades);
 });
+
+// ---------------- free-database storage (Render free plan has no persistent disk) ----------------
+function fakeDb(){
+  const db = { rows: new Map(), posts: 0, gets: 0, down: false };
+  db.fetch = async (url, init = {}) => {
+    if(db.down) throw new Error('connection refused');
+    const method = init.method || 'GET';
+    if(!String(url).includes('/rest/v1/nxtgen_bots_kv')) return { ok: false, status: 404, text: async () => 'no such table' };
+    if(method === 'GET'){ db.gets++; return { ok: true, status: 200, json: async () => [...db.rows].map(([k, v]) => ({ k, v })) }; }
+    db.posts++;
+    for(const r of JSON.parse(init.body)) db.rows.set(r.k, r.v);
+    return { ok: true, status: 201, json: async () => null };
+  };
+  return db;
+}
+const REMOTE = { url: 'https://example.supabase.co', key: 'sb_secret_test' };
+async function withDb(db, fn){ const real = globalThis.fetch; globalThis.fetch = db.fetch; try{ return await fn(); } finally { globalThis.fetch = real; } }
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+test('database mode: keys + bots + trades survive a restart, and no secret reaches the database in plain text', async () => {
+  const db = fakeDb();
+  await withDb(db, async () => {
+    const s1 = openBotStore({ vaultKey: VAULT_KEY, remote: REMOTE, log: quiet, writeDelayMs: 5 }); await s1.ready;
+    await s1.setCred('bybit', 'demo', KEYS);
+    s1.state.tradingBots.push({ id: 'BOT-GRID-1-aaaa', type: 'grid', status: 'active', runtime: {} });
+    s1.state.trades.unshift({ id: 't1', closedAtMs: 1, netUsd: 2 });
+    s1.touch(); await s1.flushNow();
+    const dump = JSON.stringify([...db.rows]);
+    assert.ok(!dump.includes(KEYS.secretKey) && !dump.includes(KEYS.apiKey), 'plain key found in the database');
+    const s2 = openBotStore({ vaultKey: VAULT_KEY, remote: REMOTE, log: quiet, writeDelayMs: 5 }); await s2.ready;
+    assert.deepEqual(s2.getCred('bybit', 'demo'), KEYS);
+    assert.equal(s2.state.tradingBots[0].id, 'BOT-GRID-1-aaaa');
+    assert.equal(s2.state.trades[0].id, 't1');
+    assert.equal(s2.persistence, 'database');
+  });
+});
+
+test('database mode: many touches become one write; flushNow writes immediately', async () => {
+  const db = fakeDb();
+  await withDb(db, async () => {
+    const s = openBotStore({ vaultKey: VAULT_KEY, remote: REMOTE, log: quiet, writeDelayMs: 60 }); await s.ready;
+    for(let i = 0; i < 25; i++) s.touch();
+    assert.equal(db.posts, 0);
+    await sleep(120);
+    assert.equal(db.posts, 1, 'heartbeat touches must be coalesced');
+    s.touch(); await s.flushNow();
+    assert.equal(db.posts, 2);
+  });
+});
+
+test('database mode: if the database is unreachable at boot the bots stay OFF and nothing is overwritten', async () => {
+  const db = fakeDb();
+  db.rows.set('state', { tradingBots: [{ id: 'BOT-DCA-9-zzzz', status: 'active' }] });
+  db.down = true;
+  await withDb(db, async () => {
+    const s = openBotStore({ vaultKey: VAULT_KEY, remote: REMOTE, log: quiet, writeDelayMs: 5, retryMs: 15 });
+    await sleep(60);
+    assert.equal(s.enabled, false);
+    assert.match(s.reason, /Could not read the bot database/);
+    s.touch(); await s.flushNow();
+    assert.equal(db.posts, 0, 'must not write an empty state over saved data');
+    db.down = false;
+    await s.ready;
+    assert.equal(s.enabled, true);
+    assert.equal(s.state.tradingBots[0].id, 'BOT-DCA-9-zzzz', 'the saved bot is loaded once the database is back');
+  });
+});
+
+test('database mode: a failed save is kept and retried, not lost', async () => {
+  const db = fakeDb();
+  await withDb(db, async () => {
+    const s = openBotStore({ vaultKey: VAULT_KEY, remote: REMOTE, log: quiet, writeDelayMs: 5 }); await s.ready;
+    s.state.tradingBots.push({ id: 'BOT-GRID-2-bbbb', status: 'active' });
+    db.down = true; s.touch(); await s.flushNow();
+    assert.equal(db.posts, 0);
+    db.down = false; await s.flushNow();
+    assert.equal(db.posts, 1);
+    assert.equal(db.rows.get('state').tradingBots[0].id, 'BOT-GRID-2-bbbb');
+  });
+});
+
+test('database mode: the engine saves at once when orders change, but not for a quiet heartbeat', async () => {
+  const db = fakeDb();
+  await withDb(db, async () => {
+    const store = openBotStore({ vaultKey: VAULT_KEY, remote: REMOTE, log: quiet, writeDelayMs: 600_000 }); await store.ready;
+    const ex = makeExchange(100);
+    const engine = createBotEngine({ store, callProxy: ex.call, fetchSnapshot: async () => ex.snapshot(), log: quiet, cycleMs: 3_600_000 });
+    await store.setCred('bybit', 'demo', KEYS);
+    const bot = engine.handoff(gridBot());
+    await engine.deploying.get(bot.id);
+    assert.ok(db.rows.get('state').tradingBots.some(b => b.id === bot.id && b.status === 'active'), 'deployed bot is saved immediately');
+    const quiet0 = db.posts;
+    await engine.runCycle();
+    assert.equal(db.posts, quiet0, 'a cycle where nothing changed must not hit the database');
+    ex.step(92); await engine.runCycle();   // entries fill, take-profit orders get placed
+    assert.ok(db.posts > quiet0, 'new order ids are saved right away');
+    const saved = db.rows.get('state').tradingBots[0].runtime.levels.filter(l => l.status === 'PENDING_CLOSE');
+    assert.ok(saved.length >= 1 && saved.every(l => l.closeOrderId), 'the saved copy knows its resting take-profits');
+    ex.step(106); await engine.runCycle();
+    assert.ok(db.rows.get('trades').length >= 1, 'a booked trade is saved immediately');
+  });
+});
+
+test('on Render with no database and no disk path the bots refuse to run (the free disk would forget them)', () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'nxbots-'));
+  const s = openBotStore({ dir: d, vaultKey: VAULT_KEY, disabledReason: 'ephemeral disk', log: quiet });
+  assert.equal(s.enabled, false);
+  assert.throws(() => s.setCred('bybit', 'demo', KEYS), /ephemeral/);
+});

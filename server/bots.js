@@ -19,7 +19,14 @@ import { requireRole } from './worker.js';
 const PROXY_TIMEOUT_MS = 30_000;
 
 export function attachBots(app, { baseUrl, internalKey, env = process.env, log = console, startEngine = true } = {}){
-  const store = openBotStore({ dir: env.BOT_DATA_DIR, vaultKey: env.BOT_VAULT_KEY, log });
+  // Where bots are saved. Render's free plan wipes its disk on every restart/spin-down, so on Render WITHOUT a database or
+  // a mounted disk path we refuse to run bots rather than let them be forgotten while their orders sit on the exchange.
+  const remote = env.BOT_SUPABASE_URL && env.BOT_SUPABASE_KEY ? { url: env.BOT_SUPABASE_URL, key: env.BOT_SUPABASE_KEY } : null;
+  const ephemeral = !remote && !env.BOT_DATA_DIR && String(env.RENDER || '') === 'true';
+  const disabledReason = ephemeral
+    ? 'This Render service has no persistent storage for the bots: its disk is erased on every restart. Set BOT_SUPABASE_URL + BOT_SUPABASE_KEY (free database) or add a paid disk and set BOT_DATA_DIR.'
+    : null;
+  const store = openBotStore({ dir: env.BOT_DATA_DIR, vaultKey: env.BOT_VAULT_KEY, remote, disabledReason, log });
   const internalHeaders = { 'Content-Type': 'application/json', 'x-nxtgen-internal': internalKey || '' };
 
   // The engine calls this server's own /api/futures/* routes — exactly what the browser calls — in-process over loopback.
@@ -38,13 +45,15 @@ export function attachBots(app, { baseUrl, internalKey, env = process.env, log =
   }
 
   const engine = createBotEngine({ store, callProxy, fetchSnapshot, log });
-  if(store.enabled && startEngine) engine.start();
-  else if(!store.enabled) log.warn && log.warn(`[bots] server-side bots are OFF: ${store.reason}`);
-  else log.info && log.info('[bots] engine created but not started');
+  if(!store.enabled) log.warn && log.warn(`[bots] server-side bots are OFF: ${store.reason}`);
+  if(startEngine){
+    // start once the saved bots are loaded (immediate for a disk, after the first successful read for the database)
+    store.ready.then(() => { if(store.enabled) engine.start(); else log.warn && log.warn(`[bots] not starting the engine: ${store.reason}`); });
+  } else log.info && log.info('[bots] engine created but not started');
 
   const bigJson = express.json({ limit: '512kb' });
-  const guard = (req, res, next) => store.enabled ? next()
-    : res.status(503).json({ ok: false, code: 'vault_disabled', message: `Server-side bots are not enabled: ${store.reason} Set BOT_VAULT_KEY (32+ random characters) and BOT_DATA_DIR (a persistent disk) on the server, then redeploy.` });
+  const guard = (req, res, next) => (store.enabled) ? next()
+    : res.status(503).json({ ok: false, code: 'vault_disabled', message: `Server-side bots are not enabled: ${store.reason} Fix this on the server (see server/README.md), then redeploy.` });
   const wrap = (fn) => async (req, res) => {
     try{ res.json({ ok: true, ...(await fn(req)) }); }
     catch(err){
@@ -61,7 +70,7 @@ export function attachBots(app, { baseUrl, internalKey, env = process.env, log =
     res.json({
       ok: true, enabled: store.enabled, reason: store.reason, role: req.workerRole, serverTime: Date.now(),
       exchanges: BOT_EXCHANGES, creds: credSummary(), bots: snap.bots.map(botView), day: snap.day,
-      persistent: !!store.enabled,
+      storage: store.persistence,
     });
   });
 

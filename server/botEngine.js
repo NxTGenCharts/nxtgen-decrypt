@@ -779,6 +779,17 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
 
   // ---------------- server-side lifecycle ----------------
 
+  // A cheap fingerprint of everything a restart must NOT forget: which orders a bot has resting, its status, what it has
+  // realized, how many trades are booked. When it changes during a cycle the store is written right away instead of on the
+  // normal (slower) schedule — so a crash/restart between two saves can't leave orders on the exchange the bot doesn't know about.
+  function structSig(){
+    return JSON.stringify([S.trades.length, S.tradingBots.map(b => {
+      const r = b.runtime || {};
+      return [b.id, b.status, !!b.paused, b.realizedUsd, (r.levels || []).map(l => [l.status, l.entryOrderId, l.closeOrderId]), r.tpAlgoId, r.slAlgoId, r.totalQty, r.safetyOrders];
+    })]);
+  }
+  const saveSoon = () => { Promise.resolve(store.flushNow()).catch(() => {}); };
+
   // Stop = flatten everything this bot has on the exchange, then mark it stopped. Same as the Stop button.
   async function stopTradingBot(id){
     const bot = S.tradingBots.find(b => b.id === id);
@@ -792,7 +803,7 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
       tradingBotLog(bot, `Stopped — but the server has no saved ${bot.exchange} ${bot.mode} key, so it could NOT cancel orders or close anything. Check ${bot.symbol} on ${bot.exchange} directly.`, true);
     }
     bot.status = 'stopped'; bot.stoppedAtMs = Date.now();
-    store.touch();
+    await store.flushNow();
   }
 
   async function runCycle(){
@@ -808,6 +819,7 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
         if(last && start - last > GAP_NOTICE_MS) bot.runtime.gapNotice = { ms: start - last, atMs: start };
         bot.runtime.lastTickAtMs = start;
       }
+      const before = structSig();
       for(const bot of active){
         const cred = liveCred(bot.exchange, bot.mode);
         if(!cred){ tradingBotLog(bot, `The server has no saved ${bot.exchange} ${bot.mode} key — re-sync your API keys from the browser.`, true); continue; }
@@ -818,7 +830,8 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
           tradingBotLog(bot, `Unexpected error managing this bot: ${err.message}`, true);
         }
       }
-      store.touch();
+      if(structSig() !== before) await store.flushNow();
+      else store.touch();
     } finally { cycleBusy = false; }
   }
 
@@ -863,7 +876,7 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
       bot.investmentUsd = null;
     }
     S.tradingBots.push(bot);
-    store.touch();
+    saveSoon(); // saved BEFORE any order is placed, so a restart mid-deploy is recognised (and flagged) rather than forgotten
     const cred = liveCred(bot.exchange, bot.mode);
     const run = (async () => {
       try{
@@ -872,7 +885,7 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
       }catch(err){
         bot.status = 'error';
         tradingBotLog(bot, `Deployment failed: ${err.message}`, true);
-      } finally { deploying.delete(bot.id); store.touch(); }
+      } finally { deploying.delete(bot.id); await store.flushNow(); }
     })();
     deploying.set(bot.id, run);
     return bot;
@@ -892,6 +905,7 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
       ? { levels: [], longStopSet: false, shortStopSet: false, recoveryAddsUsed: 0, recoveryAddedUsd: 0, unrealizedUsd: null }
       : { avgEntryPrice: null, totalQty: 0, safetyOrders: [], tpAlgoId: null, slAlgoId: null, openedAtMs: null, balanceBeforeUsd: null, unrealizedUsd: null };
     tradingBotLog(bot, result.hadSomethingOpen ? `Paused — every pending order cancelled, open position closed at ${fmtUsd(result.netUsd)} realized. Resume to redeploy fresh at market.` : 'Paused — pending orders cancelled, nothing was open. Resume to redeploy fresh at market.', false);
+    await store.flushNow();
     return bot;
   }
 
@@ -915,7 +929,7 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
       await deployDcaBotInstance(bot, cred);
     }
     if(bot.status === 'active') bot.paused = false;
-    store.touch();
+    await store.flushNow();
     return bot;
   }
 
@@ -923,13 +937,13 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
     const bot = getBot(id);
     if(bot.status === 'active' || bot.status === 'deploying') throw httpErr(409, 'Stop this bot before deleting it.');
     S.tradingBots.splice(S.tradingBots.indexOf(bot), 1);
-    store.touch();
+    saveSoon();
   }
 
   function renameBot(id, nickname){
     const bot = getBot(id);
     bot.nickname = String(nickname || '').trim().slice(0, 60) || undefined;
-    store.touch();
+    saveSoon();
     return bot;
   }
 
@@ -947,7 +961,7 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
         tradingBotLog(bot, 'The server restarted while this bot was deploying — some orders may already be resting on the exchange. Press Stop to cancel them, then create the bot again.', true);
       }
     }
-    store.touch();
+    saveSoon();
   }
 
   function start(){

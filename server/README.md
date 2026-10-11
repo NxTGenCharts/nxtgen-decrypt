@@ -144,7 +144,49 @@ on disk (`botVault.js`) and the **same API keys you verify on the API Keys tab**
 key once and the server keeps it encrypted; there is no second set of keys to maintain. The page just
 creates/stops bots and mirrors what the server is doing.
 
-### One-time setup (Render)
+### Option A — Free: Render free plan + a free Supabase database + a free pinger
+
+Render's free plan has two problems for bots: it **spins down after 15 minutes without traffic**, and its disk is
+**erased on every restart** (and Render "might restart a free web service at any time"). This setup fixes both: a free
+pinger keeps it awake, and the bots + encrypted keys live in a free database instead of the disk, so a restart just
+reloads them. No credit card is needed for any of the three.
+
+1. **Database (Supabase).** Create a free project at supabase.com. In **SQL Editor** run:
+
+   ```sql
+   create table if not exists public.nxtgen_bots_kv (
+     k text primary key,
+     v jsonb not null,
+     updated_at timestamptz not null default now()
+   );
+   alter table public.nxtgen_bots_kv enable row level security;  -- no policies: the public key can read nothing
+   ```
+   Then **Project Settings → API Keys**: copy the **Project URL** and the **secret** key (`sb_secret_…`, or the legacy
+   `service_role` key). This key is server-only — never put it in the website.
+2. **Render → your service → Environment**, add:
+
+   | Variable | Value |
+   |---|---|
+   | `BOT_SUPABASE_URL` | the Project URL |
+   | `BOT_SUPABASE_KEY` | the secret key |
+   | `BOT_VAULT_KEY` | 32+ random characters (encrypts your exchange keys *before* they reach the database) |
+   | `WORKER_TOKEN` | a long random string — the page asks for it once |
+
+   Do **not** set `BOT_DATA_DIR`. Redeploy; the log shows `[bots] server-side bots are OFF: …` only if something is missing.
+3. **Keep it awake.** Create a free monitor at uptimerobot.com (or cron-job.org) that requests
+   `https://<your-service>.onrender.com/health` every **5 minutes**. Anything that reaches the server counts as traffic.
+4. **Free hours.** 24/7 = ~744 h, inside Render's 750 free hours per month — but those hours are shared by *all* free
+   services in your workspace. Keep this the only free web service, or Render suspends them all at the limit.
+
+What to expect on the free plan: it has no uptime guarantee and a small CPU, and a Render restart takes the server down for
+about a minute. Nothing manages your bots in that gap (their orders stay on the exchange), then they reload from the
+database and catch up; the card shows a "server was offline" note. Supabase pauses projects after about a week with no
+activity, so if you stop all bots for a long time, open the project once to wake it.
+
+Without Supabase *and* without a disk, on Render the bots refuse to start and say why — they would be forgotten at the next
+restart while their orders still sat on the exchange.
+
+### Option B — Paid Render with a disk (the sturdy setup)
 
 1. **Paid, always-on instance.** A free Render web service sleeps after ~15 minutes without traffic, which
    silently stops every bot. Use a paid plan (or any VPS).
@@ -156,7 +198,7 @@ creates/stops bots and mirrors what the server is doing.
    |---|---|
    | `WORKER_TOKEN` | already set for the Futures worker — the page reuses it, so you enter it once |
    | `BOT_VAULT_KEY` | **32+ random characters** (e.g. `openssl rand -base64 36`). Encrypts the saved API keys. Keep a copy: change or lose it and the saved keys can't be read (just re-sync them from the page). |
-   | `BOT_DATA_DIR` | `/var/data` (the disk's mount path) |
+   | `BOT_DATA_DIR` | `/var/data` (the disk's mount path) — not used if you set the Supabase variables |
 
 4. Make sure the service starts from a checkout that includes the `js/` folder (`node server/server.js`
    from the repo root) — the engine and the worker import `../js/futures/*`.

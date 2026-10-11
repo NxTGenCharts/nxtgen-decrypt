@@ -4794,6 +4794,10 @@ app.use((err, req, res, next) => {
   res.status(500).json({ verified:false, rejected:false, message:'Internal error.' });
 });
 
+// Plain liveness check. Point a free uptime monitor (UptimeRobot / cron-job.org) at this every 5 minutes to keep a free
+// Render instance from spinning down — a sleeping server can't run bots.
+app.get('/health', (req, res) => res.json({ ok: true, t: Date.now() }));
+
 const port = process.env.PORT || 8787;
 const selfBaseUrl = `http://127.0.0.1:${port}`;
 // Always-on pieces that keep trading with no browser open: the Futures Engine worker (Auto mode) and the server-side Trading Bots.
