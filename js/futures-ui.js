@@ -39,6 +39,7 @@ import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGrid
 import { DCA_STRATEGY, DCA_DEFAULTS, buildDcaPlan, computeDcaExitPrices } from './futures/dca.js';
 import { classifyRegime, REGIMES } from './futures/regime.js';
 import { getAiConfirmation } from './ai-signal.js';
+import { openBotFx, botToast, confirmStopSheet } from './bot-fx.js';
 import { initServerBots, tryHandoff, isServerBot, serverStop, serverPause, serverResume, serverRemove, serverRename } from './server-bots.js';
 
 const CYCLE_MS = 4000; // one synthetic "cycle" every 4s; each cycle advances the mock clock by a few minutes
@@ -3177,7 +3178,7 @@ function initTradingBots(){
         return;
       }
       if(e.target.classList.contains('tb-stop-btn')){
-        await stopTradingBot(e.target.dataset.id);
+        await stopBotWithFx(e.target.dataset.id);
         return;
       }
       if(e.target.classList.contains('tb-delete-btn')){
@@ -3191,7 +3192,7 @@ function initTradingBots(){
     // Stop/Delete buttons live there, not in the create form's container.
     els.fuTradingBotsList.addEventListener('click', async (e) => {
       if(e.target.classList.contains('tb-details-btn')) openTradingBotDetails(e.target.dataset.id);
-      else if(e.target.classList.contains('tb-stop-btn')) await stopTradingBot(e.target.dataset.id);
+      else if(e.target.classList.contains('tb-stop-btn')) await stopBotWithFx(e.target.dataset.id);
       else if(e.target.classList.contains('tb-delete-btn')) deleteTradingBot(e.target.dataset.id);
     });
   }
@@ -4317,17 +4318,40 @@ async function stopTradingBot(id){
     const r = await serverStop(id);
     if(r && r.ok === false) tradingBotLog(bot, `Stop failed: ${r.message}`, true);
     renderTradingBotsList();
-    return;
+    return !(r && r.ok === false);
   }
+  let stopOk = true;
   const cred = liveCred(bot.exchange, bot.mode);
   if(cred){
     const result = await closeBotPositionForcefully(bot, cred, 'STOPPED');
-    if(!result.ok) tradingBotLog(bot, `Stop/flatten failed: ${result.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
+    if(!result.ok){ stopOk = false; tradingBotLog(bot, `Stop/flatten failed: ${result.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true); }
     else tradingBotLog(bot, result.hadSomethingOpen ? `Stopped — every pending order cancelled, open position closed at ${fmtUsd(result.netUsd)} realized (regardless of win/loss).` : 'Stopped — pending orders cancelled; nothing was open.', false);
   }
   bot.status = 'stopped'; bot.stoppedAtMs = Date.now();
   if(f.tradingBots.every(b => b.status !== 'active') && f.tradingBotsRunning) toggleTradingBotsRunning();
   renderTradingBotsList();
+  return stopOk;
+}
+
+// Stop with the animated flow: confirm sheet -> "Stopping the bot" overlay -> toast. Used by the Stop buttons
+// (the bulk Flatten-all path keeps calling stopTradingBot directly, so it never stacks one overlay per bot).
+let stopFxBusy = false;
+async function stopBotWithFx(id){
+  if(stopFxBusy) return;
+  const bot = fu().tradingBots.find(b => b.id === id);
+  if(!bot) return;
+  const unreal = bot.runtime && typeof bot.runtime.unrealizedUsd === 'number' ? bot.runtime.unrealizedUsd : null;
+  const go = await confirmStopSheet({ detail: unreal == null ? '' : `P/L: ${fmtUsd(unreal)}` });
+  if(!go) return;
+  stopFxBusy = true;
+  const fx = openBotFx({ kind: 'stop', title: 'Stopping the bot', subtitle: 'Closing all open orders and canceling all pending orders. Please wait ', delayMs: 0 });
+  let ok = false;
+  try{ ok = await stopTradingBot(id); }
+  catch(err){ console.error('[bots] stop failed', err); }
+  await fx.done(ok);
+  stopFxBusy = false;
+  if(ok) botToast('The robot was stopped', 'success');
+  else botToast('Could not stop the robot \u2014 check its log for details.', 'error');
 }
 
 function deleteTradingBot(id){
@@ -4573,7 +4597,7 @@ function ensureTradingBotDetailsRoot(){
     if(e.target.classList.contains('tb-modal-tab')){
       fu().tbDetailsTab = e.target.dataset.tab; renderTradingBotDetailsModal(); return;
     }
-    if(e.target.classList.contains('tb-stop-btn')){ await stopTradingBot(e.target.dataset.id); return; }
+    if(e.target.classList.contains('tb-stop-btn')){ await stopBotWithFx(e.target.dataset.id); return; }
     if(e.target.classList.contains('tb-delete-btn')){ deleteTradingBot(e.target.dataset.id); closeTradingBotDetails(); return; }
   });
   return root;
@@ -5619,6 +5643,7 @@ function renderSmartBotsCreate(){
 // fetching the snapshot — the button is disabled for exactly that window so
 // a double-click can't submit twice. Everything else about creation is unchanged.
 function sbCreateStatus(msg, isError){
+  if(msg && !isError) sbFxSub(msg.replace(/[\u2026.]+$/, ''));
   const host = document.getElementById('sbCreateStatus');
   if(host){ host.textContent = msg; host.dataset.state = msg ? (isError ? 'error' : 'busy') : ''; }
   const btn = els.sbCreateHost && els.sbCreateHost.querySelector('#sbCreateBtn');
@@ -5650,7 +5675,7 @@ function readSmartBotFormNumbers(){
   }
 }
 
-async function createSmartBotFromForm(){
+async function createSmartBotFromFormInner(){
   const f = sbState();
   rollTradingBotsDay(Date.now());
   if(f.tbDailyHalted){ sbCreateStatus(`Paused for today: ${f.tbDailyHaltMessage || 'daily limit reached'} — try again after the next UTC day rollover.`, true); return; }
@@ -5730,10 +5755,41 @@ async function createSmartBotFromForm(){
   renderSmartBotsPanel();
   sbCreateStatus('');
 
+  sbFxSub('Deploying your robot');
   await deployBotAnywhere(bot, cred);
 
   if(!f.tradingBotsRunning) toggleTradingBotsRunning();
   renderSmartBotsPanel();
+  return bot;
+}
+
+// Start with the animated flow: the "Starting your robot" overlay stays up while the form is validated, margin is
+// read and the bot is deployed (progress text follows sbCreateStatus), then a toast reports the outcome.
+// Server-handed bots begin as 'deploying' and flip to 'active' on the server's next tick, so wait for that (max 9s).
+let sbStartFx = null;
+function sbFxSub(text){ if(sbStartFx && text) sbStartFx.setSub(text); }
+async function createSmartBotFromForm(){
+  if(sbStartFx) return; // already starting one
+  const fx = sbStartFx = openBotFx({ kind: 'start', title: 'Starting your robot', subtitle: 'Checking all settings. Please wait ' });
+  let bot = null;
+  try{ bot = await createSmartBotFromFormInner(); }
+  catch(err){ console.error('[bots] start failed', err); sbCreateStatus(`Could not start the bot: ${err && err.message ? err.message : err}`, true); }
+  const id = bot && bot.id;
+  if(id){
+    const t0 = Date.now();
+    const cur = () => fu().tradingBots.find(b => b.id === id) || bot;
+    if(cur().server) fx.setSub('Deploying on the server');
+    while(cur().status === 'deploying' && Date.now() - t0 < 9000) await new Promise(r => setTimeout(r, 400));
+    bot = cur();
+  }
+  const failed = !bot || bot.status === 'error' || bot.statusIsError;
+  const live = !failed && bot.status !== 'deploying';
+  await fx.done(!failed);
+  sbStartFx = null;
+  if(!bot) return; // validation errors are already shown under the form
+  if(failed) botToast(bot.statusMessage || 'The robot could not be started \u2014 check its log for details.', 'error');
+  else if(live) botToast('Robot has been successfully started', 'success');
+  else botToast('Robot sent to the server \u2014 it is still deploying.', 'info');
 }
 
 // Pause CLOSES this bot's current position right now — win or loss,
@@ -6550,7 +6606,7 @@ function initSmartBots(){
       const id = e.target.dataset.id;
       if(!id) return;
       if(e.target.classList.contains('sb-pause-btn')) await pauseOrResumeSmartBot(id);
-      else if(e.target.classList.contains('sb-stop-btn')){ await stopTradingBot(id); renderSmartBotsPanel(); }
+      else if(e.target.classList.contains('sb-stop-btn')){ await stopBotWithFx(id); renderSmartBotsPanel(); }
       else if(e.target.classList.contains('sb-delete-btn')){ deleteTradingBot(id); fu().sbView = 'list'; renderSmartBotsPanel(); }
       else if(e.target.classList.contains('sb-copy-btn')) copySmartBot(id);
       else if(e.target.classList.contains('sb-rename-btn')) renameSmartBot(id);
