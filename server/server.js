@@ -22,6 +22,7 @@ import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
 import { attachWorker } from './worker.js';
 import { attachBots } from './bots.js';
+import { createAuth } from './auth.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -41,6 +42,13 @@ app.use(cors({
   origin: allowedOrigins.includes('*') ? true : allowedOrigins,
   methods: ['GET', 'POST'],
 }));
+
+// Accounts (Supabase Auth). Mounted right after body parsing + CORS so the saved-key placeholder swap happens before any
+// proxy route runs. When SUPABASE_ANON_KEY isn't set this is inert and the shared WORKER_TOKEN path works exactly as before.
+const auth = createAuth();
+auth.mountConfig(app);
+app.use('/api/account', rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
+app.use(auth.heldKeyMiddleware);
 
 // Basic abuse guard — each caller gets a modest number of verify attempts
 // per minute. This is not a substitute for putting this behind your own
@@ -4802,5 +4810,5 @@ const port = process.env.PORT || 8787;
 const selfBaseUrl = `http://127.0.0.1:${port}`;
 // Always-on pieces that keep trading with no browser open: the Futures Engine worker (Auto mode) and the server-side Trading Bots.
 attachWorker(app, selfBaseUrl);
-attachBots(app, { baseUrl: selfBaseUrl, internalKey: INTERNAL_KEY });
+attachBots(app, { baseUrl: selfBaseUrl, internalKey: INTERNAL_KEY, auth });
 app.listen(port, () => console.log(`nxtgen-verify-proxy listening on :${port}`));

@@ -29,6 +29,7 @@
 //   clears your profit floor, compounding a running "today" balance
 //   until your daily target is hit, then stops and shows the summary.
 // =============================================================
+import { saveKeyToAccount, removeKeyFromAccount, isSignedIn, hasSavedKey } from './account.js';
 import { els, state, DEFAULT_VERIFY_PROXY_URL } from './state.js';
 import { EXCHANGES, filterTriPairs } from './exchanges.js';
 import { buildGraph, findCycles } from './triangular.js';
@@ -231,8 +232,14 @@ function formatLooksValid(key, apiKey, secretKey, passphrase){
 }
 function persist(){
   try{
+    // Keys saved on the account are shown here as in-memory placeholders (see account.js) — never write them to this device.
+    const ownCreds = {};
+    for(const k of Object.keys(state.exchangeCreds)){
+      const slot = state.exchangeCreds[k] || {};
+      ownCreds[k] = Object.fromEntries(Object.entries(slot).map(([m, c]) => [m, c && c.serverHeld ? null : c]));
+    }
     localStorage.setItem(LS_KEY, JSON.stringify({
-      exchangeCreds: state.exchangeCreds,
+      exchangeCreds: ownCreds,
       exchangeMode: state.exchangeMode,
       balances: state.balances,
       autotrade: { ...state.autotrade, timer: null },
@@ -258,7 +265,7 @@ function coerceCredSlot(saved){
 }
 
 function normalizeCred(c){
-  if(!c || typeof c !== 'object' || !c.apiKey) return null;
+  if(!c || typeof c !== 'object' || !c.apiKey || c.serverHeld) return null;
   return {
     apiKey: c.apiKey,
     secretKey: c.secretKey || '',
@@ -348,6 +355,8 @@ function renderConnectRows(){
     if(stored){
       if(cred.verified) statusPill = `<span class="pill tr-yes" title="${cred.verifyNote||''}">VERIFIED</span>`;
       else statusPill = `<span class="pill" style="color:var(--amber);border-color:var(--amber-dim);" title="${cred.verifyNote||'Could not confirm with the exchange from this browser.'}">UNVERIFIED</span>`;
+      if(cred.serverHeld) statusPill += ' <span class="pill tr-yes" title="Stored encrypted on the server for your account. This device never holds the secret.">ON YOUR ACCOUNT</span>';
+      else if(isSignedIn() && hasSavedKey(key, mode)) statusPill += ' <span class="pill tr-yes" title="Also saved on your account, so your other devices can use it.">SYNCED</span>';
     }
 
     const modePillHtml = mode==='demo'
@@ -494,12 +503,18 @@ if(els.connectRows) els.connectRows.addEventListener('click', async (e) => {
     const row = e.target.closest('.connect-row');
     const key = row.dataset.exchange;
     const mode = row.dataset.mode;
+    const alsoOnAccount = isSignedIn() && hasSavedKey(key, mode);
+    if(alsoOnAccount && !window.confirm(`This ${EXCHANGES[key].label} ${mode} key is also saved on your account. Remove it from your account too?\n\nOK = remove everywhere (your other devices lose it).\nCancel = keep everything.`)) return;
+    if(alsoOnAccount){
+      const r = await removeKeyFromAccount(key, mode).catch(err => ({ ok: false, message: err.message }));
+      if(!r.ok){ showAtMessage(`Not removed: ${r.message || 'the server refused.'}`, 'error'); return; }
+    }
     state.exchangeCreds[key][mode] = null;
     persist();
     renderConnectRows();
     renderBalances();
     renderExchangeOptions();
-    showAtMessage(`${EXCHANGES[key].label} (${mode}) key removed.`, 'info');
+    showAtMessage(`${EXCHANGES[key].label} (${mode}) key removed${alsoOnAccount ? ' from this device and your account' : ''}.`, 'info');
     return;
   }
 
@@ -590,6 +605,15 @@ if(els.connectRows) els.connectRows.addEventListener('click', async (e) => {
   renderConnectRows();
   renderBalances();
   renderExchangeOptions();
+  // Signed in: also keep it on the account so every other device (and the 24/7 bots) can use it. The server verifies it
+  // itself first and never sends the secret back.
+  if(cred.verified && isSignedIn()){
+    saveKeyToAccount(key, mode, cred).then(r => {
+      if(r && r.ok) showAtMessage(`${EXCHANGES[key].label} (${netLabel}) key is now saved on your account \u2014 your other devices can use it.`, 'info');
+      else if(r && !r.skipped) showAtMessage(`Key works here, but couldn't be saved to your account: ${r.message || 'the server refused it.'}`, 'error');
+      renderConnectRows();
+    }).catch(() => {});
+  }
 });
 
 // ---------------- Balances ----------------
@@ -1295,6 +1319,8 @@ if(els.atExchange) els.atExchange.addEventListener('change', () => {
 export function initAutotrade(){
   try{
     restore();
+    // account.js adds/removes the placeholders for keys saved on the account — redraw when that happens
+    window.addEventListener('nxtgen:creds-changed', () => { renderConnectRows(); renderBalances(); renderExchangeOptions(); });
     if(els.atProxyUrl){
       els.atProxyUrl.value = maskProxyUrl(state.verifyProxyUrl || DEFAULT_VERIFY_PROXY_URL);
       els.atProxyUrl.setAttribute('readonly', 'readonly');

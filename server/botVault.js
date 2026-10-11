@@ -52,11 +52,37 @@ const REMOTE_TABLE = 'nxtgen_bots_kv';
 const REMOTE_MAX_TRADES = 500;   // the browser keeps the long history; the server only needs recent ones to survive a restart
 const REMOTE_WRITE_DELAY_MS = 20_000;
 
-export function openBotStore({ dir, vaultKey, remote, disabledReason, log = console, writeDelayMs, retryMs = 5_000 } = {}){
+const USER_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const isUserId = (s) => USER_ID_RE.test(String(s || ''));
+
+// Which accounts have saved data. Used at boot so every user's bots resume without anyone having to sign in first.
+export async function listStoredUsers({ dir, remote, log = console } = {}){
+  const ids = new Set();
+  try{
+    if(remote && remote.url && remote.key){
+      const h = { apikey: remote.key }; if(/^eyJ/.test(remote.key)) h.Authorization = `Bearer ${remote.key}`;
+      const res = await fetch(`${String(remote.url).replace(/\/$/, '')}/rest/v1/${REMOTE_TABLE}?select=k&k=like.u:*:state`, { headers: h, signal: AbortSignal.timeout(15_000) });
+      if(!res.ok) throw new Error(`database ${res.status}`);
+      for(const r of await res.json()){ const m = /^u:([^:]+):state$/.exec(r.k || ''); if(m && isUserId(m[1])) ids.add(m[1].toLowerCase()); }
+    } else {
+      const d = path.join(path.resolve(dir || path.join(process.cwd(), 'data')), 'users');
+      if(fs.existsSync(d)) for(const f of fs.readdirSync(d)){ const m = /^(.+)\.json$/.exec(f); if(m && isUserId(m[1])) ids.add(m[1].toLowerCase()); }
+    }
+  }catch(e){ log.error && log.error(`[accounts] could not list saved accounts: ${e.message}`); throw e; }
+  return [...ids];
+}
+
+// userId: when set, everything this store saves is namespaced to that account (rows "u:<id>:state|creds|trades", or
+// users/<id>.json on disk) and its exchange keys are encrypted with a key derived from BOT_VAULT_KEY AND the user id, so one
+// account's data can never be read through another account's store. With no userId it is the original single-owner store.
+export function openBotStore({ dir, vaultKey, remote, disabledReason, log = console, writeDelayMs, retryMs = 5_000, userId } = {}){
+  if(userId != null && !isUserId(userId)) throw new Error('Invalid user id.');
+  const uid = userId ? String(userId).toLowerCase() : null;
+  const ns = uid ? `u:${uid}:` : '';
   const key = String(vaultKey || '').trim();
   const enabled = key.length >= MIN_VAULT_KEY_LEN;
   const dataDir = path.resolve(dir || path.join(process.cwd(), 'data'));
-  const file = path.join(dataDir, 'bots.json');
+  const file = uid ? path.join(dataDir, 'users', `${uid}.json`) : path.join(dataDir, 'bots.json');
   const useRemote = !!(remote && remote.url && remote.key);
   const keyReason = key.length === 0 ? 'BOT_VAULT_KEY is not set on the server.'
     : (key.length < MIN_VAULT_KEY_LEN ? `BOT_VAULT_KEY is only ${key.length} characters — it must be at least ${MIN_VAULT_KEY_LEN}.` : null);
@@ -72,7 +98,7 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
   let dirtyCreds = false, lastTradeSig = '', ready = false, saving = null, saveFailures = 0;
   let lastSaveAt = null, lastSaveError = null;   // surfaced by /api/bots/status so a store that can't save is visible, not silent
 
-  if(on) aesKey = crypto.scryptSync(key, 'nxtgen-bot-vault-v1', 32);
+  if(on) aesKey = crypto.scryptSync(key, uid ? `nxtgen-bot-vault-v1:${uid}` : 'nxtgen-bot-vault-v1', 32);
 
   // ---------- crypto ----------
   function encrypt(obj){
@@ -100,7 +126,7 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
   }
   function loadFile(){
     try{
-      fs.mkdirSync(dataDir, { recursive: true });
+      fs.mkdirSync(path.dirname(file), { recursive: true });
       if(!fs.existsSync(file)) return;
       applyLoaded(JSON.parse(fs.readFileSync(file, 'utf8')));
     }catch(e){
@@ -121,8 +147,8 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
   async function loadRemote(){
     for(let attempt = 0; ; attempt++){
       try{
-        const rows = await rest('GET', '?select=k,v');
-        const by = Object.fromEntries((rows || []).map(r => [r.k, r.v]));
+        const rows = await rest('GET', uid ? `?select=k,v&k=like.${encodeURIComponent(`u:${uid}:*`)}` : '?select=k,v&k=in.(state,trades,creds)');
+        const by = Object.fromEntries((rows || []).map(r => [String(r.k).slice(ns.length), r.v]));
         applyLoaded({ state: { ...(by.state || {}), trades: by.trades || [] }, creds: by.creds || {} });
         lastTradeSig = tradeSig();
         loadError = null;
@@ -144,7 +170,7 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
   function flushSync(){
     if(useRemote || !dirty) return;
     try{
-      fs.mkdirSync(dataDir, { recursive: true });
+      fs.mkdirSync(path.dirname(file), { recursive: true });
       const out = { v: FILE_VERSION, savedAt: Date.now(), state, creds: Object.fromEntries(creds) };
       const tmp = `${file}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(out), { mode: 0o600 });
@@ -158,9 +184,9 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
   async function saveRemote(){
     if(!dirty && !dirtyCreds) return;
     const wasCreds = dirtyCreds, sig = tradeSig();
-    const rows = [{ k: 'state', v: { ...state, trades: [] } }];
-    if(wasCreds) rows.push({ k: 'creds', v: Object.fromEntries(creds) });
-    if(sig !== lastTradeSig) rows.push({ k: 'trades', v: state.trades.slice(0, REMOTE_MAX_TRADES) });
+    const rows = [{ k: ns + 'state', v: { ...state, trades: [] } }];
+    if(wasCreds) rows.push({ k: ns + 'creds', v: Object.fromEntries(creds) });
+    if(sig !== lastTradeSig) rows.push({ k: ns + 'trades', v: state.trades.slice(0, REMOTE_MAX_TRADES) });
     dirty = false; dirtyCreds = false;
     try{
       await rest('POST', '?on_conflict=k', rows.map(r => ({ ...r, updated_at: new Date().toISOString() })), { Prefer: 'resolution=merge-duplicates,return=minimal' });
@@ -204,15 +230,15 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
       if(!on) return { ok: false, message: reason };
       try{
         if(useRemote){
-          await rest('POST', '?on_conflict=k', [{ k: 'health', v: { at: Date.now() }, updated_at: new Date().toISOString() }], { Prefer: 'resolution=merge-duplicates,return=minimal' });
+          await rest('POST', '?on_conflict=k', [{ k: ns + 'health', v: { at: Date.now() }, updated_at: new Date().toISOString() }], { Prefer: 'resolution=merge-duplicates,return=minimal' });
         } else {
-          fs.mkdirSync(dataDir, { recursive: true }); fs.accessSync(dataDir, fs.constants.W_OK);
+          fs.mkdirSync(path.dirname(file), { recursive: true }); fs.accessSync(path.dirname(file), fs.constants.W_OK);
         }
         return { ok: true };
       }catch(e){ lastSaveError = e.message; return { ok: false, message: e.message }; }
     },
     persistence: useRemote ? 'database' : 'disk',
-    dataDir, file, state, ready: readyP,
+    userId: uid, dataDir, file, state, ready: readyP,
     touch, flush: flushNow, flushNow,
 
     // ---- shared API keys ----

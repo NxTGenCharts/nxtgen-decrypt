@@ -256,11 +256,66 @@ Bybit/Binance key; replacing a key on the API Keys tab updates the server copy a
 lives in server memory (by design — see the top of `worker.js`), so a server restart disarms it unless you set
 `WORKER_AUTOARM=true` with the `WORKER_*` credential variables (see the worker's header).
 
+### Accounts — sign in from any device (Supabase Auth)
+
+Without accounts the bots belong to whoever holds `WORKER_TOKEN`, on one browser. With accounts each person signs in with
+email + password and sees **their own** bots, trades and saved exchange keys on every device. Bots keep trading on the
+server whether or not any device is open.
+
+**How it works**
+
+- The page signs up / signs in directly with Supabase Auth and sends the session token as `Authorization: Bearer …`. The
+  server never sees a password; it asks Supabase who the token belongs to (cached ~60 s, so a revoked session stops working
+  within about a minute). Unconfirmed emails are refused.
+- Each account gets its own store (`u:<id>:state|creds|trades` rows in the same `nxtgen_bots_kv` table — **no new SQL needed**)
+  and its own bot engine. Exchange keys are encrypted with a key derived from `BOT_VAULT_KEY` **and** the account id.
+- **Secrets never go back to a browser.** After a key is saved to an account, every device only learns "Bybit demo …1234 is
+  saved". Balances, margin checks and bot creation work on a phone that has never seen the key: the page sends a placeholder
+  (`srv:bybit:demo:1234`) and the server swaps in the real credential — only for a valid session of the account that owns it —
+  just before signing the request.
+- The old shared-token path keeps working until an account **claims** the earlier data (below), so nothing stops during rollout.
+
+**Turn it on**
+
+1. Supabase → **Authentication → Sign In / Providers**: Email enabled, **Confirm email** on. **Authentication → URL
+   Configuration**: set *Site URL* to your site (password-reset links go there).
+2. Supabase → **Project Settings → API Keys**: copy the **publishable** (anon) key. It is public by design.
+3. Render → Environment, add `SUPABASE_ANON_KEY` (that key). `BOT_SUPABASE_URL`, `BOT_SUPABASE_KEY` and `BOT_VAULT_KEY` stay as they are.
+4. Optional but recommended: `ALLOWED_EMAILS` (e.g. `you@mail.com, @yourcompany.com`) to keep it invite-only, and
+   `BOT_MAX_USERS` (default 25 — every account runs its own 8-second engine loop on your instance).
+5. Redeploy the server **and** the site (the service worker is bumped to v49, so devices pick up the new code).
+6. Open **API Keys → Your Account**, create the account, confirm the email, sign in.
+7. **Keep your existing bots:** Utilities & Tools → Trading Bots → **Move my earlier bots & keys here**, enter `WORKER_TOKEN`
+   once. The bots, their trade history and saved keys are copied into your account and confirmed saved *before* the old copy
+   is retired; the bots keep their orders on the exchange and the account's engine simply resumes managing them. Only one
+   account can claim, and only someone holding both a login and `WORKER_TOKEN`.
+
+| Variable | Meaning |
+|---|---|
+| `SUPABASE_ANON_KEY` | Enables accounts. Without it the shared-token behaviour is unchanged. |
+| `ALLOWED_EMAILS` | Invite list: addresses and/or `@domains`. Unset = any confirmed account may use the server. |
+| `BOT_MAX_USERS` | Accounts the server will run (default 25). |
+| `ACCOUNTS_REQUIRED` | `true` = refuse the shared `WORKER_TOKEN` path entirely. |
+
+**Read before letting other people sign up**
+
+- You are then holding other people's trading API keys. They are encrypted at rest, but one `BOT_VAULT_KEY` protects all of
+  them and the server decrypts them to trade — anyone who controls this server or its environment can use them. Tell users to
+  create **Trade-only keys with Withdraw disabled** and, where the exchange allows it, IP-whitelist this server. This build
+  does not yet *check* that a key has withdrawal switched off.
+- All accounts share this server's outbound IP, so one Binance IP-weight budget (see "Binance shared IP weight" above).
+- Update your Terms/Privacy pages: you now store email addresses and encrypted exchange credentials.
+- Sign-out removes that account's bots from the device's list and the key placeholders. Trade-log rows already copied into the
+  device's local log stay there; use a private window on a shared computer.
+- The Futures Engine worker (`/api/worker/*`) is still single-owner (shared token) — accounts cover Trading Bots and saved keys.
+
 ### Tests
 
 ```
 node tests/bots.test.mjs                                                        # engine vs a simulated exchange
 node --import ./tests/_stubs/register.mjs tests/botRoutes.test.mjs              # HTTP layer (no express needed)
+node --import ./tests/_stubs/register.mjs tests/accounts.test.mjs               # accounts: isolation, saved-key swap, claim, invites
+node tests/account-client.test.mjs                                              # browser account module (stubbed DOM)
 ```
 These prove the engine's logic and the key handling. They do **not** prove the real Bybit/Binance endpoints
 behave like the simulator — run on **Demo with a small amount** before trusting real money to it.

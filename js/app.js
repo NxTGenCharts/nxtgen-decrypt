@@ -15,6 +15,7 @@ import { initSubTabRouting } from './ui.js';
 import { runScan, startLiveScan, stopLiveScan } from './triangular.js';
 import { runXScan } from './cross-exchange.js';
 import { initAutotrade } from './autotrade.js';
+import { initAccount } from './account.js';
 import { initFuturesEngine } from './futures-ui.js';
 import { initAiSignal } from './ai-signal.js';
 import { initBacktestUI } from './backtest-ui.js';
@@ -58,6 +59,7 @@ if(els.xScanBtn) els.xScanBtn.addEventListener('click', runXScan);
 const initSteps = [
   ['sub-tab routing', initSubTabRouting],
   ['autotrade', initAutotrade],
+  ['accounts', () => { initAccount().catch(err => console.error('[accounts] init failed:', err)); }],   // after autotrade: it has restored the saved keys this layers the account's keys onto
   ['futures engine', initFuturesEngine],
   ['ai signal', initAiSignal],
   ['backtest UI', initBacktestUI],

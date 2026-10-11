@@ -5434,6 +5434,7 @@ function initSbAcctBalance(){
   const tabBtn = document.getElementById('tabSmartBotsBtn');
   if(tabBtn) tabBtn.addEventListener('click', () => setTimeout(renderSbAcctBalance, 0));
   window.addEventListener('hashchange', () => setTimeout(renderSbAcctBalance, 0));
+  window.addEventListener('nxtgen:creds-changed', () => { const f = sbState(); f.sbAcctCache = {}; f.sbBalanceCache = {}; setTimeout(renderSbAcctBalance, 0); }); // keys from the account arrived/left
   setTimeout(renderSbAcctBalance, 0);
   // Live refresh: while the Trading Bots tab is on screen and the browser
   // tab is in the foreground, re-read the account every few seconds.

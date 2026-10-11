@@ -11,12 +11,14 @@
 //     page every few seconds, so the lists/trade log look exactly as before
 //   * routes Stop / Pause / Resume / Delete / Rename for those bots to the server
 //
-// It uses the same access token as the Futures Engine worker (WORKER_TOKEN); you are
-// asked for it once, the first time you create a bot, and it is remembered on this device.
+// Sign-in: with an ACCOUNT (see account.js) every device that signs in sees the same bots, trades and saved keys, because
+// they live on the server under that account. Without accounts it falls back to the shared access token (WORKER_TOKEN):
+// you are asked for it once, the first time you create a bot, and it is remembered on this device.
 // If the server isn't set up (or is unreachable) a bot simply runs in this browser as
 // before, and the card says so — it never silently pretends to be running 24/7.
 // =============================================================
 import { state } from './state.js';
+import { isSignedIn, accountsAvailable, accountEmail, freshToken, openAuthModal, onAccountChange, setSavedKeys, signOut, legacyStatus, claimLegacy, savedKeys } from './account.js';
 
 const TOKEN_KEY = 'nxtgen_server_worker_token_v1';   // shared with js/server-worker.js
 const DASH_KEY = 'nxtgen_worker_dash_v1';
@@ -28,12 +30,18 @@ const EX_NAMES = { bybit: 'Bybit', binance: 'Binance' };
 let hooks = { fu: () => state.futures, onChange(){}, hasTrade: () => false, addTrade(){} };
 let status = null;          // last /api/bots/status payload
 let lastError = '';
-let timer = null, refreshing = false, tradesSince = 0, forcePrompt = false;
+let timer = null, refreshing = false, tradesSince = 0, forcePrompt = false, needAccount = false, legacyAvail = false;
+const ACCOUNT = '@account';   // stand-in "token": the real credential is the signed-in session (see api())
 
 export function initServerBots(h){
   hooks = { ...hooks, ...h };
   renderBar();
-  if(savedToken()) startMirror();
+  if(isSignedIn() || savedToken()) startMirror();
+  onAccountChange((type) => {
+    if(type === 'signin'){ status = null; lastError = ''; tradesSince = 0; needAccount = false; stopMirror(); startMirror(); legacyStatus().then(v => { legacyAvail = v; renderBar(); }); }
+    else if(type === 'signout'){ stopMirror(); status = null; lastError = ''; tradesSince = 0; hooks.onChange(); }
+    renderBar();
+  });
 }
 
 // ---------- token / transport ----------
@@ -45,9 +53,11 @@ function savedToken(){
     return JSON.parse(localStorage.getItem(DASH_KEY) || '{}').token || '';
   }catch(e){ return ''; }
 }
-function getToken(askIfMissing){
-  if(!forcePrompt){ const t = savedToken(); if(t) return t; }
+async function getToken(askIfMissing){
+  if(isSignedIn()) return ACCOUNT;
+  if(!forcePrompt && !needAccount){ const t = savedToken(); if(t) return t; }
   if(!askIfMissing) return '';
+  if(accountsAvailable()){ await openAuthModal(); return isSignedIn() ? ACCOUNT : ''; }
   const t = (window.prompt('Enter your server access token (the WORKER_TOKEN you set on Render).\nIt is saved on this device, so you only do this once.') || '').trim();
   if(t){ try{ localStorage.setItem(TOKEN_KEY, t); }catch(e){ /* non-fatal */ } forcePrompt = false; }
   return t;
@@ -55,12 +65,18 @@ function getToken(askIfMissing){
 async function api(path, method, body, token){
   const base = proxyBase();
   if(!base) throw new Error('No verification proxy configured — set one on the API Keys tab.');
-  const headers = { 'X-Worker-Token': token };
+  const headers = {};
+  if(token === ACCOUNT){
+    const t = await freshToken();
+    if(!t) throw new Error('Please sign in again.');
+    headers.Authorization = `Bearer ${t}`;
+  } else headers['X-Worker-Token'] = token;
   if(body) headers['Content-Type'] = 'application/json';
   const res = await fetch(base + path, { method: method || 'GET', headers, body: body ? JSON.stringify(body) : undefined });
   const data = await res.json().catch(() => null);
   if(!data) throw new Error('The server sent an unreadable response.');
-  if(data.code === 'unauthorized') forcePrompt = true;
+  if(data.code === 'use_account'){ needAccount = true; }
+  else if(data.code === 'unauthorized' && token !== ACCOUNT) forcePrompt = true;
   return data;
 }
 
@@ -76,7 +92,7 @@ async function fingerprint(apiKey){
 }
 function localCred(exchange, mode){
   const c = state.exchangeCreds && state.exchangeCreds[exchange] && state.exchangeCreds[exchange][mode];
-  return (c && c.apiKey && c.verified) ? c : null;
+  return (c && c.apiKey && c.verified && !c.serverHeld) ? c : null;   // a placeholder for a key held on the account is not a key to send anywhere
 }
 
 // ---------- status + mirror ----------
@@ -84,6 +100,7 @@ async function fetchStatus(token){
   const r = await api('/api/bots/status', 'GET', null, token);
   if(!r.ok) throw new Error(r.message || 'The server refused the request.');
   status = r; lastError = '';
+  if(r.account) setSavedKeys(r.creds);   // keep the API Keys page in step with what the account holds
   return r;
 }
 
@@ -138,7 +155,7 @@ async function resyncChangedKeys(token){
 
 export async function refresh(){
   if(refreshing) return;
-  const token = getToken(false);
+  const token = await getToken(false);
   if(!token){ renderBar(); return; }
   refreshing = true;
   try{
@@ -158,6 +175,7 @@ export function startMirror(){
   refresh();
   timer = setInterval(refresh, MIRROR_MS);
 }
+function stopMirror(){ if(timer){ clearInterval(timer); timer = null; } }
 
 // ---------- keys ----------
 async function pushKey(token, exchange, mode, cred){
@@ -167,6 +185,7 @@ async function pushKey(token, exchange, mode, cred){
   return r;
 }
 async function ensureKey(token, exchange, mode, cred){
+  if(cred && cred.serverHeld) return;   // already on the server — that's what the placeholder means
   const saved = ((status && status.creds) || []).find(k => k.exchange === exchange && k.mode === mode);
   const fp = await fingerprint(cred.apiKey);
   if(saved && fp && saved.fp === fp) return;
@@ -175,7 +194,7 @@ async function ensureKey(token, exchange, mode, cred){
 
 // Sends every key you've verified (Bybit / Binance, live + demo) — the same ones the rest of the app uses.
 export async function syncAllKeys(){
-  const token = getToken(true);
+  const token = await getToken(true);
   if(!token) return { ok: false, message: 'No access token entered.' };
   try{
     await fetchStatus(token);
@@ -186,7 +205,7 @@ export async function syncAllKeys(){
       if(c){ await pushKey(token, ex, mode, c); n++; }
     }
     startMirror(); await refresh();
-    return { ok: true, message: n ? `Saved ${n} key${n === 1 ? '' : 's'} on the server.` : 'No verified Bybit/Binance keys found — verify one on the API Keys tab first.' };
+    return { ok: true, message: n ? `Saved ${n} key${n === 1 ? '' : 's'} ${token === ACCOUNT ? 'on your account' : 'on the server'}.` : 'No verified Bybit/Binance keys found — verify one on the API Keys tab first.' };
   }catch(e){ lastError = e.message; renderBar(); return { ok: false, message: e.message }; }
 }
 
@@ -201,8 +220,8 @@ function plainBot(bot){
 export async function tryHandoff(bot, cred, limits){
   if(!serverModePreferred()) return { used: false };
   if(!BOT_EXCHANGES.includes(bot.exchange)) return { used: false };
-  const token = getToken(true);
-  if(!token) return { used: false, reason: 'no server access token was entered.' };
+  const token = await getToken(true);
+  if(!token) return { used: false, reason: isSignedIn() || accountsAvailable() ? 'you are not signed in.' : 'no server access token was entered.' };
   try{
     const st = await fetchStatus(token);
     if(!st.enabled) return { used: false, reason: `the server isn't set up for 24/7 bots yet (${st.reason || 'vault disabled'}).` };
@@ -219,7 +238,7 @@ export async function tryHandoff(bot, cred, limits){
 }
 
 async function act(id, action, body){
-  const token = getToken(true);
+  const token = await getToken(true);
   if(!token) return { ok: false, message: 'No access token entered.' };
   try{
     const r = await api(`/api/bots/${encodeURIComponent(id)}/${action}`, 'POST', body || {}, token);
@@ -242,26 +261,30 @@ function renderBar(){
   box.style.cssText = 'display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;padding:10px 14px;margin-bottom:14px;border:1px solid var(--line);border-radius:10px;font-size:12px;';
   const text = document.createElement('div');
   text.style.cssText = 'flex:1 1 280px;min-width:0;line-height:1.5;';
-  const hasToken = !!savedToken();
+  const signedIn = isSignedIn();
+  const hasAuth = signedIn || !!savedToken();
+  const acct = signedIn ? `Signed in as ${accountEmail()} \u2014 ` : '';
   let tone = '', msg;
-  if(!hasToken){
-    msg = 'Server mode: not connected yet. Create a bot and you\u2019ll be asked for your server access token once, then it keeps trading with this tab closed.';
+  if(!hasAuth || (needAccount && !signedIn)){
+    msg = accountsAvailable()
+      ? 'Sign in to see your bots, trades and saved exchange keys on any device \u2014 they keep trading on the server with this tab closed.'
+      : 'Server mode: not connected yet. Create a bot and you\u2019ll be asked for your server access token once, then it keeps trading with this tab closed.';
   } else if(lastError){
-    tone = 'var(--red)'; msg = `Server mode: can\u2019t reach the server \u2014 ${lastError}`;
+    tone = 'var(--red)'; msg = `${acct}Server mode: can\u2019t reach the server \u2014 ${lastError}`;
   } else if(status && status.loading){
-    tone = 'var(--amber)'; msg = 'Server mode: the server is starting up and loading your saved bots\u2026';
+    tone = 'var(--amber)'; msg = `${acct}Server mode: the server is starting up and loading your saved bots\u2026`;
   } else if(status && !status.enabled){
-    tone = 'var(--amber)'; msg = `Server mode is not set up on the server: ${status.reason || 'vault disabled'} Bots will run in this browser only.`;
+    tone = 'var(--amber)'; msg = `${acct}Server mode is not set up on the server: ${status.reason || 'vault disabled'} Bots will run in this browser only.`;
   } else if(status && status.storageHealth && status.storageHealth.failing){
     tone = 'var(--red)';
-    msg = `Server mode: the server can\u2019t save your bots (${status.storageHealth.lastSaveError || 'storage error'}). If it restarts it will forget them while their orders stay on the exchange \u2014 fix its storage (see server/README.md) before relying on it.`;
+    msg = `${acct}Server mode: the server can\u2019t save your bots (${status.storageHealth.lastSaveError || 'storage error'}). If it restarts it will forget them while their orders stay on the exchange \u2014 fix its storage (see server/README.md) before relying on it.`;
   } else if(status){
     const keys = (status.creds || []).map(k => `${EX_NAMES[k.exchange] || k.exchange} ${k.mode} \u2026${k.last4}`).join(', ');
     const running = (status.bots || []).filter(b => b.status === 'active' && !b.paused).length;
     tone = 'var(--green)';
-    msg = `Server mode ON \u2014 ${running} bot${running === 1 ? '' : 's'} running on the server, safe to close this tab. Keys on server: ${keys || 'none yet'}.`;
+    msg = `${acct}Server mode ON \u2014 ${running} bot${running === 1 ? '' : 's'} running on the server, safe to close this tab. Keys ${signedIn ? 'on your account' : 'on server'}: ${keys || 'none yet'}.`;
   } else {
-    msg = 'Server mode: connecting\u2026';
+    msg = `${acct}Server mode: connecting\u2026`;
   }
   text.textContent = msg;
   if(tone) text.style.color = tone;
@@ -275,14 +298,36 @@ function renderBar(){
   label.appendChild(cb); label.appendChild(document.createTextNode('Run new bots on the server'));
   box.appendChild(label);
 
-  const btn = document.createElement('button');
-  btn.type = 'button'; btn.className = 'primary ghost'; btn.textContent = hasToken ? 'Sync API keys' : 'Connect';
-  btn.addEventListener('click', async () => {
-    btn.disabled = true;
-    const r = await syncAllKeys();
-    btn.disabled = false;
-    if(r && r.message) text.textContent = r.message;
-  });
-  box.appendChild(btn);
+  const mkBtn = (txt, fn, primary) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = primary ? 'primary' : 'primary ghost'; b.textContent = txt;
+    b.addEventListener('click', async () => { b.disabled = true; try{ await fn(text); } finally{ b.disabled = false; } });
+    box.appendChild(b); return b;
+  };
+  const localOnly = signedIn && EX_LIST_LOCAL().some(([ex, mode]) => !savedKeys().some(k => k.exchange === ex && k.mode === mode));
+  if(accountsAvailable() && !signedIn) mkBtn('Sign in', async () => { await openAuthModal(); }, true);
+  if(hasAuth && (!accountsAvailable() || signedIn || savedToken())){
+    mkBtn(localOnly ? 'Save my keys to account' : 'Sync API keys', async (t) => { const r = await syncAllKeys(); if(r && r.message) t.textContent = r.message; });
+  }
+  if(signedIn && legacyAvail){
+    mkBtn('Move my earlier bots & keys here', async (t) => {
+      const tok = window.prompt('To move the bots, trades and keys you had before accounts into this account, enter the server access token (WORKER_TOKEN) once.');
+      if(!tok) return;
+      try{
+        const r = await claimLegacy(tok.trim());
+        if(!r.ok){ t.textContent = r.message || 'Could not move them.'; return; }
+        legacyAvail = false; const m = r.moved || {};
+        t.textContent = `Moved ${m.bots || 0} bot(s), ${m.trades || 0} trade(s) and ${m.keys || 0} key(s) into your account. They keep running.`;
+        await refresh();
+      }catch(e){ t.textContent = e.message; }
+    });
+  }
+  if(signedIn) mkBtn('Sign out', async () => { await signOut(); });
   host.appendChild(box);
+}
+// verified Bybit/Binance keys this device holds itself (not placeholders) — [exchange, mode] pairs
+function EX_LIST_LOCAL(){
+  const out = [];
+  for(const ex of BOT_EXCHANGES) for(const mode of ['live', 'demo']) if(localCred(ex, mode)) out.push([ex, mode]);
+  return out;
 }
