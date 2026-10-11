@@ -367,3 +367,42 @@ test('on Render with no database and no disk path the bots refuse to run (the fr
   assert.equal(s.enabled, false);
   assert.throws(() => s.setCred('bybit', 'demo', KEYS), /ephemeral/);
 });
+
+// ---------------- cold start + storage health (the "my bot vanished after reopening the tab" class of bug) ----------------
+test('database mode: until the saved bots are read the store is NOT "enabled" — a cold start must not look like an empty, healthy server', async () => {
+  const db = fakeDb();
+  db.rows.set('state', { tradingBots: [{ id: 'BOT-GRID-7-cccc', status: 'active', type: 'grid', runtime: {} }] });
+  const slow = db.fetch;
+  db.fetch = async (url, init) => { if(!init || !init.method || init.method === 'GET') await sleep(40); return slow(url, init); };
+  await withDb(db, async () => {
+    const s = openBotStore({ vaultKey: VAULT_KEY, remote: REMOTE, log: quiet, writeDelayMs: 5 });
+    assert.equal(s.enabled, false, 'must not report ready while loading');
+    assert.equal(s.loading, true);
+    assert.match(s.reason, /still loading/);
+    await s.ready;
+    assert.equal(s.enabled, true);
+    assert.equal(s.loading, false);
+    assert.equal(s.state.tradingBots[0].id, 'BOT-GRID-7-cccc');
+  });
+});
+
+test('database mode: a database that can be read but not written is reported (health.failing) and verifyWrite refuses', async () => {
+  const db = fakeDb();
+  const real = db.fetch;
+  db.fetch = async (url, init = {}) => (init.method === 'POST')
+    ? { ok: false, status: 401, text: async () => 'new row violates row-level security policy' }
+    : real(url, init);
+  await withDb(db, async () => {
+    const s = openBotStore({ vaultKey: VAULT_KEY, remote: REMOTE, log: quiet, writeDelayMs: 5 }); await s.ready;
+    assert.equal(s.health.failing, false, 'nothing attempted yet');
+    await s.setCred('bybit', 'demo', KEYS);
+    assert.equal(s.health.failing, true);
+    assert.match(s.health.lastSaveError, /row-level security/);
+    const v = await s.verifyWrite();
+    assert.equal(v.ok, false);
+    // once writes work again, the next save clears the flag
+    globalThis.fetch = real; await s.flushNow();   // the database starts accepting writes again
+    assert.equal(s.health.failing, false);
+    assert.ok(s.health.lastSaveAt);
+  });
+});

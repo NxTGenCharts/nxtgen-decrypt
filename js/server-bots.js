@@ -91,7 +91,21 @@ function applyStatus(st){
   const f = hooks.fu();
   const incoming = st.bots || [];
   const ids = new Set(incoming.map(b => b.id));
-  f.tradingBots = f.tradingBots.filter(b => !b.server || ids.has(b.id)); // deleted on the server (or from another device)
+  // A bot this page remembers as a server bot, but the server no longer lists. It used to be deleted here — which made a
+  // bot that is STILL TRADING on the exchange vanish from both Active and Stopped (e.g. after the server restarted and
+  // came back without it). Never forget it: hand it to this page's own manager (which re-reads the exchange itself),
+  // and say so on the card.
+  for(const b of f.tradingBots){
+    if(!b.server || ids.has(b.id)) continue;
+    b.server = false;
+    if(b.status === 'active'){
+      b.browserOnlyNote = 'the server lost this bot (it was restarted without its saved bots), so this page took it over.';
+      if(b.runtime) delete b.runtime.lastTickAtMs;
+    } else if(b.status === 'deploying'){
+      b.status = 'error'; b.statusIsError = true;
+      b.statusMessage = 'The server lost this bot while it was deploying — some orders may be resting on the exchange. Press Stop to cancel them.';
+    }
+  }
   for(const sb of incoming){
     sb.server = true;
     const i = f.tradingBots.findIndex(b => b.id === sb.id);
@@ -234,8 +248,13 @@ function renderBar(){
     msg = 'Server mode: not connected yet. Create a bot and you\u2019ll be asked for your server access token once, then it keeps trading with this tab closed.';
   } else if(lastError){
     tone = 'var(--red)'; msg = `Server mode: can\u2019t reach the server \u2014 ${lastError}`;
+  } else if(status && status.loading){
+    tone = 'var(--amber)'; msg = 'Server mode: the server is starting up and loading your saved bots\u2026';
   } else if(status && !status.enabled){
     tone = 'var(--amber)'; msg = `Server mode is not set up on the server: ${status.reason || 'vault disabled'} Bots will run in this browser only.`;
+  } else if(status && status.storageHealth && status.storageHealth.failing){
+    tone = 'var(--red)';
+    msg = `Server mode: the server can\u2019t save your bots (${status.storageHealth.lastSaveError || 'storage error'}). If it restarts it will forget them while their orders stay on the exchange \u2014 fix its storage (see server/README.md) before relying on it.`;
   } else if(status){
     const keys = (status.creds || []).map(k => `${EX_NAMES[k.exchange] || k.exchange} ${k.mode} \u2026${k.last4}`).join(', ');
     const running = (status.bots || []).filter(b => b.status === 'active' && !b.paused).length;

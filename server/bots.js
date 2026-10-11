@@ -17,6 +17,7 @@ import { createBotEngine, BOT_EXCHANGES, httpErr } from './botEngine.js';
 import { requireRole } from './worker.js';
 
 const PROXY_TIMEOUT_MS = 30_000;
+const STORAGE_HINT = 'If you use Supabase, BOT_SUPABASE_KEY must be the SECRET key (sb_secret_… / service_role), not the public one — the public key can read but not write.';
 
 export function attachBots(app, { baseUrl, internalKey, env = process.env, log = console, startEngine = true } = {}){
   // Where bots are saved. Render's free plan wipes its disk on every restart/spin-down, so on Render WITHOUT a database or
@@ -68,9 +69,9 @@ export function attachBots(app, { baseUrl, internalKey, env = process.env, log =
   app.get('/api/bots/status', requireRole('view'), (req, res) => {
     const snap = engine.snapshot();
     res.json({
-      ok: true, enabled: store.enabled, reason: store.reason, role: req.workerRole, serverTime: Date.now(),
+      ok: true, enabled: store.enabled, loading: store.loading, reason: store.reason, role: req.workerRole, serverTime: Date.now(),
       exchanges: BOT_EXCHANGES, creds: credSummary(), bots: snap.bots.map(botView), day: snap.day,
-      storage: store.persistence,
+      storage: store.persistence, storageHealth: store.health,
     });
   });
 
@@ -89,7 +90,10 @@ export function attachBots(app, { baseUrl, internalKey, env = process.env, log =
     const v = await callProxy('/api/verify', { exchange, mode, apiKey, secretKey, passphrase });
     if(v.rejected) throw httpErr(400, v.message || 'The exchange rejected this key.');
     if(!v.verified) throw httpErr(502, v.message || 'Could not reach the exchange to verify this key — try again.');
-    store.setCred(exchange, mode, { apiKey, secretKey, passphrase });
+    await store.setCred(exchange, mode, { apiKey, secretKey, passphrase });
+    // The key is held in memory either way; if it could not be written to storage, say so NOW instead of letting the page
+    // report "saved" and then lose it (and every bot) at the next restart.
+    if(store.health.failing) throw httpErr(503, `The key reached the server but could not be saved to its ${store.persistence} (${store.health.lastSaveError}). It will be forgotten when the server restarts. ${STORAGE_HINT}`);
     return { creds: credSummary() };
   }));
 
@@ -102,6 +106,9 @@ export function attachBots(app, { baseUrl, internalKey, env = process.env, log =
   }));
 
   app.post('/api/bots', requireRole('admin'), guard, bigJson, wrap(async (req) => {
+    // Never take a bot we could not remember: after a restart it would still be trading on the exchange with nothing managing it.
+    const w = await store.verifyWrite();
+    if(!w.ok) throw httpErr(503, `The server can't save bots right now (${w.message}), so it won't take this one — it would be forgotten on the next restart while its orders sat on the exchange. ${STORAGE_HINT}`);
     const bot = engine.handoff(req.body && req.body.bot, req.body && req.body.limits);
     return { bot: botView(bot) };
   }));

@@ -186,6 +186,13 @@ activity, so if you stop all bots for a long time, open the project once to wake
 Without Supabase *and* without a disk, on Render the bots refuse to start and say why — they would be forgotten at the next
 restart while their orders still sat on the exchange.
 
+**If the Trading Bots bar says the server can't save your bots.** The page now reads `/api/bots/status` → `storageHealth`.
+A red "can't save" message means the last write to storage failed, so a restart would forget your bots and keys while their
+orders stayed on the exchange. The server also refuses to take a new bot (and says why) while it can't save. With Supabase
+the usual cause is `BOT_SUPABASE_KEY` being the public/anon key — it can *read* (an empty table) but not *write*; use the
+**secret** key (`sb_secret_…` or `service_role`). Right after a restart the bar briefly says the server is "starting up and
+loading your saved bots" — the page leaves its own bot list alone during that time.
+
 ### Option B — Paid Render with a disk (the sturdy setup)
 
 1. **Paid, always-on instance.** A free Render web service sleeps after ~15 minutes without traffic, which

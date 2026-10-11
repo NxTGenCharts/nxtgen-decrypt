@@ -128,3 +128,31 @@ test('a key cannot be deleted while a bot still runs on it', async () => {
   assert.equal((await call(app, 'POST', '/api/bots/keys/delete', { body: { exchange: 'bybit', mode: 'demo' } })).code, 200);
   assert.equal(store.getCred('bybit', 'demo'), null);
 });
+
+test('storage that cannot be written: status says so, a key save is reported as unsaved, and a bot is refused', async () => {
+  const blocker = fs.mkdtempSync(path.join(os.tmpdir(), 'nxblock-'));
+  const notADir = path.join(blocker, 'file'); fs.writeFileSync(notADir, 'x');
+  const app = fakeApp();
+  globalThis.fetch = async (url) => ({ json: async () => (String(url).endsWith('/api/verify') ? { verified: true } : { ok: false }) });
+  const { store } = attachBots(app, { baseUrl: 'http://127.0.0.1:9', internalKey: 'int', env: { BOT_VAULT_KEY: 'k'.repeat(40), BOT_DATA_DIR: path.join(notADir, 'data'), WORKER_TOKEN: TOKEN }, log: quiet, startEngine: false });
+  const k = await call(app, 'POST', '/api/bots/keys', { body: keyBody });
+  assert.equal(k.code, 503);
+  assert.match(k.body.message, /could not be saved/);
+  const st = await call(app, 'GET', '/api/bots/status');
+  assert.equal(st.body.storageHealth.failing, true);
+  const plan = buildManualGridPlan({ symbol: 'ABCUSDT', direction: 'NEUTRAL', upper: 110, lower: 90, levelCount: 6, leverage: 5, investmentUsd: 600 });
+  const bot = { id: 'BOT-GRID-1700000000001-cd34', type: 'grid', exchange: 'bybit', mode: 'demo', symbol: 'ABCUSDT', direction: 'NEUTRAL', leverage: 5, investmentUsd: 600, config: {}, plan };
+  const h = await call(app, 'POST', '/api/bots', { body: { bot } });
+  assert.equal(h.code, 503);
+  assert.match(h.body.message, /won't take this one/);
+  assert.equal(store.state.tradingBots.length, 0, 'no bot may be accepted that could not be remembered');
+});
+
+test('status exposes a healthy storageHealth and loading=false once ready', async () => {
+  const { app } = build();
+  await call(app, 'POST', '/api/bots/keys', { body: keyBody });
+  const st = await call(app, 'GET', '/api/bots/status');
+  assert.equal(st.body.loading, false);
+  assert.equal(st.body.storageHealth.failing, false);
+  assert.equal(st.body.storageHealth.persistence, 'disk');
+});

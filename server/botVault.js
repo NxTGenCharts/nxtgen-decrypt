@@ -70,6 +70,7 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
   let aesKey = null;
   let timer = null, dirty = false;
   let dirtyCreds = false, lastTradeSig = '', ready = false, saving = null, saveFailures = 0;
+  let lastSaveAt = null, lastSaveError = null;   // surfaced by /api/bots/status so a store that can't save is visible, not silent
 
   if(on) aesKey = crypto.scryptSync(key, 'nxtgen-bot-vault-v1', 32);
 
@@ -148,8 +149,9 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
       const tmp = `${file}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(out), { mode: 0o600 });
       fs.renameSync(tmp, file);
-      dirty = false;
+      dirty = false; lastSaveAt = Date.now(); lastSaveError = null; saveFailures = 0;
     }catch(e){
+      saveFailures++; lastSaveError = e.message;
       log.error && log.error(`[bots] could not write ${file}: ${e.message}`);
     }
   }
@@ -163,9 +165,9 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
     try{
       await rest('POST', '?on_conflict=k', rows.map(r => ({ ...r, updated_at: new Date().toISOString() })), { Prefer: 'resolution=merge-duplicates,return=minimal' });
       if(sig !== lastTradeSig) lastTradeSig = sig;
-      saveFailures = 0;
+      saveFailures = 0; lastSaveAt = Date.now(); lastSaveError = null;
     }catch(e){
-      dirty = true; if(wasCreds) dirtyCreds = true; saveFailures++;     // keep it dirty: the next flush retries
+      dirty = true; if(wasCreds) dirtyCreds = true; saveFailures++; lastSaveError = e.message;     // keep it dirty: the next flush retries
       if(saveFailures === 1 || saveFailures % 10 === 0) log.error && log.error(`[bots] could not save to the database (attempt ${saveFailures}): ${e.message}`);
     }
   }
@@ -189,8 +191,26 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
   else { loadFile(); ready = true; readyP = Promise.resolve(); }
 
   return {
-    get enabled(){ return on && !loadError; },
-    get reason(){ return loadError || reason; },
+    // Not "enabled" until the saved bots + keys have been read. Before this, a request that arrived during a cold start
+    // (Render wakes the service on the first page load) saw an EMPTY store reported as healthy — the page then believed
+    // the server had no bots and forgot its own.
+    get enabled(){ return on && !loadError && ready; },
+    get loading(){ return on && !loadError && !ready; },
+    get reason(){ return loadError || reason || (on && !ready ? 'The server is still loading your saved bots — try again in a few seconds.' : null); },
+    get health(){ return { persistence: useRemote ? 'database' : 'disk', lastSaveAt, lastSaveError, saveFailures, failing: saveFailures > 0 }; },
+    // Proves a write can actually land RIGHT NOW. A database key that can read but not write (the public key instead of
+    // the secret one) looks perfectly healthy until the first restart wipes everything — so check before taking a bot.
+    async verifyWrite(){
+      if(!on) return { ok: false, message: reason };
+      try{
+        if(useRemote){
+          await rest('POST', '?on_conflict=k', [{ k: 'health', v: { at: Date.now() }, updated_at: new Date().toISOString() }], { Prefer: 'resolution=merge-duplicates,return=minimal' });
+        } else {
+          fs.mkdirSync(dataDir, { recursive: true }); fs.accessSync(dataDir, fs.constants.W_OK);
+        }
+        return { ok: true };
+      }catch(e){ lastSaveError = e.message; return { ok: false, message: e.message }; }
+    },
     persistence: useRemote ? 'database' : 'disk',
     dataDir, file, state, ready: readyP,
     touch, flush: flushNow, flushNow,

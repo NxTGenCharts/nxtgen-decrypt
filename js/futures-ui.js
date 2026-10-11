@@ -3081,7 +3081,16 @@ function initTradingBots(){
     fu,
     hasTrade: (id) => loadPersistentTradeLog().some(t => t.id === id),
     addTrade: (rec) => appendPersistentTrade(rec),
-    onChange: () => { saveTradingBotsSnapshot(); renderTradingBotsList(); renderTradingBotsDailyLimits(); try{ renderSmartBotsPanel(); }catch(_){ /* panel not on this page */ } },
+    onChange: () => {
+      saveTradingBotsSnapshot(); renderTradingBotsList(); renderTradingBotsDailyLimits(); try{ renderSmartBotsPanel(); }catch(_){ /* panel not on this page */ }
+      // A bot the server stopped listing is handed back to this page (see server-bots.js applyStatus) — make sure
+      // this page's own management loop is running so it is actually looked after.
+      const f = fu();
+      if(!f.tradingBotsRunning && f.tradingBots.some(b => b.status === 'active' && !b.paused && !isServerBot(b))){
+        toggleTradingBotsRunning();
+        setTimeout(runTradingBotsCycle, 1500);
+      }
+    },
   });
   // Anything that was 'active' when the page last closed is presumably
   // still open for real on the exchange — get the management loop
@@ -6632,7 +6641,64 @@ function initSmartBots(){
   }
 }
 
+// -------------------------------------------------------------
+// Remembered selections. Which exchange and Live/Demo account you picked (for the Live/Demo engine, for bots and for
+// the balance card) used to live only in memory, so every reload or return to the app fell back to Bybit + Live — even
+// right after deploying a Demo bot. They are now saved on this device and restored before anything renders.
+// Nothing here arms or starts anything: Live/Demo trading still has to be armed again each session, as before.
+// -------------------------------------------------------------
+const UI_PREFS_KEY = 'nxtgen_futures_ui_prefs_v1';
+const PREF_EXCHANGES = ['bybit', 'binance', 'gateio', 'mexc', 'bitget'];
+const pickOf = (v, allowed) => (allowed.includes(v) ? v : undefined);
+
+function collectUiPrefs(){
+  const f = fu();
+  return {
+    liveExchange: f.liveExchange, liveModeByExchange: f.liveModeByExchange, gridLiveExchange: f.gridLiveExchange,
+    tbCreateExchange: f.tbCreateExchange, tbCreateType: f.tbCreateType,
+    sbCreateExchange: f.sbCreateExchange, sbCreateType: f.sbCreateType,
+    sbAcctExchange: f.sbAcctExchange, sbAcctMode: f.sbAcctMode,
+  };
+}
+
+function loadUiPrefs(){
+  let p;
+  try{ p = JSON.parse(localStorage.getItem(UI_PREFS_KEY) || 'null'); }catch(e){ p = null; }
+  if(!p || typeof p !== 'object') return;
+  const f = fu();
+  for(const k of ['liveExchange', 'gridLiveExchange', 'tbCreateExchange', 'sbCreateExchange', 'sbAcctExchange']){
+    const v = pickOf(p[k], PREF_EXCHANGES); if(v) f[k] = v;
+  }
+  if(p.liveModeByExchange && typeof p.liveModeByExchange === 'object'){
+    for(const ex of PREF_EXCHANGES){
+      const m = pickOf(p.liveModeByExchange[ex], ['live', 'demo']);
+      if(m) f.liveModeByExchange[ex] = (ex === 'mexc') ? 'live' : m; // MEXC has no Demo
+    }
+  }
+  const t1 = pickOf(p.tbCreateType, ['grid', 'dca']); if(t1) f.tbCreateType = t1;
+  const t2 = pickOf(p.sbCreateType, ['grid', 'dca']); if(t2) f.sbCreateType = t2;
+  const m = pickOf(p.sbAcctMode, ['live', 'demo']); if(m) f.sbAcctMode = m;
+}
+
+function initUiPrefsPersistence(){
+  let last = '';
+  try{ last = localStorage.getItem(UI_PREFS_KEY) || ''; }catch(e){ /* storage blocked — nothing to persist to */ return; }
+  const save = () => {
+    try{
+      const json = JSON.stringify(collectUiPrefs());
+      if(json !== last){ localStorage.setItem(UI_PREFS_KEY, json); last = json; }
+    }catch(e){ /* non-fatal */ }
+  };
+  // Capture-phase + deferred, so whatever any button/dropdown handler sets is saved right after it ran — without having
+  // to touch each handler. The interval and pagehide cover values set after an await.
+  for(const t of ['click', 'change']) document.addEventListener(t, () => setTimeout(save, 0), true);
+  document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'hidden') save(); });
+  window.addEventListener('pagehide', save);
+  setInterval(save, 3000);
+}
+
 export function initFuturesEngine(){
+  try{ loadUiPrefs(); initUiPrefsPersistence(); }catch(err){ console.error('[futures-ui] remembered selections failed — continuing:', err); }
   ensureDayState();
   if(els.fuStartingBalance) els.fuStartingBalance.value = String(fu().dayState.startingEquity);
   if(els.fuModeBtn) els.fuModeBtn.addEventListener('click', toggleRunning);
