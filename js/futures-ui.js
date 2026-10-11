@@ -4773,15 +4773,19 @@ function restoreLivePositions(){
 // =============================================================
 const SMART_BOT_TYPES = { dca: 'DCA Bot (Trend)', grid: 'Grid Bot (Sideways)' };
 
+// Default Grid settings for BOTH the manual create form and Auto-pick best: margin 100 USDT, 6x leverage,
+// 10 grid levels, take profit 5%, stop loss 8%. Change them here and every default follows.
+const SB_DEFAULTS = { fundingUsd: 100, leverage: 6, levelCount: 10, takeProfitPct: 5, stopLossPct: 8 };
+
 function sbState(){
   const f = fu();
   if(!f.sbGridForm) f.sbGridForm = {
-    fundingUsd: 100, fundingMode: 'usdt', fundingPct: 50, leverage: 6, takeProfitPct: 10, stopLossPct: 12,
+    fundingUsd: SB_DEFAULTS.fundingUsd, fundingMode: 'usdt', fundingPct: 50, leverage: SB_DEFAULTS.leverage, takeProfitPct: SB_DEFAULTS.takeProfitPct, stopLossPct: SB_DEFAULTS.stopLossPct,
     // Fewer levels over the SAME auto-suggested range means each one is
     // wider — bigger $ per fill, less often; more levels means smaller
     // fills, more often. Same total capital either way; this is a
     // trade-off dial, not a "make it more profitable" knob.
-    levelCount: 8,
+    levelCount: SB_DEFAULTS.levelCount,
     targetPerGrid: '', // optional: the net $ per completed grid the person is aiming for — only drives the suggestions in the estimate panel
     // Recovery / averaging — off by default. See applyGridRecovery's
     // header comment for exactly what this does and why it's riskier
@@ -5077,7 +5081,7 @@ function sbPreviewHtml(){
   const exchange = f.sbCreateExchange || 'bybit';
   const pctMode = cfg.fundingMode === 'pct';
   const fundingUsd = pctMode ? 100 : (cfg.fundingUsd || 0);
-  const levelCount = cfg.levelCount || 8;
+  const levelCount = cfg.levelCount || SB_DEFAULTS.levelCount;
   const leverage = cfg.leverage || 1;
   if(!(fundingUsd > 0)) return '<div class="sbf-card sbf-note sbf-note--block">Enter a margin amount to see the estimate.</div>';
   const est = estimateGridPreview({ snap: last.snap, regime: last.regime, fundingUsd, leverage, levelCount, exchange, scanGuard: true });
@@ -5725,7 +5729,7 @@ async function createSmartBotFromFormInner(){
 
   if(type === 'grid'){
     const range = suggestGridRange(snap, regime);
-    const levelCount = cfg.levelCount || 8;
+    const levelCount = cfg.levelCount || SB_DEFAULTS.levelCount;
     const plan = buildManualGridPlan({ symbol, direction: 'NEUTRAL', upper: range.upper, lower: range.lower, levelCount, leverage: cfg.leverage, investmentUsd: fundingUsd });
     if(!plan){ sbCreateStatus('Could not build a valid grid plan from current market data — try again.', true); return; }
     bot.direction = 'NEUTRAL'; bot.investmentUsd = fundingUsd;
@@ -6216,11 +6220,10 @@ function renderSmartBotDetail(id, force){
 // -------------------------------------------------------------
 const SB_SCAN_LEVELS = 10;
 const SB_AUTO_TOPN = 10;           // one-click "Auto-pick best" always scans the top 10 by 24h volume
-const SB_AUTO_LEV_CAP = 15;        // default leverage for any pair that supports more than this
-// Per-pair leverage for the one-click scan: a pair capped at 8x (or any max <= 15x)
-// uses its own max; a pair that supports higher uses 15x. If the exchange doesn't
-// publish a max (e.g. Binance's public API), 15x is used and the server still clamps
-// to the real limit when the order is placed.
+const SB_AUTO_LEV_CAP = SB_DEFAULTS.leverage;   // Auto-pick best uses the default leverage (6x) on every pair — lower only if a pair's own max is lower
+// Per-pair leverage for the one-click scan: the default (6x), or the pair's own max if that is lower.
+// If the exchange doesn't publish a max (e.g. Binance's public API), the default is used and the
+// server still clamps to the real limit when the order is placed.
 function sbAutoLeverage(maxLev){
   const m = Math.floor(Number(maxLev));
   return (m > 0) ? Math.min(SB_AUTO_LEV_CAP, m) : SB_AUTO_LEV_CAP;
@@ -6228,7 +6231,7 @@ function sbAutoLeverage(maxLev){
 
 function sbScanState(){
   const f = sbState();
-  if(!f.sbScan) f.sbScan = { exchange: 'bybit', margin: 100, leverage: 6, topN: 10, running: false, progress: '', results: null, skipped: 0, scannedAtMs: 0, open: false };
+  if(!f.sbScan) f.sbScan = { exchange: 'bybit', margin: SB_DEFAULTS.fundingUsd, leverage: SB_DEFAULTS.leverage, topN: 10, running: false, progress: '', results: null, skipped: 0, scannedAtMs: 0, open: false };
   return f.sbScan;
 }
 
@@ -6268,7 +6271,7 @@ function renderSbScanner(){
     <details class="sbf-card sbf-rules" id="sbScanDetails" style="margin-top:14px;"${sc.open ? ' open' : ''}>
       <summary class="sbf-sec">Grid opportunities &middot; ${SB_SCAN_LEVELS} levels</summary>
       <div class="sbf-collapse-body">
-        <div class="sbf-hint" style="margin:0 0 12px;">Scans the most-traded pairs and ranks them by the estimated profit of a ${SB_SCAN_LEVELS}-level Grid bot right now, using your margin and leverage. <strong>Auto-pick best</strong> does it all in one click: scans the top ${SB_AUTO_TOPN} by volume, uses each pair&rsquo;s own max leverage (8x pairs use 8x, anything higher uses ${SB_AUTO_LEV_CAP}x), and opens the create form with the most profitable one filled in &mdash; nothing is deployed until you press Create.</div>
+        <div class="sbf-hint" style="margin:0 0 12px;">Scans the most-traded pairs and ranks them by the estimated profit of a ${SB_SCAN_LEVELS}-level Grid bot right now, using your margin and leverage. <strong>Auto-pick best</strong> does it all in one click: scans the top ${SB_AUTO_TOPN} by volume, uses ${SB_AUTO_LEV_CAP}x leverage (lower only if a pair&rsquo;s own max is lower), and opens the create form with the most profitable one filled in using the defaults: ${SB_DEFAULTS.levelCount} levels, take profit ${SB_DEFAULTS.takeProfitPct}%, stop loss ${SB_DEFAULTS.stopLossPct}% &mdash; nothing is deployed until you press Create.</div>
         <div class="sbf-fields" style="grid-template-columns:repeat(2, minmax(0,1fr));gap:10px;">
           <div class="sbf-field"><label class="sbf-label" for="sbScanExchange"><span>Exchange</span></label>
             <div class="sbf-select"><select id="sbScanExchange">${opt('bybit', 'Bybit', sc.exchange)}${opt('binance', 'Binance', sc.exchange)}</select>${icon('chevron-down')}</div></div>
@@ -6297,7 +6300,7 @@ async function runSbScan(opts){
   const topN = auto ? SB_AUTO_TOPN : (parseInt(document.getElementById('sbScanTopN')?.value, 10) || sc.topN);
   const margin = parseFloat(document.getElementById('sbScanMargin')?.value);
   const leverage = Math.max(1, Math.min(50, parseInt(document.getElementById('sbScanLev')?.value, 10) || 1));
-  Object.assign(sc, { exchange, topN, margin: margin > 0 ? margin : 100, leverage, running: true, auto, autoPick: null, progress: 'Loading pair list&hellip;', open: true });
+  Object.assign(sc, { exchange, topN, margin: margin > 0 ? margin : SB_DEFAULTS.fundingUsd, leverage, running: true, auto, autoPick: null, progress: 'Loading pair list&hellip;', open: true });
   renderSbScanner();
   const setProgress = (t) => { sc.progress = t; const el = document.getElementById('sbScanProgress'); if(el) el.innerHTML = t; };
   try{
@@ -6336,7 +6339,7 @@ async function runSbScan(opts){
       sc.running = false;
       sc.auto = false;
       renderSbScanner(); // redraw FIRST so the buttons/progress aren't left frozen in their "Scanning…" state
-      sbUseScannedPair(out[0].symbol); // opens the create form pre-filled; the person still presses Create
+      sbUseScannedPair(out[0].symbol, { auto: true }); // opens the create form pre-filled; the person still presses Create
       return;
     }
     if(auto) sc.progress = 'No pairs could be scanned right now. Try again in a moment.';
@@ -6348,7 +6351,7 @@ async function runSbScan(opts){
   renderSbScanner();
 }
 
-function sbUseScannedPair(symbol){
+function sbUseScannedPair(symbol, opts){
   const f = sbState();
   const sc = sbScanState();
   f.sbCreateExchange = sc.exchange;
@@ -6357,6 +6360,7 @@ function sbUseScannedPair(symbol){
   f.sbRegimeSuggestion = null;
   const picked = (sc.results || []).find(r => r.symbol === symbol);
   f.sbGridForm = Object.assign({}, f.sbGridForm, { fundingUsd: sc.margin, fundingMode: 'usdt', leverage: (picked && picked.lev) || sc.leverage, levelCount: SB_SCAN_LEVELS });
+  if(opts && opts.auto) Object.assign(f.sbGridForm, { takeProfitPct: SB_DEFAULTS.takeProfitPct, stopLossPct: SB_DEFAULTS.stopLossPct });
   f.sbView = 'create';
   renderSmartBotsPanel();
 }
