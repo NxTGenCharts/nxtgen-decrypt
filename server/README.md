@@ -309,6 +309,41 @@ server whether or not any device is open.
   device's local log stay there; use a private window on a shared computer.
 - The Futures Engine worker (`/api/worker/*`) is still single-owner (shared token) — accounts cover Trading Bots and saved keys.
 
+### The Account area (dashboard, exchange connections, security)
+
+Signed-in users have their own area at **/account/** (the old API Keys page now redirects to **/account/#exchanges**; API Keys is no
+longer a main navigation item, on desktop or in the phone's bottom bar).
+
+| Section | What it does |
+|---|---|
+| Dashboard | Welcome, saved exchange connections, server bots (running/stopped), realized P&L from the trades the server booked, unrealized P&L from open bot positions the exchange reported, recent trades, recent account events. Balances appear only after a **read-only** check with the exchange. Anything unavailable shows an empty/“—” state, never a made-up number. |
+| Exchange Connections | Bybit, Binance, Bitget (with passphrase), MEXC, Gate.io — Live/Demo where the exchange has a demo. **Test connection** (read-only balance call, never an order), **Replace key**, **Remove**, and **Move to my account** for a key that only exists in this browser. |
+| Profile | Email, display name (saved in Supabase user metadata), member since, email-verified, account status. Sign out; **Delete account**. |
+| Security | Change password (proves the current one, then signs every other device out), email a reset link, sign out here / everywhere. A per-session list is not offered because Supabase Auth does not expose one to the browser. Two-factor auth is **not** implemented, so it is not shown. |
+| Preferences | AI-signal provider and Backup & Transfer. Theme, currency and notification settings do not exist yet, so none are shown. |
+
+**Where exchange keys live.** Signed in, a new key is sent once to the server (`POST /api/bots/keys`), **verified with the exchange first**, then
+stored AES-256-GCM encrypted with a key derived from `BOT_VAULT_KEY` **and the account id**. The browser keeps only an in-memory placeholder
+(`srv:<exchange>:<mode>:<last4>`); nothing is written to localStorage/sessionStorage. All five exchanges can now be held this way (the 24/7 bot engine
+still trades only Bybit and Binance). Signed out, or when server storage is unavailable, the page falls back to the earlier behaviour
+(key kept in this browser) and marks the row **THIS DEVICE ONLY**. Keys already saved in a browser are moved with **Move to my account**.
+
+New endpoints (all need a valid account session; the account is taken from the session, never from a request field):
+
+- `POST /api/account/keys/test` `{exchange, mode}` — re-checks the caller's own saved key with the same read-only call as `/api/verify`; records the
+  confirmation time; 3 s spacing per key. Answers `{verified, rejected, balance, message}` — never any credential material.
+- `POST /api/account/delete` `{confirmEmail}` — **policy:** refused (409) while any of the account's bots is running or deploying (a paused bot holds no orders
+  and does not block). The user stops bots first with the normal Stop, which cancels orders and closes the position. Nothing is flattened automatically.
+  Then: the typed email must match; the engine is stopped; all stored rows (keys, bots, trades) are erased; finally the Supabase login is removed
+  (needs `SUPABASE_SERVICE_KEY` or a secret `BOT_SUPABASE_KEY`; otherwise the data is erased and the response says the login remains). Data is erased
+  **before** the login so a failure leaves a working account to retry from.
+- `GET /api/account/keys` now also returns `verifiedAt` and `hasPassphrase` per key.
+
+Pages loaded on phones: a header account button, an **Account** tab in the bottom bar, and an identity block (email, Account, Exchanges, Sign out — or
+Sign in / Create account) in the ⋮ menu. The public landing page shows **Sign in** and **Create account** in its header and hero on every width.
+
+Tests: `tests/account-area.test.mjs` (server), `tests/account-page.test.mjs` (browser module), `tests/navigation.test.mjs` (static page checks).
+
 ### Sign-in pages and route protection
 
 Accounts have their own pages (all static files, same design system as the terminal):
@@ -368,6 +403,9 @@ sessionStorage and ends when the tab/browser closes. How long Supabase keeps the
 ### Tests
 
 ```
+node --import ./tests/_stubs/register.mjs tests/account-area.test.mjs                  # account area: five-exchange keys, read-only test, delete-account policy
+node tests/account-page.test.mjs                                                # account page helpers + save/test/password/delete flows (stubbed DOM)
+node tests/navigation.test.mjs                                                  # API Keys is gone from nav; Account + mobile/landing auth entry points exist
 node tests/bots.test.mjs                                                        # engine vs a simulated exchange
 node --import ./tests/_stubs/register.mjs tests/botRoutes.test.mjs              # HTTP layer (no express needed)
 node --import ./tests/_stubs/register.mjs tests/accounts.test.mjs               # accounts: isolation, saved-key swap, claim, invites

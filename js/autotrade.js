@@ -29,7 +29,7 @@
 //   clears your profit floor, compounding a running "today" balance
 //   until your daily target is hit, then stops and shows the summary.
 // =============================================================
-import { saveKeyToAccount, removeKeyFromAccount, isSignedIn, hasSavedKey } from './account.js';
+import { saveKeyToAccount, removeKeyFromAccount, testSavedKey, refreshKeys, onAccountChange, isSignedIn, hasSavedKey, accountsAvailable, keysStatus } from './account.js';
 import { els, state, DEFAULT_VERIFY_PROXY_URL } from './state.js';
 import { EXCHANGES, filterTriPairs } from './exchanges.js';
 import { buildGraph, findCycles } from './triangular.js';
@@ -336,14 +336,24 @@ function showAtMessage(html, type, iconName){
 }
 
 // ---------------- Connect Exchanges ----------------
+// Rows being re-keyed (Replace key on a key that lives on the account) — their inputs are shown empty and enabled.
+const editingRows = new Set();
+const rowId = (key, mode) => `${key}:${mode}`;
+// Signed in AND the server can actually store keys: new keys go to the server first and never touch this browser's storage.
+const serverStorageUsable = () => isSignedIn() && accountsAvailable() && keysStatus().enabled !== false;
+const maskedKey = (cred) => `\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022${cred && cred.last4 ? cred.last4 : (cred && cred.apiKey ? String(cred.apiKey).slice(-4) : '')}`;
+const escAttr = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
 function renderConnectRows(){
-  if(!els.connectRows) return; // lives on the API Keys page only
+  if(!els.connectRows) return; // lives on the Account page (Exchange Connections) only
   els.connectRows.innerHTML = Object.keys(EXCHANGES).map(key => {
     const label = EXCHANGES[key].label;
     const supportsDemo = EXCHANGES[key].demoSupported;
     const mode = supportsDemo ? (state.exchangeMode[key] || 'live') : 'live';
     const cred = (state.exchangeCreds[key] || {})[mode] || null;
     const stored = !!cred;               // a key/secret is saved for this slot
+    const held = stored && !!cred.serverHeld;          // lives encrypted on the server; this browser only has a placeholder
+    const editing = held && editingRows.has(rowId(key, mode));
     const connected = stored && cred.connected;
     const modeToggle = supportsDemo ? `
       <div class="mode-toggle" role="group" aria-label="${label} network">
@@ -353,10 +363,11 @@ function renderConnectRows(){
 
     let statusPill = '';
     if(stored){
-      if(cred.verified) statusPill = `<span class="pill tr-yes" title="${cred.verifyNote||''}">VERIFIED</span>`;
-      else statusPill = `<span class="pill" style="color:var(--amber);border-color:var(--amber-dim);" title="${cred.verifyNote||'Could not confirm with the exchange from this browser.'}">UNVERIFIED</span>`;
-      if(cred.serverHeld) statusPill += ' <span class="pill tr-yes" title="Stored encrypted on the server for your account. This device never holds the secret.">ON YOUR ACCOUNT</span>';
+      if(cred.verified) statusPill = `<span class="pill tr-yes" title="${escAttr(cred.verifyNote)}">VERIFIED</span>`;
+      else statusPill = `<span class="pill" style="color:var(--amber);border-color:var(--amber-dim);" title="${escAttr(cred.verifyNote || 'Could not confirm with the exchange from this browser.')}">UNVERIFIED</span>`;
+      if(held) statusPill += ' <span class="pill tr-yes" title="Stored encrypted on the server for your account. This device never holds the secret.">ON YOUR ACCOUNT</span>';
       else if(isSignedIn() && hasSavedKey(key, mode)) statusPill += ' <span class="pill tr-yes" title="Also saved on your account, so your other devices can use it.">SYNCED</span>';
+      else if(isSignedIn() && accountsAvailable()) statusPill += ' <span class="pill" style="color:var(--amber);border-color:var(--amber-dim);" title="This key is only stored in this browser. Move it to your account to keep the secret off this device.">THIS DEVICE ONLY</span>';
     }
 
     const modePillHtml = mode==='demo'
@@ -364,32 +375,49 @@ function renderConnectRows(){
       : '';
     const placeholderPrefix = mode === 'demo' ? 'demo ' : '';
     const needsPass = !!EXCHANGES[key].needsPassphrase;
+    const locked = stored && !editing;          // inputs show masked values and are read-only
+    const mask = locked ? maskedKey(cred) : '';
+    const verifiedLine = held && cred.verifiedAt ? `Last confirmed by ${label}: ${new Date(cred.verifiedAt).toLocaleString()}` : (stored && cred.verifyNote ? cred.verifyNote : '');
+
+    let actions;
+    if(!stored || editing){
+      actions = `<div class="connect-actions">
+          <button class="primary connect-btn" data-action="connect">${editing ? 'Save new key' : 'Connect'}</button>
+          ${editing ? '<button class="primary ghost cancel-edit-btn" type="button">Cancel</button>' : ''}
+        </div>`;
+    } else if(held){
+      actions = `<div class="connect-actions">
+          <button class="primary ghost test-btn" type="button" title="Read-only check with ${label} — never places an order">Test connection</button>
+          <button class="primary ghost replace-btn" type="button">Replace key</button>
+          <button class="primary ghost remove-btn" data-action="remove" title="Remove this key from your account">Remove</button>
+        </div>`;
+    } else {
+      const onAcct = isSignedIn() && hasSavedKey(key, mode);
+      actions = `<div class="connect-actions">
+          <button class="primary ghost connect-btn" data-action="${connected ? 'disconnect' : 'reconnect'}">${connected ? 'Disconnect' : 'Reconnect'}</button>
+          ${!NO_VERIFY_EXCHANGES.has(key) ? `<button class="primary ghost retry-verify-btn" data-action="retry-verify" title="Re-check this key against ${label} right now and pull the latest balance">Refresh Balance</button>` : ''}
+          ${isSignedIn() && accountsAvailable() && !onAcct && keysStatus().enabled !== false ? '<button class="primary move-btn" type="button" title="Verify it on the server, store it encrypted on your account, and remove it from this browser">Move to my account</button>' : ''}
+          ${onAcct ? '<button class="primary ghost use-account-btn" type="button" title="Remove the copy in this browser and use the one on your account">Use account copy</button>' : ''}
+          <button class="primary ghost remove-btn" data-action="remove" title="Permanently remove this saved key">Remove</button>
+        </div>`;
+    }
 
     return `<div class="connect-row${needsPass ? ' connect-row--passphrase' : ''}" data-exchange="${key}" data-mode="${mode}">
       <div class="connect-label">${label}${modePillHtml}${statusPill ? ' '+statusPill : ''}</div>
       ${modeToggle}
       <div class="kv-field">
-        <input class="ck-key" type="${stored ? 'password' : 'text'}" placeholder="Enter ${placeholderPrefix}API key" value="${stored ? cred.apiKey : ''}" ${stored ? 'disabled' : ''}>
+        <input class="ck-key" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Enter ${placeholderPrefix}API key" value="${locked ? mask : ''}" ${locked ? 'disabled' : ''}>
       </div>
       <div class="kv-field">
-        <input class="ck-secret" type="password" placeholder="Enter ${placeholderPrefix}secret key" value="${stored ? cred.secretKey : ''}" ${stored ? 'disabled' : ''}>
+        <input class="ck-secret" type="password" autocomplete="new-password" placeholder="Enter ${placeholderPrefix}secret key" value="${locked ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : ''}" ${locked ? 'disabled' : ''}>
       </div>
       ${needsPass ? `
       <div class="kv-field">
-        <input class="ck-passphrase" type="password" placeholder="Enter ${placeholderPrefix}passphrase" value="${stored ? cred.passphrase : ''}" ${stored ? 'disabled' : ''}>
+        <input class="ck-passphrase" type="password" autocomplete="new-password" placeholder="Enter ${placeholderPrefix}passphrase" value="${locked ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : ''}" ${locked ? 'disabled' : ''}>
       </div>` : ''}
-      ${stored ? `
-        <div class="connect-actions">
-          <button class="primary ghost connect-btn" data-action="${connected ? 'disconnect' : 'reconnect'}">${connected ? 'Disconnect' : 'Reconnect'}</button>
-          ${!NO_VERIFY_EXCHANGES.has(key) ? `<button class="primary ghost retry-verify-btn" data-action="retry-verify" title="Re-check this key against ${label} right now and pull the latest balance">Refresh Balance</button>` : ''}
-          <button class="primary ghost remove-btn" data-action="remove" title="Permanently remove this saved key">Remove</button>
-        </div>
-      ` : `
-        <div class="connect-actions">
-          <button class="primary connect-btn" data-action="connect">Connect</button>
-        </div>
-      `}
+      ${actions}
       <span class="xbadge" data-state="${connected ? 'up' : 'idle'}"><span class="xbadge-dot"></span>${connected ? 'CONNECTED' : (stored ? 'DISCONNECTED' : 'NOT CONNECTED')}</span>
+      ${verifiedLine ? `<div class="connect-note">${escAttr(verifiedLine)}</div>` : ''}
     </div>`;
   }).join('');
 }
@@ -498,23 +526,95 @@ if(els.connectRows) els.connectRows.addEventListener('click', async (e) => {
     return;
   }
 
+  const testBtn = e.target.closest('.test-btn');
+  if(testBtn){
+    const row = e.target.closest('.connect-row');
+    const key = row.dataset.exchange, mode = row.dataset.mode, label = EXCHANGES[key].label;
+    testBtn.disabled = true; testBtn.textContent = 'Testing…';
+    const r = await testSavedKey(key, mode).catch(err => ({ ok: false, message: err.message }));
+    if(r.ok && r.verified){
+      if(r.balance != null) state.balances[key][mode] = r.balance;
+      showAtMessage(`${label} (${mode}) connection confirmed${r.balance != null ? ` — balance ${money(r.balance)} USDT` : ''}. This was a read-only check; no order was placed.`, 'info');
+    } else if(r.ok && r.rejected){
+      showAtMessage(`${label} rejected this ${mode} key: ${r.message}. Check the key's permissions and IP allow-list, or use Replace key.`, 'error');
+    } else {
+      showAtMessage(`Could not confirm the connection: ${r.message || 'the server refused.'}`, 'error');
+    }
+    persist(); renderConnectRows(); renderBalances();
+    return;
+  }
+
+  const replaceBtn = e.target.closest('.replace-btn');
+  if(replaceBtn){
+    const row = e.target.closest('.connect-row');
+    editingRows.add(rowId(row.dataset.exchange, row.dataset.mode));
+    renderConnectRows();
+    const again = els.connectRows.querySelector(`.connect-row[data-exchange="${row.dataset.exchange}"] .ck-key`);
+    if(again) again.focus();
+    return;
+  }
+  if(e.target.closest('.cancel-edit-btn')){
+    const row = e.target.closest('.connect-row');
+    editingRows.delete(rowId(row.dataset.exchange, row.dataset.mode));
+    renderConnectRows();
+    return;
+  }
+
+  // A key that only exists in this browser (saved before accounts, or while signed out): hand it to the account. The server
+  // verifies it with the exchange first; once stored there, this browser's copy is dropped (saveKeyToAccount) and persist() scrubs it.
+  const moveBtn = e.target.closest('.move-btn');
+  if(moveBtn){
+    const row = e.target.closest('.connect-row');
+    const key = row.dataset.exchange, mode = row.dataset.mode, label = EXCHANGES[key].label;
+    const cred = state.exchangeCreds[key][mode];
+    if(!cred || cred.serverHeld) return;
+    moveBtn.disabled = true; moveBtn.textContent = 'Moving…';
+    const r = await saveKeyToAccount(key, mode, cred).catch(err => ({ ok: false, message: err.message }));
+    if(r && r.ok){
+      if(r.balance != null) state.balances[key][mode] = r.balance;
+      persist();
+      showAtMessage(`${label} (${mode}) key is now stored encrypted on your account and has been removed from this browser.`, 'info');
+    } else {
+      showAtMessage(`Not moved — your key is still only in this browser: ${(r && r.message) || 'the server refused it.'}`, 'error');
+    }
+    renderConnectRows(); renderBalances(); renderExchangeOptions();
+    return;
+  }
+
+  // The account already has this key: drop this browser's copy and use the account's.
+  const useAcct = e.target.closest('.use-account-btn');
+  if(useAcct){
+    const row = e.target.closest('.connect-row');
+    const key = row.dataset.exchange, mode = row.dataset.mode;
+    state.exchangeCreds[key][mode] = null;
+    persist();
+    await refreshKeys();
+    renderConnectRows(); renderBalances(); renderExchangeOptions();
+    showAtMessage(`${EXCHANGES[key].label} (${mode}): this browser's copy was removed; the key on your account is in use.`, 'info');
+    return;
+  }
+
   const removeBtn = e.target.closest('.remove-btn');
   if(removeBtn){
     const row = e.target.closest('.connect-row');
     const key = row.dataset.exchange;
     const mode = row.dataset.mode;
     const alsoOnAccount = isSignedIn() && hasSavedKey(key, mode);
-    if(alsoOnAccount && !window.confirm(`This ${EXCHANGES[key].label} ${mode} key is also saved on your account. Remove it from your account too?\n\nOK = remove everywhere (your other devices lose it).\nCancel = keep everything.`)) return;
+    const heldHere = !!(state.exchangeCreds[key][mode] && state.exchangeCreds[key][mode].serverHeld);
+    if(alsoOnAccount && !window.confirm(heldHere
+      ? `Remove your ${EXCHANGES[key].label} ${mode} key from your account?\n\nIt is deleted from the server and stops working on every device. A bot still running on it must be stopped first.`
+      : `This ${EXCHANGES[key].label} ${mode} key is also saved on your account. Remove it from your account too?\n\nOK = remove everywhere (your other devices lose it).\nCancel = keep everything.`)) return;
     if(alsoOnAccount){
       const r = await removeKeyFromAccount(key, mode).catch(err => ({ ok: false, message: err.message }));
       if(!r.ok){ showAtMessage(`Not removed: ${r.message || 'the server refused.'}`, 'error'); return; }
     }
     state.exchangeCreds[key][mode] = null;
+    editingRows.delete(rowId(key, mode));
     persist();
     renderConnectRows();
     renderBalances();
     renderExchangeOptions();
-    showAtMessage(`${EXCHANGES[key].label} (${mode}) key removed${alsoOnAccount ? ' from this device and your account' : ''}.`, 'info');
+    showAtMessage(`${EXCHANGES[key].label} (${mode}) key removed${alsoOnAccount ? (heldHere ? ' from your account' : ' from this device and your account') : ''}.`, 'info');
     return;
   }
 
@@ -566,6 +666,24 @@ if(els.connectRows) els.connectRows.addEventListener('click', async (e) => {
   }
   if(!formatLooksValid(key, apiKey, secretKey, passphrase)){
     showAtMessage(`That doesn't look like a valid ${EXCHANGES[key].label} key${needsPass ? '/secret/passphrase' : '/secret'} combination (wrong length or characters) — double-check it and try again.`, 'error');
+    return;
+  }
+
+  // Signed in with server storage available: the SERVER verifies the key with the exchange and stores it encrypted. The browser never
+  // keeps the secret — nothing is written to localStorage/sessionStorage, and the success path swaps in a placeholder.
+  if(serverStorageUsable()){
+    btn.disabled = true;
+    btn.textContent = 'Verifying…';
+    const r = await saveKeyToAccount(key, mode, { apiKey, secretKey, passphrase }).catch(err => ({ ok: false, message: err.message }));
+    editingRows.delete(rowId(key, mode));
+    if(r && r.ok){
+      if(r.balance != null) state.balances[key][mode] = r.balance;
+      persist(); renderConnectRows(); renderBalances(); renderExchangeOptions();
+      showAtMessage(`${EXCHANGES[key].label} (${mode === 'demo' ? 'demo' : 'live'}) key verified by the exchange and stored encrypted on your account${r.balance != null ? ` \u2014 balance ${money(r.balance)} USDT` : ''}. The secret is not kept in this browser.`, 'info');
+    } else {
+      renderConnectRows();
+      showAtMessage(`Not saved: ${(r && r.message) || 'the server refused it.'} Double-check the key, secret${needsPass ? ', passphrase' : ''}, and that it has the right permissions and IP allow-list.`, 'error');
+    }
     return;
   }
 
@@ -640,8 +758,8 @@ function syncStartBalanceField(){
   els.atStartBalance.value = bal != null ? bal : '';
   els.atStartBalance.setAttribute('readonly', 'readonly');
   els.atStartBalance.title = bal != null
-    ? `Locked to ${EXCHANGES[key].label}'s actual ${mode} balance — connect/refresh that account on the API Keys tab to change this.`
-    : `No balance found for ${EXCHANGES[key].label} (${mode}) yet — connect that account on the API Keys tab first.`;
+    ? `Locked to ${EXCHANGES[key].label}'s actual ${mode} balance — connect or refresh that account under Account → Exchange Connections to change this.`
+    : `No balance found for ${EXCHANGES[key].label} (${mode}) yet — connect that account under Account → Exchange Connections first.`;
 }
 
 // ---------------- Autotrade config UI ----------------
@@ -1252,7 +1370,7 @@ function startAutotrade(){
   const mode = EXCHANGES[key].demoSupported ? state.autotrade.mode : 'live';
   const startBal = state.balances[key]?.[mode];
   if(startBal == null || !isFinite(startBal) || startBal <= 0){
-    showAtMessage(`No balance found for ${EXCHANGES[key].label} (${mode}). Connect that account on the API Keys tab before starting Autotrade.`, 'error');
+    showAtMessage(`No balance found for ${EXCHANGES[key].label} (${mode}). Connect that account under Account → Exchange Connections before starting Autotrade.`, 'error');
     return;
   }
   at.exchange = key;
@@ -1321,6 +1439,7 @@ export function initAutotrade(){
     restore();
     // account.js adds/removes the placeholders for keys saved on the account — redraw when that happens
     window.addEventListener('nxtgen:creds-changed', () => { renderConnectRows(); renderBalances(); renderExchangeOptions(); });
+    onAccountChange(() => { renderConnectRows(); });   // sign-in state / saved-key list resolved or changed: pills and buttons depend on it
     if(els.atProxyUrl){
       els.atProxyUrl.value = maskProxyUrl(state.verifyProxyUrl || DEFAULT_VERIFY_PROXY_URL);
       els.atProxyUrl.setAttribute('readonly', 'readonly');

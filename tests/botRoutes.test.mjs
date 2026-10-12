@@ -85,9 +85,10 @@ test('keys are verified with the exchange first, then stored; secrets are never 
   assert.equal(status.body.enabled, true);
 });
 
-test('only Bybit and Binance, live or demo, can be saved', async () => {
+test('only the five supported exchanges, live or demo, can be saved (Bitget needs its passphrase)', async () => {
   const { app } = build();
-  assert.equal((await call(app, 'POST', '/api/bots/keys', { body: { ...keyBody, exchange: 'mexc' } })).code, 400);
+  assert.equal((await call(app, 'POST', '/api/bots/keys', { body: { ...keyBody, exchange: 'kraken' } })).code, 400);
+  assert.equal((await call(app, 'POST', '/api/bots/keys', { body: { ...keyBody, exchange: 'bitget', passphrase: '' } })).code, 400);
   assert.equal((await call(app, 'POST', '/api/bots/keys', { body: { ...keyBody, mode: 'paper' } })).code, 400);
   assert.equal((await call(app, 'POST', '/api/bots/keys', { body: { exchange: 'bybit', mode: 'demo' } })).code, 400);
 });

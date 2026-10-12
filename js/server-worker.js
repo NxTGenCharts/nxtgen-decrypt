@@ -268,7 +268,7 @@ async function poll(){
 function turnOnTab(){
   const sel = selection();
   const name = nameOf(sel.exchange);
-  if(!sel.verified){ setMsg(`No verified ${sel.mode} key for ${name} in this browser — connect and verify one in API Keys first.`, 'error'); return; }
+  if(!sel.verified){ setMsg(`No verified ${sel.mode} key for ${name} in this browser — connect and verify one under Account → Exchange Connections first.`, 'error'); return; }
   if(!hooks){ setMsg('Arming is not available on this page.', 'error'); return; }
   if(sel.mode === 'live' && !window.confirm(`Arm ${name} for REAL funds in this tab?\n\nReal orders can be placed from this tab while it stays open.`)) return;
   hooks.arm();
@@ -279,7 +279,7 @@ async function turnOnServer(){
   const sel = selection();
   const f = fu();
   const name = nameOf(sel.exchange);
-  if(!sel.verified){ setMsg(`No verified ${sel.mode} key for ${name} in this browser — connect and verify one in API Keys first.`, 'error'); return; }
+  if(!sel.verified){ setMsg(`No verified ${sel.mode} key for ${name} in this browser — connect and verify one under Account → Exchange Connections first.`, 'error'); return; }
   if(f.liveRunning && f.liveArmed && f.liveExchange === sel.exchange){
     setMsg(`This tab is already armed and running ${name}. Stop it first — two bots on one account would double up trades.`, 'error'); return;
   }

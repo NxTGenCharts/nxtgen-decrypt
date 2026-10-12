@@ -70,13 +70,13 @@ input:invalid:not(:placeholder-shown), input[aria-invalid="true"]{ border-color:
 
 /* -------------------- Global button system --------------------
    Hierarchy: PRIMARY (gold, filled) → SECONDARY (elevated dark surface,
-   button.primary.ghost) → DANGER / SUCCESS variants. Every state below
+   :is(button, a).primary.ghost) → DANGER / SUCCESS variants. Every state below
    (default/hover/active/disabled) is deliberate — see the redesign notes
    at the top of this file's git history for the source spec. Depth comes
    from layered shadows + a 1px border + a faint inner highlight, not from
    size or color changes, so the hierarchy reads at a glance without
    shouting. */
-button.primary{
+:is(button, a).primary{
   background:var(--amber-grad); color:var(--amber-ink); border:1px solid var(--amber-edge);
   border-radius:var(--r-btn); padding:10px 20px;
   font-family:var(--disp); font-weight:700; font-size:13px; cursor:pointer; letter-spacing:.02em;
@@ -85,10 +85,10 @@ button.primary{
   box-shadow:var(--sh-1), var(--inset-hi-strong);
   transition:filter var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease), border-color var(--dur) var(--ease);
 }
-button.primary:hover{ background:var(--amber-grad-hover); box-shadow:var(--sh-2), var(--inset-hi-strong); transform:translateY(-1px); }
-button.primary:active{ background:var(--amber-grad-active); box-shadow:var(--inset-press); transform:translateY(0); }
-button.primary:focus-visible{ outline:none; box-shadow:var(--sh-1), var(--inset-hi-strong), var(--focus-ring); }
-button.primary:disabled{
+:is(button, a).primary:hover{ background:var(--amber-grad-hover); box-shadow:var(--sh-2), var(--inset-hi-strong); transform:translateY(-1px); }
+:is(button, a).primary:active{ background:var(--amber-grad-active); box-shadow:var(--inset-press); transform:translateY(0); }
+:is(button, a).primary:focus-visible{ outline:none; box-shadow:var(--sh-1), var(--inset-hi-strong), var(--focus-ring); }
+:is(button, a).primary:disabled{
   opacity:.5; cursor:not-allowed; transform:none; box-shadow:none;
   background:var(--panel2); color:var(--dim); border-color:var(--line); filter:none;
 }
@@ -97,52 +97,52 @@ button.primary:disabled{
    everywhere .primary.ghost already appears (Details/Terminate/Delete,
    Run Backtest, Smart Fill, Back, etc.), so this one change carries
    through the whole app. */
-button.primary.ghost{
+:is(button, a).primary.ghost{
   background:linear-gradient(180deg, #2a332c, #1f2621);
   color:var(--ink); border:1px solid #5b6f60;
   box-shadow:var(--sh-1), var(--inset-hi);
 }
-button.primary.ghost:hover{
+:is(button, a).primary.ghost:hover{
   background:linear-gradient(180deg, #333e36, #2a332c);
   color:#fff; border-color:var(--amber); box-shadow:var(--sh-2), var(--inset-hi); transform:translateY(-1px);
 }
-button.primary.ghost:active{ box-shadow:var(--inset-press); transform:translateY(0); background:var(--panel2); }
-button.primary.ghost:focus-visible{ outline:none; box-shadow:var(--sh-1), var(--inset-hi), var(--focus-ring); }
-button.primary.ghost:disabled{
+:is(button, a).primary.ghost:active{ box-shadow:var(--inset-press); transform:translateY(0); background:var(--panel2); }
+:is(button, a).primary.ghost:focus-visible{ outline:none; box-shadow:var(--sh-1), var(--inset-hi), var(--focus-ring); }
+:is(button, a).primary.ghost:disabled{
   opacity:.45; cursor:not-allowed; transform:none; box-shadow:none; background:var(--panel2); color:var(--dim2); border-color:var(--line-soft);
 }
 
 /* TERTIARY — fully transparent, for the lowest-emphasis actions
    (opt-in via .primary.ghost.tertiary where a control shouldn't even
    read as a surface until hovered, e.g. inline "Apply"/"Use this" links). */
-button.primary.ghost.tertiary{ background:transparent; border-color:transparent; box-shadow:none; color:var(--ink-dim); }
-button.primary.ghost.tertiary:hover{ background:rgba(255,255,255,.05); border-color:var(--line); box-shadow:none; transform:none; }
+:is(button, a).primary.ghost.tertiary{ background:transparent; border-color:transparent; box-shadow:none; color:var(--ink-dim); }
+:is(button, a).primary.ghost.tertiary:hover{ background:rgba(255,255,255,.05); border-color:var(--line); box-shadow:none; transform:none; }
 
 /* DANGER / SUCCESS — same elevated-surface language as SECONDARY, tinted. */
-button.primary.danger{
+:is(button, a).primary.danger{
   background:linear-gradient(180deg, #201316, #180f11); color:var(--red); border-color:var(--red-line);
   box-shadow:var(--sh-1), var(--inset-hi);
 }
-button.primary.danger:hover{ background:linear-gradient(180deg, #2a1719, #201316); border-color:#7a3242; box-shadow:var(--sh-2), var(--inset-hi); transform:translateY(-1px); }
-button.primary.danger:active{ box-shadow:var(--inset-press); transform:translateY(0); }
-button.primary.danger:focus-visible{ outline:none; box-shadow:var(--sh-1), var(--inset-hi), var(--focus-ring-red); }
-button.primary.success{
+:is(button, a).primary.danger:hover{ background:linear-gradient(180deg, #2a1719, #201316); border-color:#7a3242; box-shadow:var(--sh-2), var(--inset-hi); transform:translateY(-1px); }
+:is(button, a).primary.danger:active{ box-shadow:var(--inset-press); transform:translateY(0); }
+:is(button, a).primary.danger:focus-visible{ outline:none; box-shadow:var(--sh-1), var(--inset-hi), var(--focus-ring-red); }
+:is(button, a).primary.success{
   background:linear-gradient(180deg, #142219, #0f1a13); color:var(--green); border-color:var(--green-line);
   box-shadow:var(--sh-1), var(--inset-hi);
 }
-button.primary.success:hover{ background:linear-gradient(180deg, #17291d, #142219); border-color:#2c684a; box-shadow:var(--sh-2), var(--inset-hi); transform:translateY(-1px); }
-button.primary.success:active{ box-shadow:var(--inset-press); transform:translateY(0); }
-button.primary.success:focus-visible{ outline:none; box-shadow:var(--sh-1), var(--inset-hi), var(--focus-ring-green); }
+:is(button, a).primary.success:hover{ background:linear-gradient(180deg, #17291d, #142219); border-color:#2c684a; box-shadow:var(--sh-2), var(--inset-hi); transform:translateY(-1px); }
+:is(button, a).primary.success:active{ box-shadow:var(--inset-press); transform:translateY(0); }
+:is(button, a).primary.success:focus-visible{ outline:none; box-shadow:var(--sh-1), var(--inset-hi), var(--focus-ring-green); }
 
-button.primary.live-toggle.on{ background:var(--green-soft); color:var(--green); border-color:var(--green-line); }
-button.primary.live-toggle.on:hover{ background:rgba(61,220,151,.16); }
-button.primary.live-toggle .dot{ width:6px; height:6px; }
-button.primary.live-toggle.on .dot{ background:var(--green); box-shadow:0 0 0 3px var(--green-soft); animation:pulseDot 2.2s infinite; }
+:is(button, a).primary.live-toggle.on{ background:var(--green-soft); color:var(--green); border-color:var(--green-line); }
+:is(button, a).primary.live-toggle.on:hover{ background:rgba(61,220,151,.16); }
+:is(button, a).primary.live-toggle .dot{ width:6px; height:6px; }
+:is(button, a).primary.live-toggle.on .dot{ background:var(--green); box-shadow:0 0 0 3px var(--green-soft); animation:pulseDot 2.2s infinite; }
 .btn-spinner{
   width:12px;height:12px;border-radius:50%; border:2px solid rgba(26,19,5,.35); border-top-color:var(--amber-ink);
   display:none; animation:spin .7s linear infinite;
 }
-button.primary.is-scanning .btn-spinner{ display:inline-block; }
+:is(button, a).primary.is-scanning .btn-spinner{ display:inline-block; }
 @keyframes spin{ to{ transform:rotate(360deg); } }
 
 /* -------------------- Global segmented control --------------------
@@ -600,3 +600,6 @@ footer b{ color:#a9bfae; }
   .m-ticker-track{ animation:none; }
   .m-skel{ animation:none; }
 }
+
+/* links styled as buttons (Account quick actions, mobile menu) */
+a.primary{ display:inline-flex; align-items:center; justify-content:center; text-decoration:none; cursor:pointer; box-sizing:border-box; }

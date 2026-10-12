@@ -22,6 +22,9 @@ import { estimateLiquidationPrice, RISK_DEFAULTS } from '../js/futures/risk.js';
 import { classifyRegime } from '../js/futures/regime.js';
 
 export const BOT_EXCHANGES = ['bybit', 'binance'];
+// Exchanges whose API keys can be saved (encrypted) on an account. Wider than BOT_EXCHANGES: the 24/7 bot engine only trades Bybit/Binance,
+// but every exchange the proxy can verify/trade on may keep its key on the server instead of in the browser.
+export const KEY_EXCHANGES = ['bybit', 'binance', 'bitget', 'mexc', 'gateio'];
 const MAX_TRADES = 3000;
 const GAP_NOTICE_MS = 3 * 60_000;
 

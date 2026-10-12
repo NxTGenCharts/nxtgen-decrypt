@@ -219,11 +219,10 @@ h3{font-size:17px;font-weight:600;letter-spacing:-.01em}
   .strip .wrap{grid-template-columns:repeat(2,1fr)}.strip div{border-bottom:1px solid var(--line-soft)}.strip div:last-child{grid-column:1/-1;border-bottom:0}.strip div:nth-child(2n){border-right:0}
   .stats{grid-template-columns:repeat(2,1fr)}.stat:nth-child(2){border-right:0}.stat:nth-child(-n+2){border-bottom:1px solid var(--line-soft)}
   .row{grid-template-columns:1fr 1.2fr .8fr;}.row>:nth-child(4),.row>:nth-child(5){display:none}
-  .nav-cta .btn-signin{display:none}
   .cta-row .btn{flex:1 1 100%;min-height:50px}
   .foot-grid{grid-template-columns:1fr 1fr}.foot-grid>:first-child{grid-column:1/-1}
 }
-@media (max-width:420px){.brand img{height:26px}.nav-cta .btn-sm{padding:0 11px}.movers{grid-template-columns:repeat(2,1fr);padding:10px;gap:6px}.mv{flex-direction:column;align-items:flex-start;gap:6px}.term-lg .stats{grid-template-columns:repeat(2,1fr)}.term-lg .stat{border-right:1px solid var(--line-soft)!important;border-bottom:1px solid var(--line-soft)}}
+@media (max-width:420px){.brand img{height:26px}.nav-cta{gap:6px}.nav-cta .btn-sm{padding:0 9px;font-size:11.5px;white-space:nowrap}.movers{grid-template-columns:repeat(2,1fr);padding:10px;gap:6px}.mv{flex-direction:column;align-items:flex-start;gap:6px}.term-lg .stats{grid-template-columns:repeat(2,1fr)}.term-lg .stat{border-right:1px solid var(--line-soft)!important;border-bottom:1px solid var(--line-soft)}}
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
   *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
@@ -251,3 +250,18 @@ h3{font-size:17px;font-weight:600;letter-spacing:-.01em}
 .foot li a.social{margin-top:0}
 
 @media (min-width:1600px){.g4{gap:20px}.grid{gap:20px}.card{padding:30px}.card p{font-size:16px}.term .row{font-size:14px}.term .row.hd{font-size:10.5px}.stat strong{font-size:22px}.hero-grid{gap:80px}}
+
+/* signed-in/out swaps (js/landing.js): [hidden] must win over .btn's display */
+[data-auth][hidden]{display:none!important}
+
+/* narrow phones: keep brand + Sign in + Create account + menu on one row without clipping the menu button */
+@media (max-width:420px){
+  .nav .wrap{gap:8px}
+  .nav-cta .btn-signin{border-color:transparent;background:none;padding:0 4px}
+  .nav-cta .burger{flex:none;width:38px;height:38px}
+}
+@media (max-width:350px){
+  .nav-cta .btn-sm{font-size:11px;padding:0 7px}
+  .nav-cta .btn-signin{padding:0 2px}
+  .brand img{height:22px}
+}

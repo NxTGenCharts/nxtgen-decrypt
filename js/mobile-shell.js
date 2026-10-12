@@ -28,6 +28,8 @@ const ICONS = {
   refresh:  '<path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>',
   download: '<path d="M12 3v12m0 0-4-4m4 4 4-4M5 21h14"/>',
   wrench:   '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  user:     '<circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1"/>',
+  logout:   '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m7 14 5-5-5-5m5 5H9"/>',
   more:     '<circle cx="12" cy="5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="19" r="1.4"/>',
 };
 const icon = (name) => `<svg class="m-ic" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`;
@@ -38,7 +40,7 @@ const TABS = [
   { label: 'Triangular', href: '/triangular-arbitrage/', icon: 'triangle' },
   { label: 'Trade',      href: '/autotrade-futures/',   icon: 'bolt', center: true },
   { label: 'Cross',      href: '/cross-arbitrage/',     icon: 'swap' },
-  { label: 'API Keys',   href: '/api-keys/',            icon: 'key' },
+  { label: 'Account',    href: '/account/',             icon: 'user' },
 ];
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -110,6 +112,7 @@ function buildAppBar() {
   actions.className = 'm-appbar-actions';
   actions.innerHTML =
     '<span class="m-live" id="mLive"><span class="dot" id="mLiveDot"></span><b id="mLiveText">connecting</b></span>' +
+    `<a class="m-iconbtn m-acctbtn" id="mAcctBtn" href="/account/" aria-label="Account">${icon('user')}</a>` +
     `<button type="button" class="m-iconbtn" id="mMenuBtn" aria-label="Connection status and app menu" aria-haspopup="dialog">${icon('more')}</button>`;
   brand.appendChild(actions);
 
@@ -134,6 +137,7 @@ function buildAppBar() {
   sheet.setAttribute('aria-label', 'Connection status');
   sheet.innerHTML =
     '<div class="m-sheet-grab"></div>' +
+    '<div class="m-who" id="mWho"></div>' +
     '<h3>Exchange connections</h3><div id="mSheetX"></div>' +
     '<p class="m-sheet-note" id="mSheetUpdate"></p>' +
     '<div class="m-sheet-actions">' +
@@ -165,6 +169,35 @@ function buildAppBar() {
   $('#mToolsBtn').addEventListener('click', () => { if (confirmLeave()) location.href = '/utilities-tools/'; });
   $('#mReloadBtn').addEventListener('click', () => { if (confirmLeave()) location.reload(); });
   window.__mCloseSheet = close;
+  wireAccount();
+}
+
+// ---------- account access (header button + identity block in the menu sheet) ----------
+// account.js is imported dynamically so a failure there can never take the navigation down with it. It is the same module instance
+// app.js initialises, so the sign-in state read here is the page's real one.
+function wireAccount() {
+  const btn = $('#mAcctBtn'), who = $('#mWho');
+  import('./account.js').then((acct) => {
+    const paint = () => {
+      const on = acct.isSignedIn(), email = acct.accountEmail();
+      if (btn) {
+        btn.setAttribute('aria-label', on ? `Account: ${email}` : 'Sign in');
+        btn.href = on ? '/account/' : acct.loginUrl(location.pathname + location.search + location.hash);
+        btn.classList.toggle('is-on', on);
+      }
+      if (!who) return;
+      if (on) {
+        who.innerHTML = '<div class="m-who-id"><span class="m-who-label">Signed in as</span><b class="m-who-email"></b></div>' +
+          '<div class="m-who-actions"><a class="primary ghost" href="/account/">Account</a><a class="primary ghost" href="/account/#exchanges">Exchanges</a><button type="button" class="primary ghost" id="mSignOut">Sign out</button></div>';
+        who.querySelector('.m-who-email').textContent = email;
+        who.querySelector('#mSignOut').addEventListener('click', () => { if (confirmLeave()) acct.signOut(); });
+      } else {
+        who.innerHTML = '<div class="m-who-actions"><a class="primary" href="' + acct.loginUrl(location.pathname + location.search + location.hash) + '">Sign in</a><a class="primary ghost" href="/register/">Create account</a></div>';
+      }
+    };
+    paint();
+    acct.onAccountChange(paint);
+  }).catch(() => { /* the plain /account/ link in the header still works */ });
 }
 
 // ---------- install (PWA) ----------

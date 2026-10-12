@@ -31,7 +31,7 @@ import crypto from 'node:crypto';
 
 const CACHE_MS = 60_000;
 const NEGATIVE_CACHE_MS = 15_000;
-const PLACEHOLDER_RE = /^srv:(bybit|binance):(live|demo):/;
+const PLACEHOLDER_RE = /^srv:(bybit|binance|bitget|mexc|gateio):(live|demo):/;
 
 export function createAuth({ env = process.env, log = console } = {}){
   const url = String(env.BOT_SUPABASE_URL || '').trim().replace(/\/$/, '');
@@ -132,5 +132,7 @@ export function createAuth({ env = process.env, log = console } = {}){
   if(enabled && !allow.length) log.warn && log.warn('[accounts] ALLOWED_EMAILS is not set — anyone who signs up can store exchange keys and run bots on this server. Set it to keep this invite-only.');
   if(proxyGateOn && !enabled) log.warn && log.warn('[accounts] PROXY_REQUIRES_LOGIN is on but accounts are not configured — key-bearing routes will answer 503 until SUPABASE_ANON_KEY is set.');
   if(!enabled) log.info && log.info('[accounts] OFF — set BOT_SUPABASE_URL and SUPABASE_ANON_KEY to enable sign-in. The shared WORKER_TOKEN still works.');
-  return { enabled, proxyGateOn, userFromReq, requireUser, heldKeyMiddleware, gateProxy, mountConfig, hasBearer: (req) => !!bearer(req), setCredResolver(fn){ credResolver = fn; } };
+  // Drops every cached session of one account (used right after the account is deleted).
+  const forget = (userId) => { for(const [k, v] of cache) if(v.user && v.user.id === String(userId).toLowerCase()) cache.delete(k); };
+  return { enabled, proxyGateOn, forget, userFromReq, requireUser, heldKeyMiddleware, gateProxy, mountConfig, hasBearer: (req) => !!bearer(req), setCredResolver(fn){ credResolver = fn; } };
 }

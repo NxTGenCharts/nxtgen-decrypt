@@ -242,13 +242,13 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
     touch, flush: flushNow, flushNow,
 
     // ---- shared API keys ----
-    setCred(exchange, mode, { apiKey, secretKey, passphrase }){
+    setCred(exchange, mode, { apiKey, secretKey, passphrase }, { verifiedAt } = {}){
       if(!on) throw new Error(reason);
       if(!apiKey || !secretKey) throw new Error('apiKey and secretKey are required.');
       const id = credId(exchange, mode);
       const cred = { apiKey: String(apiKey), secretKey: String(secretKey), passphrase: passphrase ? String(passphrase) : '' };
       plain.set(id, cred);
-      creds.set(id, { enc: encrypt(cred), last4: cred.apiKey.slice(-4), fp: fingerprint(cred.apiKey), updatedAt: Date.now() });
+      creds.set(id, { enc: encrypt(cred), last4: cred.apiKey.slice(-4), fp: fingerprint(cred.apiKey), updatedAt: Date.now(), verifiedAt: verifiedAt || null, hasPassphrase: !!cred.passphrase });
       dirty = true; dirtyCreds = true; flushNow(); // keys are written immediately, not debounced
       return saving || Promise.resolve();
     },
@@ -263,8 +263,27 @@ export function openBotStore({ dir, vaultKey, remote, disabledReason, log = cons
     listCreds(){
       return [...creds.entries()].map(([id, r]) => {
         const [exchange, mode] = id.split(':');
-        return { exchange, mode, last4: r.last4, fp: r.fp, updatedAt: r.updatedAt };
+        return { exchange, mode, last4: r.last4, fp: r.fp, updatedAt: r.updatedAt, verifiedAt: r.verifiedAt || null, hasPassphrase: !!r.hasPassphrase };
       });
+    },
+    // Records that the exchange itself last confirmed this key at `at` (a successful read-only check). Never touches the secret.
+    markVerified(exchange, mode, at = Date.now()){
+      const id = credId(exchange, mode), r = creds.get(id);
+      if(!r) return false;
+      r.verifiedAt = at; dirty = true; dirtyCreds = true; flushNow();
+      return true;
+    },
+    // Account deletion: forget everything this store holds for the account — keys in memory, then the rows/file on storage.
+    // Only meaningful for a per-account store (never the shared single-owner one).
+    async destroy(){
+      if(!uid) throw new Error('Refusing to destroy the shared store.');
+      if(timer){ clearTimeout(timer); timer = null; }
+      plain.clear(); creds.clear(); dirty = false; dirtyCreds = false; ready = false;
+      if(useRemote){
+        await rest('DELETE', `?k=like.${encodeURIComponent(`u:${uid}:*`)}`, null, { Prefer: 'return=minimal' });
+      } else {
+        for(const f of [file, `${file}.tmp`]){ try{ fs.rmSync(f, { force: true }); }catch(e){ throw new Error(`could not remove ${path.basename(f)}: ${e.message}`); } }
+      }
     },
     fingerprint,
 

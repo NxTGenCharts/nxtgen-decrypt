@@ -20,22 +20,25 @@ import { safeNext, DEFAULT_DESTINATION } from './auth-utils.js';
 
 const SESSION_KEY = 'nxtgen-acct-session';
 const LAST_USER_KEY = 'nxtgen-acct-last-user';
-const EX = ['bybit', 'binance'];                 // exchanges the server-side bots support
+const EX = ['bybit', 'binance', 'bitget', 'mexc', 'gateio'];   // exchanges whose keys can be saved (encrypted) on the account; only bybit/binance can run 24/7 bots
 const REFRESH_SKEW_MS = 90_000;
 
 let config = null;            // { enabled, url, anonKey } from the server
 let session = null;           // { access_token, refresh_token, expires_at (ms), user:{ id, email } }
-let keys = [];                // masked key summaries saved on the account: [{ exchange, mode, last4, fp, updatedAt }]
+let keys = [];                // masked key summaries saved on the account: [{ exchange, mode, last4, fp, updatedAt, verifiedAt, hasPassphrase }]
 let keysState = { loaded: false, enabled: true, reason: '' };
 let refreshTimer = null, refreshing = null, started = false;
 let persist = true;           // true = localStorage ("remember me"), false = sessionStorage (this browser session only)
-let endReason = '';           // why the last session ended: 'user' | 'expired'
+let endReason = '';           // why the last session ended: 'user' | 'expired' | 'deleted'
 let configProblem = '';       // '' | 'unreachable' | 'disabled' — why accounts are not usable, when they are not
 const OAUTH_PENDING_KEY = 'nxtgen-oauth-pending';
 const listeners = new Set();
+let deletedFlag = false;
+let readyResolve; const readyP = new Promise(r => { readyResolve = r; });
+export const whenAccountReady = () => readyP;   // resolves once the sign-in state is known (after the first session refresh, if any)
 
 const proxyBase = () => (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
-const emit = (type) => { listeners.forEach(fn => { try{ fn(type); }catch(e){ console.error(e); } }); };
+const emit = (type) => { if(type === 'ready') readyResolve(); listeners.forEach(fn => { try{ fn(type); }catch(e){ console.error(e); } }); };
 export const onAccountChange = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
 export const accountsAvailable = () => !!(config && config.enabled);
 export const isSignedIn = () => !!(session && session.access_token);
@@ -235,7 +238,7 @@ async function beginSession(s){
   await refreshKeys();
 }
 async function endSession(userInitiated){
-  endReason = userInitiated ? 'user' : 'expired';
+  endReason = userInitiated ? (deletedFlag ? 'deleted' : 'user') : 'expired';
   if(refreshTimer){ clearTimeout(refreshTimer); refreshTimer = null; }
   session = null; keys = []; keysState = { loaded: false, enabled: true, reason: '' };
   writeStored(null);
@@ -271,7 +274,7 @@ export const keysStatus = () => ({ ...keysState });
 // Called by server-bots.js with the creds list it already polls, so both stay in step without an extra request.
 export function setSavedKeys(creds){
   const next = creds || [];
-  if(JSON.stringify(next.map(k => [k.exchange, k.mode, k.fp])) === JSON.stringify(keys.map(k => [k.exchange, k.mode, k.fp]))) return;
+  if(JSON.stringify(next.map(k => [k.exchange, k.mode, k.fp, k.verifiedAt])) === JSON.stringify(keys.map(k => [k.exchange, k.mode, k.fp, k.verifiedAt]))) return;
   keys = next; applyHeldKeys(); emit('keys');
 }
 
@@ -279,7 +282,77 @@ export function setSavedKeys(creds){
 export async function saveKeyToAccount(exchange, mode, cred){
   if(!isSignedIn() || !EX.includes(exchange) || !cred || cred.serverHeld) return { ok: false, skipped: true };
   const r = await accountApi('/api/bots/keys', 'POST', { exchange, mode, apiKey: cred.apiKey, secretKey: cred.secretKey, passphrase: cred.passphrase || '' });
+  if(r.ok){
+    keys = r.creds || keys;
+    // The server now holds the secret. Drop this browser's raw copy and swap in the in-memory placeholder, so the caller's next
+    // persist() leaves nothing on this device.
+    const slot = state.exchangeCreds[exchange]; if(slot) slot[mode] = null;
+    applyHeldKeys(); emit('keys');
+  }
+  return r;
+}
+
+// Re-checks a saved key with the exchange (read-only balance call on the server — never an order). Returns the server's verdict.
+export async function testSavedKey(exchange, mode){
+  const r = await accountApi('/api/account/keys/test', 'POST', { exchange, mode });
   if(r.ok){ keys = r.creds || keys; applyHeldKeys(); emit('keys'); }
+  return r;
+}
+
+// Hands this browser's raw copy of a key to the account (verified server-side first). Used for keys saved on this device before
+// accounts existed — after it succeeds the secret is no longer in this browser.
+export const moveKeyToAccount = saveKeyToAccount;
+
+// ---------- profile / security (Supabase Auth, straight from the browser — the server never sees a password) ----------
+export async function fetchProfile(){
+  const t = await freshToken(); if(!t) throw new Error('Please sign in.');
+  const u = await gotrue('/user', null, t, 'GET');
+  const meta = u.user_metadata || {};
+  return { id: u.id || '', email: u.email || '', createdAt: u.created_at || null, emailConfirmedAt: u.email_confirmed_at || u.confirmed_at || null, lastSignInAt: u.last_sign_in_at || null, displayName: typeof meta.display_name === 'string' ? meta.display_name : '' };
+}
+export async function updateDisplayName(name){
+  const t = await freshToken(); if(!t) throw new Error('Please sign in.');
+  const clean = String(name || '').replace(/[\u0000-\u001f\u007f<>]/g, '').trim().slice(0, 60);
+  await gotrue('/user', { data: { display_name: clean } }, t, 'PUT');
+  emit('profile');
+  return clean;
+}
+// Changes the password. Proves the CURRENT password first (a fresh sign-in), then sets the new one and signs every OTHER session of this
+// account out — including other browsers/devices. This browser keeps working on the fresh session.
+export async function changePassword(currentPassword, newPassword){
+  if(!isSignedIn()) throw new Error('Please sign in.');
+  let d;
+  try{ d = await gotrue('/token?grant_type=password', { email: accountEmail(), password: String(currentPassword) }); }
+  catch(e){ if(e.status === 400 || e.status === 401 || /wrong email or password/i.test(e.message)) throw new Error('Your current password is not correct.'); throw e; }
+  const fresh = toSession(d);
+  await gotrue('/user', { password: String(newPassword) }, fresh.access_token, 'PUT');
+  let others = true;
+  try{ await gotrue('/logout?scope=others', {}, fresh.access_token); }catch(e){ others = false; }
+  session = fresh; writeStored(fresh); schedule();
+  return { otherSessionsSignedOut: others };
+}
+export async function signOutEverywhere(){
+  const t = session && session.access_token;
+  let all = true;
+  if(t){ try{ await gotrue('/logout?scope=global', {}, t); }catch(e){ all = false; } }
+  await endSession(true);
+  return { allDevices: all };
+}
+
+// ---------- account data for the dashboard (all real: the same endpoints the bots page uses) ----------
+export async function loadDashboardData(){
+  const [me, status, trades] = await Promise.all([
+    accountApi('/api/account/me').catch(e => ({ ok: false, message: e.message })),
+    accountApi('/api/bots/status').catch(e => ({ ok: false, message: e.message })),
+    accountApi('/api/bots/trades').catch(e => ({ ok: false, message: e.message })),
+  ]);
+  return { me, status, trades };
+}
+
+// Deletes the account on the server (refused while a bot is running, see server/bots.js), then ends this session.
+export async function deleteMyAccount(confirmEmail){
+  const r = await accountApi('/api/account/delete', 'POST', { confirmEmail });
+  if(r.ok){ deletedFlag = true; await endSession(true); }
   return r;
 }
 export async function removeKeyFromAccount(exchange, mode){
@@ -298,8 +371,11 @@ function applyHeldKeys(){
     for(const mode of ['live', 'demo']){
       const k = keys.find(x => x.exchange === ex && x.mode === mode);
       const cur = slot[mode];
-      if(k && (!cur || (cur.serverHeld && cur.apiKey !== placeholder(k)))){
-        slot[mode] = { apiKey: placeholder(k), secretKey: 'srv', passphrase: '', connectedAt: new Date(k.updatedAt || Date.now()).toLocaleString(), connected: true, verified: true, verifyNote: 'Saved on your account — the secret stays on the server.', serverHeld: true, last4: k.last4 };
+      if(k && (!cur || (cur.serverHeld && (cur.apiKey !== placeholder(k) || cur.verifiedAt !== (k.verifiedAt || null))))){
+        slot[mode] = { apiKey: placeholder(k), secretKey: 'srv', passphrase: k.hasPassphrase ? 'srv' : '', connectedAt: new Date(k.updatedAt || Date.now()).toLocaleString(), connected: true, verified: true,
+          // The server always verified a key with the exchange before storing it; verifiedAt (when present) is the latest re-check.
+          verifyNote: k.verifiedAt ? `Confirmed by the exchange on ${new Date(k.verifiedAt).toLocaleString()}. The secret stays on the server.` : 'Verified with the exchange when it was saved. Use Test connection to re-check. The secret stays on the server.',
+          serverHeld: true, last4: k.last4, verifiedAt: k.verifiedAt || null };
         changed = true;
       } else if(!k && cur && cur.serverHeld){ slot[mode] = null; changed = true; }
     }
@@ -386,7 +462,7 @@ export function openAuthModal(initialMode){
 }
 
 // ---------- account card (API Keys page) ----------
-const EX_NAMES = { bybit: 'Bybit', binance: 'Binance' };
+const EX_NAMES = { bybit: 'Bybit', binance: 'Binance', bitget: 'Bitget', mexc: 'MEXC', gateio: 'Gate.io' };
 function mountAccountCard(host){
   const paint = () => {
     host.textContent = '';
@@ -398,13 +474,13 @@ function mountAccountCard(host){
       say('Accounts are not switched on for this server yet. Add SUPABASE_ANON_KEY to the server\u2019s environment (see server/README.md) and redeploy \u2014 until then keys stay on this device only.');
     } else if(!isSignedIn()){
       say('Sign in to carry your exchange keys, bots and trade history to any device. Keys you save to your account are stored encrypted on the server and are never sent back to a browser \u2014 other devices use them through the server.');
-      btn('Sign in', () => { location.assign(loginUrl('/api-keys/')); }, true); btn('Create account', () => { location.assign('/register/'); });
+      btn('Sign in', () => { location.assign(loginUrl('/account/#exchanges')); }, true); btn('Create account', () => { location.assign('/register/'); });
     } else {
       say(`Signed in as ${accountEmail()}`, 'font-weight:600;');
       const ks = savedKeys();
       say(ks.length
         ? 'Saved on your account (secret stays on the server): ' + ks.map(k => `${EX_NAMES[k.exchange] || k.exchange} ${k.mode} \u2026${k.last4}`).join(' \u00b7 ')
-        : (keysState.enabled === false && keysState.reason ? `Server storage unavailable: ${keysState.reason}` : 'No exchange keys saved on your account yet. Connect one below and it is saved here automatically (Bybit and Binance).'));
+        : (keysState.enabled === false && keysState.reason ? `Server storage unavailable: ${keysState.reason}` : 'No exchange keys saved on your account yet. Connect one and it is saved here automatically.'));
       btn('Sign out', () => signOut());
     }
     wrap.appendChild(btnRow); host.appendChild(wrap);
@@ -440,7 +516,7 @@ export async function initAccount(){
   document.addEventListener('visibilitychange', () => { if(!document.hidden && isSignedIn()) freshToken().catch(() => {}); });
   // Dashboard pages (js/auth-gate.js marks them): leave for the login page whenever there is no valid session — now, or later
   // when it expires or the user signs out (here or in another tab).
-  onAccountChange((type) => { if(type === 'signout') gateRedirect(endReason === 'user' ? 'signedout' : 'expired'); });
+  onAccountChange((type) => { if(type === 'signout') gateRedirect(endReason === 'user' ? 'signedout' : (endReason === 'deleted' ? 'deleted' : 'expired')); });
   if(!isSignedIn()) gateRedirect(endReason === 'expired' ? 'expired' : 'required');
   emit('ready');
 }
@@ -466,7 +542,7 @@ function mountUserChip(){
   if(!host || !window.__nxtgenProtected || document.getElementById('nxUserChip')) return;
   const chip = css(h('div'), 'display:none;align-items:center;gap:8px;font-family:var(--mono,monospace);font-size:11px;color:var(--dim,#7f9385);max-width:100%;');
   chip.id = 'nxUserChip';
-  const who = css(h('span'), 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(240px,50vw);');
+  const who = css(h('a'), 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(240px,50vw);color:inherit;text-decoration:none;'); who.href = '/account/'; who.setAttribute('aria-label', 'Open your account');
   const out = css(h('button', null, 'Sign out'), 'background:none;border:1px solid var(--line,#212a23);border-radius:6px;color:var(--ink-dim,#aebcb2);cursor:pointer;font:inherit;padding:4px 8px;min-height:28px;');
   out.type = 'button'; out.setAttribute('aria-label', 'Sign out of NxTGen DeCrypt');
   out.addEventListener('click', () => { out.disabled = true; signOut(); });

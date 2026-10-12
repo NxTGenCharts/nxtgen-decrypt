@@ -76,4 +76,14 @@
     } else start();
     d.addEventListener('visibilitychange', function(){ d.hidden ? stop() : start(); });
   }
+
+  // Signed-in visitors see "Open terminal / Account"; everyone else sees "Sign in / Create account". This only picks which links to
+  // show (the real check is the server's) — it reads the same stored-login marker js/auth-gate.js does and never sends it anywhere.
+  (function(){
+    var on = false, KEY = 'nxtgen-acct-session';
+    [function(){ return window.localStorage; }, function(){ return window.sessionStorage; }].forEach(function(get){
+      try{ var v = JSON.parse(get().getItem(KEY) || 'null'); if(v && v.access_token && v.refresh_token) on = true; }catch(e){ /* unreadable: treat as signed out */ }
+    });
+    Array.prototype.forEach.call(d.querySelectorAll('[data-auth]'), function(el){ el.hidden = (el.getAttribute('data-auth') === 'in') !== on; });
+  })();
 })();

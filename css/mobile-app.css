@@ -97,6 +97,8 @@
     background:var(--panel2); border:1px solid var(--line); border-radius:12px; color:var(--ink-dim);
   }
   .m-iconbtn:active{ background:var(--panel-hi); }
+  a.m-iconbtn{ text-decoration:none; box-sizing:border-box; }
+  .m-acctbtn.is-on{ color:var(--amber); border-color:var(--amber-dim); }
 
   /* exchange status strip: one scrollable row under the app bar */
   .status-cluster{
@@ -176,6 +178,11 @@
   }
   .m-sheet.open{ transform:none; visibility:visible; transition:transform .24s cubic-bezier(.2,.8,.2,1); }
   .m-sheet-grab{ width:38px; height:4px; border-radius:2px; background:var(--line); margin:0 auto 14px; }
+  .m-who{ margin:0 0 12px; padding-bottom:14px; border-bottom:1px solid var(--line-soft); }
+  .m-who-label{ display:block; font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); }
+  .m-who-email{ display:block; margin-top:3px; font-size:13.5px; font-weight:500; overflow-wrap:anywhere; }
+  .m-who-actions{ display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .m-who-actions > *{ flex:1 1 90px; min-height:44px; display:inline-flex; align-items:center; justify-content:center; text-decoration:none; }
   .m-sheet h3{ font-size:12px; text-transform:uppercase; letter-spacing:.09em; color:var(--dim); margin:4px 0 10px; }
   .m-xrow{
     display:flex; align-items:center; justify-content:space-between;

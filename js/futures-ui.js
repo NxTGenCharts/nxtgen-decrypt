@@ -422,7 +422,7 @@ async function runGridLiveCycleInner(){
   }
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);
-  if(!cred){ gridLiveLog(`No verified ${exchange} ${mode} credential — connect it on the API Keys tab first.`, 'error'); return; }
+  if(!cred){ gridLiveLog(`No verified ${exchange} ${mode} credential — connect it under Account → Exchange Connections first.`, 'error'); return; }
   const gridCfg = loadGridConfig();
   // Same override as Paper's runGridPaperTick — deployment size tracks
   // the shared "Risk per trade (%)" control (fuRiskPct/fuLiveRiskPct)
@@ -843,7 +843,7 @@ const LIVE_ONLY_EXCHANGES = ['mexc'];
 
 export function callProxy(path, body){
   const proxyUrl = (state.verifyProxyUrl || '').trim().replace(/\/$/, '');
-  if(!proxyUrl) return Promise.reject(new Error('No verification proxy configured — set one on the API Keys tab.'));
+  if(!proxyUrl) return Promise.reject(new Error('No verification proxy configured — the server connection is managed automatically — reload the page.'));
   return fetch(proxyUrl + path, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then(res => res.json().catch(() => null)).then(data => {
@@ -2288,7 +2288,7 @@ function liveExchangeRowHtml(key, { selected, isCurrent }){
   const verified = !!(cred && cred.verified);
   const statusNote = verified
     ? `verified ${mode} key connected`
-    : `no verified ${mode} key — connect on the API Keys tab`;
+    : `no verified ${mode} key — connect it under Account → Exchange Connections`;
   const modeToggle = supportsDemo ? `
     <div class="mode-toggle" role="group" aria-label="${name} network">
       <button type="button" class="mode-btn ${mode==='live'?'active':''}" data-mode="live">Live</button>
@@ -2429,7 +2429,7 @@ function onLiveSwitchChange(){
   const name = EXCHANGE_DISPLAY_NAMES[exchange] || exchange;
   if(!liveCred(exchange, mode)){
     sw.checked = false;
-    showLiveMessage(`No verified ${mode} key for ${name} in this browser — connect and verify one in API Keys first.`, 'error');
+    showLiveMessage(`No verified ${mode} key for ${name} in this browser — connect and verify one under Account → Exchange Connections first.`, 'error');
     return;
   }
   if(mode === 'live' && !window.confirm(`Start LIVE trading on ${name} with REAL funds?\n\nReal orders will be placed from this tab while it stays open.`)){
@@ -3296,7 +3296,7 @@ async function createTradingBotFromForm(){
   if(!GRID_LIVE_EXCHANGES.includes(exchange)){ tbCreateStatus('Trading Bots only support Bybit or Binance.', true); return; }
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);
-  if(!cred){ tbCreateStatus(`No verified ${exchange} ${mode} credential — connect it on the API Keys tab first.`, true); return; }
+  if(!cred){ tbCreateStatus(`No verified ${exchange} ${mode} credential — connect it under Account → Exchange Connections first.`, true); return; }
   readTradingBotFormNumbers();
 
   if(type === 'grid' && f.tbGridForm.autoScan){
@@ -5187,7 +5187,7 @@ function sbBalanceInfoHtml(){
   const c = f.sbBalanceCache[`${exchange}:${mode}`];
   let state, value, statusText, statusIcon, note = '';
   if(!c || c.status === 'loading'){ state = 'loading'; value = '&mdash;'; statusText = 'Reading&hellip;'; statusIcon = 'refresh-cw'; }
-  else if(c.status === 'nocred'){ state = 'nocred'; value = '&mdash;'; statusText = 'No API key'; statusIcon = 'triangle-alert'; note = 'No verified API key for this exchange/network &mdash; add one under API Keys.'; }
+  else if(c.status === 'nocred'){ state = 'nocred'; value = '&mdash;'; statusText = 'No API key'; statusIcon = 'triangle-alert'; note = 'No verified API key for this exchange/network &mdash; add one under Account → Exchange Connections.'; }
   else if(c.status === 'error'){ state = 'error'; value = '&mdash;'; statusText = 'Unavailable'; statusIcon = 'triangle-alert'; note = 'Couldn&rsquo;t read balance.'; }
   else { state = 'ok'; value = sbFmtBalance(c.available); statusText = 'Connected'; statusIcon = 'circle-check'; }
   const refreshLabel = state === 'error' ? 'Retry reading available margin' : 'Refresh available margin';
@@ -5306,7 +5306,7 @@ function sbAcctHtml(){
   const modeLabel = mode === 'demo' ? 'Demo' : 'Live';
   let state = 'loading', note = '', statusText = 'Reading\u2026', statusIcon = 'refresh-cw';
   if(exchange === 'mexc' && mode === 'demo'){ state = 'nocred'; statusText = 'No Demo'; statusIcon = 'triangle-alert'; note = 'MEXC has no Demo trading environment \u2014 switch to Live.'; }
-  else if(c && c.status === 'nocred'){ state = 'nocred'; statusText = 'No API key'; statusIcon = 'triangle-alert'; note = `No verified ${modeLabel} API key for ${exName} \u2014 add one under API Keys.`; }
+  else if(c && c.status === 'nocred'){ state = 'nocred'; statusText = 'No API key'; statusIcon = 'triangle-alert'; note = `No verified ${modeLabel} API key for ${exName} \u2014 add one under Account → Exchange Connections.`; }
   else if(c && c.status === 'error'){ state = 'error'; statusText = 'Unavailable'; statusIcon = 'triangle-alert'; note = c.message || 'Couldn\u2019t read the account balance.'; }
   else if(c && (c.status === 'ok' || c.status === 'partial')){ state = 'ok'; statusText = c.status === 'partial' ? 'Free margin only' : 'Connected'; statusIcon = 'circle-check'; }
   const ok = state === 'ok';
@@ -5713,7 +5713,7 @@ async function createSmartBotFromFormInner(){
   }
   const mode = f.liveModeByExchange[exchange] || 'live';
   const cred = liveCred(exchange, mode);
-  if(!cred){ sbCreateStatus(`No verified ${exchange} ${mode} credential — connect it on the API Keys tab first.`, true); return; }
+  if(!cred){ sbCreateStatus(`No verified ${exchange} ${mode} credential — connect it under Account → Exchange Connections first.`, true); return; }
   const cfg = type === 'grid' ? f.sbGridForm : f.sbDcaForm;
   if(type === 'grid' && !(cfg.stopLossPct > 0)){ sbCreateStatus('Grid Bots need a Stop Loss % greater than 0.', true); return; }
   if(cfg.fundingMode !== 'pct' && !(cfg.fundingUsd > 0)){ sbCreateStatus('Enter a margin amount.', true); return; }

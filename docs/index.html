@@ -42,7 +42,7 @@
 <h2>Utilities &amp; Tools</h2>
 <p>Paper trading and trading bots for testing ideas without risking capital.</p>
 <h2>API Keys</h2>
-<p>Add exchange API keys on the <a href="/api-keys/">API Keys</a> page. Connecting runs a read-only balance check through the verification proxy. Bitget additionally needs the API passphrase. Keys are stored in your browser's local storage on your device. For signing, they are sent to the proxy, which by its documentation holds them in memory for a single request and does not persist or log them.</p>
+<p>Add exchange API keys under <a href="/account/#exchanges">Account → Exchange Connections</a>. Connecting runs a read-only balance check through the server. Bitget additionally needs the API passphrase. When you are signed in, the server verifies the key with the exchange and stores it encrypted for your account only; the secret is never sent back to a browser and is not kept in this browser's storage. Create keys with trading permission only and <strong>withdrawals disabled</strong>.</p>
 <div class="callout"><p><strong>Recommended key setup:</strong> enable only the permissions you need, never enable withdrawals, and use your exchange's IP allow-list where available. Exchange IP restrictions can block orders routed through a hosted proxy.</p></div>
 <h2>Limits</h2>
 <p>Displayed spreads and returns are estimates at the moment of a scan. Prices move, orders can slip and fees apply. Nothing here is financial advice.</p>

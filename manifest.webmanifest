@@ -18,6 +18,6 @@
     { "name": "Triangular Arbitrage", "short_name": "Triangular", "url": "/triangular-arbitrage/", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
     { "name": "Cross-Exchange", "short_name": "Cross", "url": "/cross-arbitrage/", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
     { "name": "AI Futures Engine", "short_name": "Futures", "url": "/autotrade-futures/#futures", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
-    { "name": "API Keys", "short_name": "Keys", "url": "/api-keys/", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
+    { "name": "Account", "short_name": "Account", "url": "/account/", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
   ]
 }

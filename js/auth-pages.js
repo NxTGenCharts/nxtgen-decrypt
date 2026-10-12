@@ -111,6 +111,7 @@ const REASONS = {
   required: ['info', 'Sign in to open the terminal.'],
   expired: ['warn', 'Your session has expired. Please sign in again.'],
   signedout: ['ok', 'You have been signed out.'],
+  deleted: ['ok', 'Your account and its stored data have been deleted.'],
   verified: ['ok', 'Email confirmed. You can sign in now.'],
   reset: ['ok', 'Password updated. Sign in with your new password.'],
 };

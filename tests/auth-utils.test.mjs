@@ -8,7 +8,9 @@ const ORIGIN = 'https://nxtgendecrypt.site';
 test('safeNext keeps real dashboard destinations (with query and hash)', () => {
   assert.equal(safeNext('/overview/', ORIGIN), '/overview/');
   assert.equal(safeNext('/utilities-tools/#trading-bots', ORIGIN), '/utilities-tools/#trading-bots');
-  assert.equal(safeNext('/api-keys/?x=1', ORIGIN), '/api-keys/?x=1');
+  assert.equal(safeNext('/account/#exchanges', ORIGIN), '/account/#exchanges');
+  assert.equal(safeNext('/account/?x=1#security', ORIGIN), '/account/?x=1#security');
+  assert.equal(safeNext('/api-keys/?x=1', ORIGIN), '/account/#exchanges');                   // the old API Keys page now lives in Account
   assert.equal(safeNext('/autotrade-futures', ORIGIN), '/autotrade-futures');          // no trailing slash still resolves to an app path
 });
 
@@ -21,7 +23,7 @@ test('safeNext rejects every open-redirect shape and falls back to the Overview'
   for(const e of evil){
     const out = safeNext(e, ORIGIN);
     // whatever comes back must be a same-origin app path — never anything attacker-controlled
-    assert.ok(out === DEFAULT_DESTINATION || (typeof e === 'string' && /^\/(overview|api-keys|utilities-tools)\/?/.test(out) && !out.includes('evil')), `unsafe result for ${JSON.stringify(e)}: ${out}`);
+    assert.ok(out === DEFAULT_DESTINATION || (typeof e === 'string' && /^\/(overview|account|utilities-tools)\/?/.test(out) && !out.includes('evil')), `unsafe result for ${JSON.stringify(e)}: ${out}`);
     assert.ok(out.startsWith('/') && !out.startsWith('//'), `bad shape for ${JSON.stringify(e)}: ${out}`);
   }
   assert.equal(safeNext('https://evil.example/overview/', ORIGIN), DEFAULT_DESTINATION);

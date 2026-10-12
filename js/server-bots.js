@@ -64,7 +64,7 @@ async function getToken(askIfMissing){
 }
 async function api(path, method, body, token){
   const base = proxyBase();
-  if(!base) throw new Error('No verification proxy configured — set one on the API Keys tab.');
+  if(!base) throw new Error('No verification proxy configured — the server connection is managed automatically — reload the page.');
   const headers = {};
   if(token === ACCOUNT){
     const t = await freshToken();
@@ -205,7 +205,7 @@ export async function syncAllKeys(){
       if(c){ await pushKey(token, ex, mode, c); n++; }
     }
     startMirror(); await refresh();
-    return { ok: true, message: n ? `Saved ${n} key${n === 1 ? '' : 's'} ${token === ACCOUNT ? 'on your account' : 'on the server'}.` : 'No verified Bybit/Binance keys found — verify one on the API Keys tab first.' };
+    return { ok: true, message: n ? `Saved ${n} key${n === 1 ? '' : 's'} ${token === ACCOUNT ? 'on your account' : 'on the server'}.` : 'No verified Bybit/Binance keys found — verify one under Account → Exchange Connections first.' };
   }catch(e){ lastError = e.message; renderBar(); return { ok: false, message: e.message }; }
 }
 

@@ -10,7 +10,7 @@ export const DEFAULT_DESTINATION = '/overview/';
 
 // Only these app areas may be a post-login destination. Anything else (other sites, auth pages, odd paths) falls back to
 // the Overview dashboard. Keep in step with the pages that carry <script src="/js/auth-gate.js">.
-export const APP_PATHS = ['/overview/', '/triangular-arbitrage/', '/cross-arbitrage/', '/autotrade-futures/', '/utilities-tools/', '/api-keys/'];
+export const APP_PATHS = ['/overview/', '/triangular-arbitrage/', '/cross-arbitrage/', '/autotrade-futures/', '/utilities-tools/', '/account/'];
 
 // Returns a same-origin app path (with its query/hash) that is safe to redirect to, or DEFAULT_DESTINATION.
 // `origin` is passed in so this stays testable outside a browser.
@@ -22,6 +22,7 @@ export function safeNext(raw, origin = 'https://nxtgendecrypt.site'){
     const u = new URL(raw, origin);
     if(u.origin !== new URL(origin).origin) return DEFAULT_DESTINATION;
     const path = u.pathname.endsWith('/') ? u.pathname : u.pathname + '/';
+    if(path === '/api-keys/') return '/account/#exchanges';        // the old API Keys page now lives in the Account area
     if(!APP_PATHS.includes(path)) return DEFAULT_DESTINATION;
     return u.pathname + u.search + u.hash;
   }catch(e){ return DEFAULT_DESTINATION; }

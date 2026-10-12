@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Account — NxTGen DeCrypt</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/favicon-16.png" type="image/png" sizes="16x16">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192">
+<link rel="icon" href="/icon-512.png" type="image/png" sizes="512x512">
+<meta name="theme-color" content="#f0b429">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NxTGen">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="/manifest.webmanifest">
+<script src="/js/auth-gate.js"></script>
+<link rel="stylesheet" href="/css/main.css">
+<link rel="stylesheet" href="/css/components.css">
+<link rel="stylesheet" href="/css/responsive.css">
+<link rel="stylesheet" href="/css/futures.css">
+<link rel="stylesheet" href="/css/mobile-app.css">
+<link rel="stylesheet" href="/css/brand.css">
+<link rel="stylesheet" href="/css/account.css">
+<script src="/js/brand.js" defer></script>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="term-header">
+    <button class="nav-toggle" id="navToggleBtn" type="button" aria-expanded="false" aria-controls="termNav" aria-label="Toggle navigation menu"><span class="bar"></span></button>
+    <div class="brand-block">
+      <span class="bm" data-bm-scroll role="img" aria-label="NxTGen DeCrypt — Crypto Terminal"><span class="bm-stage"><span class="bm-glow"></span><span class="bm-p bm-word"><img src="/assets/brand/word.png" alt="" width="671" height="209" decoding="async" fetchpriority="high"><span class="bm-sheen"></span></span><span class="bm-p bm-tag"><img src="/assets/brand/tag.png" alt="" width="671" height="20" decoding="async"></span></span></span>
+    </div>
+    <div class="status-cluster">
+      <div class="live-pill">
+        <span class="dot live" id="statusDot"></span>
+        <span id="statusText">connected</span>
+      </div>
+      <div class="exchange-badges" role="group" aria-label="Exchange connection status">
+        <span class="xbadge" id="badgeBitget" data-state="idle" title="Updates after each scan that queries Bitget"><span class="xbadge-dot"></span>BITGET</span>
+        <span class="xbadge" id="badgeBinance" data-state="idle" title="Updates after each scan that queries Binance"><span class="xbadge-dot"></span>BINANCE</span>
+        <span class="xbadge" id="badgeBybit" data-state="idle" title="Updates after each scan that queries Bybit"><span class="xbadge-dot"></span>BYBIT</span>
+        <span class="xbadge" id="badgeMexc" data-state="idle" title="Updates after each scan that queries MEXC"><span class="xbadge-dot"></span>MEXC</span>
+        <span class="xbadge" id="badgeGateio" data-state="idle" title="Updates after each scan that queries Gate.io"><span class="xbadge-dot"></span>GATE.IO</span>
+      </div>
+      <span class="last-update" id="lastUpdate">Last update — awaiting first scan</span>
+    </div>
+  </header>
+
+  <nav class="term-nav" id="termNav">
+    <a class="navtab" href="/overview/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-layout-dashboard"/></svg></span>Overview</a>
+    <a class="navtab" href="/triangular-arbitrage/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-triangle-nodes"/></svg></span>Triangular Arbitrage</a>
+    <a class="navtab" href="/cross-arbitrage/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-arrow-left-right"/></svg></span>Cross-Exchange</a>
+    <a class="navtab" href="/autotrade-futures/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-zap"/></svg></span>Futures Engine</a>
+    <a class="navtab" href="/utilities-tools/"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-wrench"/></svg></span>Utilities &amp; Tools</a>
+    <a class="navtab active" href="/account/" aria-current="page"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-user"/></svg></span>Account</a>
+  </nav>
+
+<div class="panel active" id="panelAccount">
+    <div class="ov-head"><h2>Account</h2></div>
+
+    <nav class="term-subnav ac-tabs" id="acTabs" role="tablist" aria-label="Account sections">
+      <a class="navtab subnavtab" role="tab" href="#dashboard" data-ac-tab="dashboard"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-layout-dashboard"/></svg></span>Dashboard</a>
+      <a class="navtab subnavtab" role="tab" href="#exchanges" data-ac-tab="exchanges"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-key"/></svg></span>Exchange Connections</a>
+      <a class="navtab subnavtab" role="tab" href="#profile" data-ac-tab="profile"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-user"/></svg></span>Profile</a>
+      <a class="navtab subnavtab" role="tab" href="#security" data-ac-tab="security"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-shield"/></svg></span>Security</a>
+      <a class="navtab subnavtab" role="tab" href="#preferences" data-ac-tab="preferences"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-cpu"/></svg></span>Preferences</a>
+    </nav>
+
+    <!-- ============ Dashboard ============ -->
+    <section class="ac-section" data-ac-section="dashboard" id="ac-dashboard" aria-label="Dashboard" hidden>
+      <div class="ac-welcome">
+        <div>
+          <h3 id="acWelcome">Welcome</h3>
+          <div class="ac-sub" id="acWelcomeSub">Loading your account…</div>
+        </div>
+        <button type="button" class="primary ghost" id="acRefreshBtn">Refresh</button>
+      </div>
+      <div id="acDashNotice"></div>
+
+      <div class="ac-stats" id="acStats">
+        <div class="ov-card"><div class="ov-label">Exchange connections</div><div class="ov-value" id="acStatEx">—</div><div class="ac-card-sub" id="acStatExSub"></div></div>
+        <div class="ov-card"><div class="ov-label">Trading bots</div><div class="ov-value" id="acStatBots">—</div><div class="ac-card-sub" id="acStatBotsSub"></div></div>
+        <div class="ov-card"><div class="ov-label">Realized P&amp;L</div><div class="ov-value" id="acStatReal">—</div><div class="ac-card-sub" id="acStatRealSub"></div></div>
+        <div class="ov-card"><div class="ov-label">Unrealized P&amp;L</div><div class="ov-value" id="acStatUnreal">—</div><div class="ac-card-sub" id="acStatUnrealSub"></div></div>
+      </div>
+
+      <div class="ov-block ac-block">
+        <div class="ov-block-title">Quick actions</div>
+        <div class="ac-actions">
+          <a class="primary ghost ac-link" href="#exchanges">Manage exchanges</a>
+          <a class="primary ghost ac-link" href="/utilities-tools/#trading-bots">Trading bots</a>
+          <a class="primary ghost ac-link" href="/autotrade-futures/">Futures engine</a>
+          <a class="primary ghost ac-link" href="/triangular-arbitrage/">Triangular</a>
+          <a class="primary ghost ac-link" href="/cross-arbitrage/">Cross-exchange</a>
+          <a class="primary ghost ac-link" href="/utilities-tools/#backtesting">Backtesting</a>
+          <a class="primary ghost ac-link" href="/utilities-tools/#paper-trading">Paper trading</a>
+        </div>
+      </div>
+
+      <div class="ov-block ac-block">
+        <div class="ov-block-title">Connected exchanges</div>
+        <div id="acExList" class="ac-list"></div>
+        <div class="ac-foot"><button type="button" class="primary ghost" id="acCheckAllBtn">Check connections &amp; balances</button><span class="ac-hint">Read-only: asks each exchange for the balance. Never places an order.</span></div>
+      </div>
+
+      <div class="ov-block ac-block">
+        <div class="ov-block-title">Trading bots <span class="ac-hint" id="acBotsScope"></span></div>
+        <div id="acBotList" class="ac-list"></div>
+      </div>
+
+      <div class="ov-block ac-block">
+        <div class="ov-block-title">Recent trading activity</div>
+        <div id="acTradeList" class="ac-list"></div>
+      </div>
+
+      <div class="ov-block ac-block">
+        <div class="ov-block-title">Recent account events</div>
+        <div id="acEventList" class="ac-list"></div>
+        <div class="ac-hint">Built from your saved keys and bots. A full audit log is not recorded.</div>
+      </div>
+    </section>
+
+    <!-- ============ Exchange Connections ============ -->
+    <section class="ac-section" data-ac-section="exchanges" id="ac-exchanges" aria-label="Exchange connections" hidden>
+      <div class="ov-block ac-block">
+        <div class="ov-block-title">Exchange Connections <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">PRIVATE TO YOUR ACCOUNT</span></div>
+        <div class="ac-callout">
+          <strong>Use trade-only keys.</strong> Create the key with <em>Withdrawal turned off</em> (this app never needs it) and, where the exchange allows, restrict it to this server’s IP.
+          Use read-only keys if you only want to watch balances. Keys you add here are verified by the server with the exchange, then stored <em>encrypted</em> on the server; the secret is never sent back to any browser.
+        </div>
+        <div id="atMessages" class="ac-messages" aria-live="polite"></div>
+        <div id="acKeysState" class="ac-hint"></div>
+        <div id="connectRows" class="connect-list"></div>
+      </div>
+    </section>
+
+    <!-- ============ Profile ============ -->
+    <section class="ac-section" data-ac-section="profile" id="ac-profile" aria-label="Profile" hidden>
+      <div class="ov-block ac-block">
+        <div class="ov-block-title">Profile</div>
+        <dl class="ac-dl" id="acProfileDl"></dl>
+        <div class="ac-form" id="acNameForm">
+          <div class="field"><label for="acDisplayName">Display name</label><input id="acDisplayName" type="text" maxlength="60" autocomplete="nickname" placeholder="How should we greet you?"></div>
+          <div class="btn-row"><button type="button" class="primary" id="acNameSave">Save name</button></div>
+          <div class="ac-msg" id="acNameMsg" role="status" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <div class="ov-block ac-block">
+        <div class="ov-block-title">Account actions</div>
+        <div class="btn-row"><button type="button" class="primary ghost" id="acSignOutBtn">Sign out</button></div>
+        <details class="ac-danger" id="acDeleteBox">
+          <summary>Delete my account…</summary>
+          <div class="ac-danger-body">
+            <p><strong>This permanently removes your account.</strong> What happens:</p>
+            <ul>
+              <li>Your saved exchange keys are erased from the server. Nothing is changed on the exchanges themselves — delete the API keys there too if you no longer want them to exist.</li>
+              <li>Your bots, their settings and the trade records the server kept are erased. Records already copied into this browser remain until you clear its data.</li>
+              <li>The sign-in itself is removed, so you cannot log back in.</li>
+            </ul>
+            <p><strong>Bots must be stopped first.</strong> If any bot is still running, deletion is refused — stop it from Utilities &amp; Tools → Trading Bots (Stop cancels its orders and closes its position), then come back. Nothing is closed for you automatically.</p>
+            <div class="field"><label for="acDeleteEmail">Type your email to confirm</label><input id="acDeleteEmail" type="email" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+            <div class="btn-row"><button type="button" class="primary danger" id="acDeleteBtn" disabled>Delete my account</button></div>
+            <div class="ac-msg" id="acDeleteMsg" role="status" aria-live="polite"></div>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- ============ Security ============ -->
+    <section class="ac-section" data-ac-section="security" id="ac-security" aria-label="Security" hidden>
+      <div class="ov-block ac-block">
+        <div class="ov-block-title">Change password</div>
+        <form class="ac-form" id="acPwForm" autocomplete="off" novalidate>
+          <input type="email" id="acPwUser" autocomplete="username" hidden tabindex="-1" aria-hidden="true">
+          <div class="field"><label for="acPwCurrent">Current password</label><input id="acPwCurrent" type="password" autocomplete="current-password"></div>
+          <div class="field"><label for="acPwNew">New password</label><input id="acPwNew" type="password" autocomplete="new-password"></div>
+          <div class="field"><label for="acPwNew2">Repeat new password</label><input id="acPwNew2" type="password" autocomplete="new-password"></div>
+          <div class="ac-hint" id="acPwHint">At least 10 characters, with letters and numbers.</div>
+          <div class="btn-row"><button type="submit" class="primary" id="acPwSave">Change password</button></div>
+          <div class="ac-msg" id="acPwMsg" role="status" aria-live="polite"></div>
+        </form>
+      </div>
+      <div class="ov-block ac-block">
+        <div class="ov-block-title">Forgot your password?</div>
+        <div class="ac-hint">We’ll email a reset link to your account address. Using it signs you out everywhere.</div>
+        <div class="btn-row" style="margin-top:10px;"><button type="button" class="primary ghost" id="acResetBtn">Email me a reset link</button></div>
+        <div class="ac-msg" id="acResetMsg" role="status" aria-live="polite"></div>
+      </div>
+      <div class="ov-block ac-block">
+        <div class="ov-block-title">Sessions</div>
+        <div class="ac-hint">Changing your password signs out every other device. A list of individual sessions is not available.</div>
+        <div class="btn-row" style="margin-top:10px;">
+          <button type="button" class="primary ghost" id="acSignOutHere">Sign out of this device</button>
+          <button type="button" class="primary ghost" id="acSignOutAll">Sign out of all devices</button>
+        </div>
+        <div class="ac-msg" id="acSessMsg" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- ============ Preferences ============ -->
+    <section class="ac-section" data-ac-section="preferences" id="ac-preferences" aria-label="Preferences" hidden>
+      <div class="ac-hint ac-note">Only settings that do something are shown here. Theme, display currency and notification options are not available yet.</div>
+      <div class="ov-block" style="border-color:var(--amber-dim);">
+      <div class="ov-block-title">AI Signal Provider <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">OPTIONAL · EXPERIMENTAL</span></div>
+      <div class="field" style="max-width:280px;">
+        <label for="aiProviderSelect">Provider</label>
+        <select id="aiProviderSelect">
+          <option value="openai">ChatGPT (OpenAI)</option>
+          <option value="anthropic">Claude (Anthropic)</option>
+          <option value="google">Gemini (Google)</option>
+          <option value="xai">Grok (xAI)</option>
+        </select>
+      </div>
+      <div class="kv-field" style="max-width:480px;margin-top:10px;">
+        <input id="aiApiKeyInput" type="password" placeholder="Enter this provider's API key">
+        <button type="button" class="reveal-btn" id="aiKeyRevealBtn" title="Show/hide">SHOW</button>
+      </div>
+      <div class="btn-row" style="margin-top:10px;">
+        <button type="button" class="primary ghost" id="aiSaveBtn">Save Key</button>
+        <button type="button" class="primary ghost" id="aiTestBtn">Test Connection</button>
+        <button type="button" class="primary ghost" id="aiRemoveBtn">Remove Key</button>
+      </div>
+      <div style="margin-top:12px;">
+        <label class="toggle-check">
+          <input id="aiEnabledToggle" type="checkbox">
+          <span>Use this provider to double-check Live/Demo signals before an order is placed</span>
+        </label>
+      </div>
+      <div id="aiStatusNote" style="font-size:12px;color:var(--dim);margin-top:10px;">No AI provider key saved yet.</div>
+    </div>
+
+      <div class="ov-block" style="margin-top:18px;" id="acBackup">
+      <div class="ov-block-title">Backup &amp; Transfer <span class="pill" style="margin-left:6px;color:var(--amber);border-color:var(--amber-dim);">PHONE &harr; PC</span></div>
+      <div style="font-size:12px;color:var(--dim);line-height:1.5;margin:10px 0 14px;max-width:760px;">
+        Signed in, your Trading Bots, their trades and your saved exchange keys live on the server and appear on every device automatically — they are not part of this file. This backup covers what stays in this browser: Export it here, then import the file on another device to carry over your
+        trade history, paper/backtest history, settings and logs. It does not use cookies.
+        <strong>Only run a bot on one device at a time</strong> &mdash; bots that were active are imported as paused.
+      </div>
+
+      <div style="font-weight:600;margin-bottom:8px;">Export from this device</div>
+      <label class="toggle-check" style="margin-bottom:10px;">
+        <input id="bkIncludeSecrets" type="checkbox">
+        <span>Include API keys &amp; secrets (sensitive &mdash; needs a passphrase, file is encrypted)</span>
+      </label>
+      <div class="field" style="max-width:360px;">
+        <input id="bkExportPass" type="password" autocomplete="new-password" placeholder="Passphrase (optional)">
+      </div>
+      <div class="btn-row" style="margin-top:10px;">
+        <button type="button" class="primary" id="bkExportBtn">Export backup</button>
+        <button type="button" class="primary ghost" id="bkShareBtn" hidden>Share&hellip;</button>
+      </div>
+      <div id="bkExportStatus" style="font-size:12px;color:var(--dim);margin-top:8px;min-height:16px;"></div>
+
+      <div style="font-weight:600;margin:18px 0 8px;border-top:1px solid var(--line);padding-top:16px;">Import on this device</div>
+      <div class="field" style="max-width:420px;">
+        <input id="bkImportFile" type="file" accept=".json,application/json">
+      </div>
+      <div class="field" style="max-width:360px;margin-top:10px;">
+        <input id="bkImportPass" type="password" autocomplete="off" placeholder="Passphrase (if the file is encrypted)">
+      </div>
+      <div class="btn-row" style="margin-top:10px;">
+        <button type="button" class="primary ghost" id="bkImportBtn">Import backup</button>
+      </div>
+      <div id="bkImportStatus" style="font-size:12px;color:var(--dim);margin-top:8px;min-height:16px;"></div>
+      <div style="font-size:11.5px;color:var(--dim);margin-top:10px;max-width:760px;">Importing replaces matching data on this device. Export this device first if it has history you want to keep. API keys already saved here are kept unless the backup includes its own.</div>
+    </div>
+    </section>
+  </div>
+</div>
+
+<script type="module" src="/js/app.js"></script>
+<script type="module" src="/js/backup.js"></script>
+<script type="module" src="/js/account-page.js"></script>
+
+<script type="module" src="/js/mobile-shell.js"></script>
+
+</body>
+</html>

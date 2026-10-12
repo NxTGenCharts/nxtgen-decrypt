@@ -55,7 +55,10 @@
     <a class="brand" href="#overview" aria-label="NxTGen DeCrypt — Crypto Terminal, home"><span class="bm" data-bm-scroll aria-hidden="true"><span class="bm-stage"><span class="bm-glow"></span><span class="bm-p bm-word"><img src="/assets/brand/word.png" alt="" width="671" height="209" decoding="async" fetchpriority="high"><span class="bm-sheen"></span></span><span class="bm-p bm-tag"><img src="/assets/brand/tag.png" alt="" width="671" height="20" decoding="async"></span></span></span></a>
     <nav aria-label="Primary"><ul class="nav-links" id="navLinks"><li><a href="#overview">Overview</a></li><li><a href="#features">Features</a></li><li><a href="#how-it-works">How It Works</a></li><li><a href="#arbitrage">Arbitrage</a></li><li><a href="#exchanges">Exchanges</a></li><li><a href="#faq">FAQ</a></li></ul></nav>
     <div class="nav-cta">
-      <a class="btn btn-primary btn-sm" href="/overview/">Launch Terminal</a>
+      <a class="btn btn-sm btn-signin" href="/login/" data-auth="out">Sign in</a>
+      <a class="btn btn-primary btn-sm" href="/register/" data-auth="out">Create account</a>
+      <a class="btn btn-primary btn-sm" href="/overview/" data-auth="in" hidden>Open terminal</a>
+      <a class="btn btn-sm btn-signin" href="/account/" data-auth="in" hidden>Account</a>
       <button class="burger" id="burger" type="button" aria-expanded="false" aria-controls="navLinks" aria-label="Toggle navigation menu"><span></span></button>
     </div>
   </div>
@@ -68,7 +71,7 @@
       <p class="eyebrow">Real-time cross-market intelligence</p>
       <h1>Find the spread.<br><span>Capture the opportunity.</span></h1>
       <p class="lead">NxTGen DeCrypt continuously scans cryptocurrency markets to identify pricing inefficiencies, arbitrage opportunities and cross-market discrepancies before they disappear.</p>
-      <div class="cta-row"><a class="btn btn-primary" href="/overview/">Launch Terminal <span class="arr" aria-hidden="true">→</span></a><a class="btn" href="#features">Explore Features</a></div>
+      <div class="cta-row"><a class="btn btn-primary" href="/register/" data-auth="out">Create account <span class="arr" aria-hidden="true">→</span></a><a class="btn" href="/login/" data-auth="out">Sign in</a><a class="btn btn-primary" href="/overview/" data-auth="in" hidden>Open terminal <span class="arr" aria-hidden="true">→</span></a><a class="btn" href="#features">Explore Features</a></div>
       <div class="live"><span class="pulse" aria-hidden="true"></span><span><b>TERMINAL PREVIEW</b> · illustrative sample values</span></div>
     </div>
     <div class="term reveal" id="heroTerm" role="img" aria-label="Preview of the arbitrage terminal showing sample opportunities">
@@ -179,7 +182,7 @@
     <a class="social" href="https://x.com/nxtgen_decrypt" target="_blank" rel="noopener noreferrer" aria-label="NxTGen DeCrypt on X (opens in a new tab)"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false" style="fill:currentColor;stroke:none;width:16px;height:16px;margin:0"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg><span>@nxtgen_decrypt</span></a></div>
     <div><h4>Product</h4><ul><li><a href="#overview">Overview</a></li><li><a href="#features">Features</a></li><li><a href="#arbitrage">Arbitrage</a></li><li><a href="/overview/">Terminal</a></li></ul></div>
     <div><h4>Terminal</h4><ul><li><a href="/triangular-arbitrage/">Triangular Arbitrage</a></li><li><a href="/cross-arbitrage/">Cross-Exchange</a></li><li><a href="/autotrade-futures/">Futures Engine</a></li><li><a href="/utilities-tools/">Utilities &amp; Tools</a></li></ul></div>
-    <div><h4>Resources</h4><ul><li><a href="/docs/">Documentation</a></li><li><a href="/api-keys/">API Keys</a></li><li><a href="#faq">FAQ</a></li></ul></div>
+    <div><h4>Resources</h4><ul><li><a href="/docs/">Documentation</a></li><li><a href="/account/#exchanges">Exchange connections</a></li><li><a href="#faq">FAQ</a></li></ul></div>
     <div><h4>Company</h4><ul><li><a href="/about/">About</a></li><li><a href="/contact/">Contact</a></li><li><a href="/terms/">Terms</a></li><li><a href="/privacy/">Privacy</a></li></ul></div>
   </div>
   </div>

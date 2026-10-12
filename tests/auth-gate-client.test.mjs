@@ -69,5 +69,6 @@ test('explicit sign-out on a dashboard page -> /login/ with the "signed out" not
 test('loginUrl never carries an unsafe destination', () => {
   assert.equal(acct.loginUrl('https://evil.example/overview/', 'required'), '/login/?reason=required');
   assert.equal(acct.loginUrl('//evil.example', ''), '/login/');
-  assert.equal(acct.loginUrl('/api-keys/', 'expired'), '/login/?next=%2Fapi-keys%2F&reason=expired');
+  assert.equal(acct.loginUrl('/account/#exchanges', 'expired'), '/login/?next=%2Faccount%2F%23exchanges&reason=expired');
+  assert.equal(acct.loginUrl('/api-keys/', 'expired'), '/login/?next=%2Faccount%2F%23exchanges&reason=expired');
 });
