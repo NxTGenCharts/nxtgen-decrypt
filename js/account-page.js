@@ -150,7 +150,7 @@ function renderDashboard(){
 
   // stat cards
   setText('acStatEx', String(sum.keyCount));
-  setText('acStatExSub', sum.keyCount ? `${sum.keysVerified} confirmed by the exchange` : 'No exchanges connected yet.');
+  setText('acStatExSub', sum.keyCount ? `Saved on your account${sum.keysVerified ? ` · ${sum.keysVerified} re-checked` : ''}` : 'No exchanges connected yet.');
   setText('acStatBots', status ? `${sum.running} / ${sum.botCount}` : '—');
   setText('acStatBotsSub', !status ? 'Server data unavailable' : (sum.botCount ? `${sum.running} running · ${sum.stopped} stopped${sum.errored ? ` · ${sum.errored} error` : ''}` : "You haven't created any trading bots."));
   const real = $('acStatReal'); real.textContent = status ? (sum.realized == null ? '$0.00' : fmtUsd(sum.realized, true)) : '—'; real.className = `ov-value ${status ? pnlClass(sum.realized) : ''}`;
@@ -167,7 +167,7 @@ function renderDashboard(){
     else if(k.verifiedAt) state = `Confirmed ${fmtWhen(k.verifiedAt)}`;
     else state = 'Saved on your account (verified when it was added)';
     return `<div class="ac-row"><div class="ac-main"><strong>${esc(EX_NAMES[k.exchange] || k.exchange)}</strong> <span class="pill">${esc(k.mode.toUpperCase())}</span> <span class="ac-dim">…${esc(k.last4)}</span></div>` +
-      `<div class="ac-cell ${cls}">${esc(state)}</div><div class="ac-cell"><button type="button" class="primary ghost ac-mini" data-ac-test="${esc(id)}">Test</button></div></div>`;
+      `<div class="ac-cell ${cls}">${esc(state)}</div><div class="ac-cell ac-cell-act"><button type="button" class="ac-iconbtn ac-mini" data-ac-test="${esc(id)}" aria-label="Test connection" title="Test connection"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-activity"/></svg></button></div></div>`;
   }), 'No exchanges connected yet.');
   const exFoot = document.querySelector('#acExList + .ac-foot'); if(exFoot) exFoot.hidden = !keys.length;
   if(!keys.length) $('acExList').insertAdjacentHTML('beforeend', '<div class="ac-empty"><a class="primary ac-link" href="#exchanges">Connect an exchange</a> to view your portfolio.</div>');
@@ -207,14 +207,14 @@ async function runCheck(id){
 function initClicks(){
 document.addEventListener('click', async (e) => {
   const t = e.target.closest('[data-ac-test]');
-  if(t){ t.disabled = true; t.textContent = '…'; await runCheck(t.dataset.acTest); renderDashboard(); return; }
+  if(t){ t.disabled = true; t.classList.add('is-busy'); await runCheck(t.dataset.acTest); renderDashboard(); return; }
   if(e.target.closest('#acCheckAllBtn')){
-    const b = $('acCheckAllBtn'); b.disabled = true; b.textContent = 'Checking…';
+    const b = $('acCheckAllBtn'), bt = b.querySelector('.ac-btn-t'); b.disabled = true; b.classList.add('is-busy'); if(bt) bt.textContent = 'Checking…';
     for(const k of savedKeys()){ await runCheck(`${k.exchange}:${k.mode}`); renderDashboard(); await new Promise(r => setTimeout(r, 3100)); }   // the server spaces checks per key; gentle on the exchanges too
-    b.disabled = false; b.textContent = 'Check connections & balances';
+    b.disabled = false; b.classList.remove('is-busy'); if(bt) bt.textContent = 'Check connections & balances';
     return;
   }
-  if(e.target.closest('#acRefreshBtn')){ const b = $('acRefreshBtn'); b.disabled = true; await refreshAll(); b.disabled = false; }
+  if(e.target.closest('#acRefreshBtn')){ const b = $('acRefreshBtn'); b.disabled = true; b.classList.add('is-busy'); await refreshAll(); b.disabled = false; b.classList.remove('is-busy'); }
 });
 }
 

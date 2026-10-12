@@ -115,3 +115,32 @@ test('a revoked login (refresh rejected) signs the device out cleanly', async ()
   assert.equal(acct.isSignedIn(), false);
   assert.equal(state.exchangeCreds.bybit.live, null);
 });
+
+// ---- keys saved only on this device are handed to the account automatically (so a key is entered once) ----
+test('pendingLocalKeys picks only verified, raw, not-yet-saved keys — and never retries an attempted one', () => {
+  const raw = (k) => ({ apiKey: k, secretKey: 's', verified: true });
+  const creds = {
+    bybit:  { live: raw('BYBITLIVE123456'), demo: { ...raw('BYBITDEMO654321'), verified: false } },   // demo is unverified: left for the user
+    binance:{ live: raw('BINANCELIVE9999'), demo: null },                                              // the account already has this one
+    bitget: { live: { apiKey: 'srv:bitget:live:1234', secretKey: 'srv', verified: true, serverHeld: true }, demo: null },   // already a placeholder
+    mexc:   { live: raw('MEXCLIVE0000001'), demo: null },
+  };
+  const saved = [{ exchange: 'binance', mode: 'live' }];
+  const tried = new Set();
+  const first = acct.pendingLocalKeys(creds, saved, tried);
+  assert.deepEqual(first.map(x => `${x.exchange}:${x.mode}`).sort(), ['bybit:live', 'mexc:live']);
+  first.forEach(x => tried.add(x.sig));
+  assert.deepEqual(acct.pendingLocalKeys(creds, saved, tried), [], 'a refused/attempted key is not retried in a loop');
+  assert.deepEqual(acct.pendingLocalKeys({}, [], tried), []);
+});
+
+test('refreshKeys announces only real changes (it now also runs on a timer and when the tab is refocused)', async () => {
+  await acct.signIn('a@x.io', 'correct-horse');
+  const seen = [];
+  const off = acct.onAccountChange((t) => { if(t === 'keys') seen.push(t); });
+  await acct.refreshKeys();           // same list as the sign-in already loaded
+  await acct.refreshKeys();
+  off();
+  assert.equal(seen.length, 0, 'no change -> no event, so pages are not redrawn every minute');
+  await acct.signOut();
+});

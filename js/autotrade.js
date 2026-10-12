@@ -29,7 +29,7 @@
 //   clears your profit floor, compounding a running "today" balance
 //   until your daily target is hit, then stops and shows the summary.
 // =============================================================
-import { saveKeyToAccount, removeKeyFromAccount, testSavedKey, refreshKeys, onAccountChange, isSignedIn, hasSavedKey, accountsAvailable, keysStatus } from './account.js';
+import { saveKeyToAccount, removeKeyFromAccount, testSavedKey, refreshKeys, onAccountChange, isSignedIn, hasSavedKey, accountsAvailable, keysStatus, savedKeys, pendingLocalKeys } from './account.js';
 import { els, state, DEFAULT_VERIFY_PROXY_URL } from './state.js';
 import { EXCHANGES, filterTriPairs } from './exchanges.js';
 import { buildGraph, findCycles } from './triangular.js';
@@ -1434,12 +1434,35 @@ if(els.atExchange) els.atExchange.addEventListener('change', () => {
   renderBalances();
 });
 
+// Keys saved only in this browser (before accounts, or while signed out) are handed to the account automatically once the user is
+// signed in and the account's key list has loaded — so a key is entered ONCE and then follows the account to every device. The
+// server verifies each key with the exchange first and the secret is dropped from this browser afterwards (persist() scrubs it).
+const autoMoveTried = new Set();
+let autoMoving = false;
+async function autoMoveLocalKeys(){
+  if(autoMoving || !serverStorageUsable() || !keysStatus().loaded) return;
+  autoMoving = true;
+  try{
+    const moved = [];
+    for(const { exchange, mode, sig } of pendingLocalKeys(state.exchangeCreds, savedKeys(), autoMoveTried)){
+      autoMoveTried.add(sig);
+      const cred = state.exchangeCreds[exchange][mode];
+      const r = await saveKeyToAccount(exchange, mode, cred).catch(err => ({ ok: false, message: err.message }));
+      if(r && r.ok){ if(r.balance != null) state.balances[exchange][mode] = r.balance; moved.push(`${EXCHANGES[exchange].label} ${mode}`); }
+    }
+    if(moved.length){
+      persist(); renderConnectRows(); renderBalances(); renderExchangeOptions();
+      showAtMessage(`${moved.join(', ')} key${moved.length === 1 ? ' was' : 's were'} on this device only — now stored encrypted on your account for every device, and removed from this browser.`, 'info');
+    }
+  }finally{ autoMoving = false; }
+}
+
 export function initAutotrade(){
   try{
     restore();
     // account.js adds/removes the placeholders for keys saved on the account — redraw when that happens
     window.addEventListener('nxtgen:creds-changed', () => { renderConnectRows(); renderBalances(); renderExchangeOptions(); });
-    onAccountChange(() => { renderConnectRows(); });   // sign-in state / saved-key list resolved or changed: pills and buttons depend on it
+    onAccountChange((type) => { renderConnectRows(); if(type === 'keys') autoMoveLocalKeys().catch(() => {}); });   // sign-in state / saved-key list resolved or changed: pills and buttons depend on it; a loaded key list also triggers the one-time move of this device's own keys
     if(els.atProxyUrl){
       els.atProxyUrl.value = maskProxyUrl(state.verifyProxyUrl || DEFAULT_VERIFY_PROXY_URL);
       els.atProxyUrl.setAttribute('readonly', 'readonly');

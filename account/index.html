@@ -80,7 +80,7 @@
           <h3 id="acWelcome">Welcome</h3>
           <div class="ac-sub" id="acWelcomeSub">Loading your account…</div>
         </div>
-        <button type="button" class="primary ghost" id="acRefreshBtn">Refresh</button>
+        <button type="button" class="ac-iconbtn" id="acRefreshBtn" aria-label="Refresh" title="Refresh"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-refresh-cw"/></svg></button>
       </div>
       <div id="acDashNotice"></div>
 
@@ -94,20 +94,20 @@
       <div class="ov-block ac-block">
         <div class="ov-block-title">Quick actions</div>
         <div class="ac-actions">
-          <a class="primary ghost ac-link" href="#exchanges">Manage exchanges</a>
-          <a class="primary ghost ac-link" href="/utilities-tools/#trading-bots">Trading bots</a>
-          <a class="primary ghost ac-link" href="/autotrade-futures/">Futures engine</a>
-          <a class="primary ghost ac-link" href="/triangular-arbitrage/">Triangular</a>
-          <a class="primary ghost ac-link" href="/cross-arbitrage/">Cross-exchange</a>
-          <a class="primary ghost ac-link" href="/utilities-tools/#backtesting">Backtesting</a>
-          <a class="primary ghost ac-link" href="/utilities-tools/#paper-trading">Paper trading</a>
+          <a class="ac-tile" href="#exchanges"><span class="ac-tile-ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-key"/></svg></span><span class="ac-tile-t">Manage exchanges</span><svg class="icon ac-tile-go" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-chevron-right"/></svg></a>
+          <a class="ac-tile" href="/utilities-tools/#trading-bots"><span class="ac-tile-ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-bot"/></svg></span><span class="ac-tile-t">Trading bots</span><svg class="icon ac-tile-go" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-chevron-right"/></svg></a>
+          <a class="ac-tile" href="/autotrade-futures/"><span class="ac-tile-ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-zap"/></svg></span><span class="ac-tile-t">Futures engine</span><svg class="icon ac-tile-go" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-chevron-right"/></svg></a>
+          <a class="ac-tile" href="/triangular-arbitrage/"><span class="ac-tile-ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-triangle-nodes"/></svg></span><span class="ac-tile-t">Triangular</span><svg class="icon ac-tile-go" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-chevron-right"/></svg></a>
+          <a class="ac-tile" href="/cross-arbitrage/"><span class="ac-tile-ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-arrow-left-right"/></svg></span><span class="ac-tile-t">Cross-exchange</span><svg class="icon ac-tile-go" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-chevron-right"/></svg></a>
+          <a class="ac-tile" href="/utilities-tools/#backtesting"><span class="ac-tile-ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-history"/></svg></span><span class="ac-tile-t">Backtesting</span><svg class="icon ac-tile-go" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-chevron-right"/></svg></a>
+          <a class="ac-tile" href="/utilities-tools/#paper-trading"><span class="ac-tile-ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-clipboard-list"/></svg></span><span class="ac-tile-t">Paper trading</span><svg class="icon ac-tile-go" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-chevron-right"/></svg></a>
         </div>
       </div>
 
       <div class="ov-block ac-block">
         <div class="ov-block-title">Connected exchanges</div>
         <div id="acExList" class="ac-list"></div>
-        <div class="ac-foot"><button type="button" class="primary ghost" id="acCheckAllBtn">Check connections &amp; balances</button><span class="ac-hint">Read-only: asks each exchange for the balance. Never places an order.</span></div>
+        <div class="ac-foot"><button type="button" class="ac-btn" id="acCheckAllBtn"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-activity"/></svg><span class="ac-btn-t">Check connections &amp; balances</span></button><span class="ac-hint">Read-only: asks each exchange for the balance. Never places an order.</span></div>
       </div>
 
       <div class="ov-block ac-block">

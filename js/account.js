@@ -260,14 +260,32 @@ async function accountApi(path, method, body){
   if(!data) throw new Error('The server sent an unreadable response.');
   return data;
 }
+const keysSig = () => JSON.stringify([keysState.loaded, keysState.enabled, keysState.reason, keys.map(k => [k.exchange, k.mode, k.fp, k.verifiedAt, k.updatedAt])]);
 export async function refreshKeys(){
   if(!isSignedIn()) return;
+  const before = keysSig();
   try{
     const r = await accountApi('/api/account/keys');
     if(r.ok){ keys = r.creds || []; keysState = { loaded: true, enabled: r.enabled !== false, reason: r.reason || '' }; applyHeldKeys(); }
     else keysState = { loaded: true, enabled: false, reason: r.message || '' };
   }catch(e){ keysState = { ...keysState, reason: e.message }; }
-  emit('keys');
+  if(keysSig() !== before) emit('keys');
+}
+
+// Which keys saved ONLY in this browser (before accounts existed, or while signed out) should be handed to the account so the
+// user never has to enter them again on another device? Pure so it can be tested: a verified, raw (not already server-held) key
+// for a slot the account has no key for, and that has not been attempted already this page view (so a refusal is not retried in a loop).
+export function pendingLocalKeys(exchangeCreds, saved, tried){
+  const out = [];
+  for(const ex of EX) for(const mode of ['live', 'demo']){
+    const c = exchangeCreds && exchangeCreds[ex] && exchangeCreds[ex][mode];
+    if(!c || c.serverHeld || !c.apiKey || !c.secretKey || !c.verified) continue;
+    if((saved || []).some(k => k.exchange === ex && k.mode === mode)) continue;   // the account already holds one: the row offers "use the account's key" instead
+    const sig = `${ex}:${mode}:${String(c.apiKey).slice(-6)}`;
+    if(tried && tried.has(sig)) continue;
+    out.push({ exchange: ex, mode, sig });
+  }
+  return out;
 }
 export const keysStatus = () => ({ ...keysState });
 
@@ -514,6 +532,13 @@ export async function initAccount(){
     else if(isSignedIn()){ endReason = 'user'; session = null; keys = []; clearHeldKeys(); emit('signout'); }
   });
   document.addEventListener('visibilitychange', () => { if(!document.hidden && isSignedIn()) freshToken().catch(() => {}); });
+  // A key added or removed on another device shows up here without a reload: re-read the account's key list when this tab comes
+  // back into view, when the network returns, and once a minute while it stays open. (Cheap: it returns masked summaries only.)
+  let lastKeySync = Date.now();
+  const syncKeys = () => { if(!isSignedIn() || document.hidden || Date.now() - lastKeySync < 20_000) return; lastKeySync = Date.now(); refreshKeys(); };
+  document.addEventListener('visibilitychange', syncKeys);
+  window.addEventListener('online', syncKeys);
+  const keyTimer = setInterval(syncKeys, 60_000); if(keyTimer && typeof keyTimer.unref === 'function') keyTimer.unref();   // (unref: never keeps a Node test process alive; a no-op in browsers)
   // Dashboard pages (js/auth-gate.js marks them): leave for the login page whenever there is no valid session — now, or later
   // when it expires or the user signs out (here or in another tab).
   onAccountChange((type) => { if(type === 'signout') gateRedirect(endReason === 'user' ? 'signedout' : (endReason === 'deleted' ? 'deleted' : 'expired')); });

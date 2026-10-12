@@ -29,8 +29,45 @@
 @media (max-width:900px){ .ac-stats{ grid-template-columns:repeat(2, minmax(0, 1fr)); } }
 @media (max-width:340px){ .ac-stats{ grid-template-columns:minmax(0, 1fr); } }
 
-/* quick actions */
-.ac-actions{ display:flex; flex-wrap:wrap; gap:8px; }
+/* quick actions: icon tiles (a quiet surface, one icon, one label — gold only on hover/focus) */
+.ac-actions{ display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:10px; }
+.ac-tile{
+  display:flex; align-items:center; gap:12px; min-width:0; min-height:52px; padding:9px 12px;
+  background:var(--panel2); border:1px solid var(--line); border-radius:var(--r-md); color:var(--ink); text-decoration:none;
+  font-family:var(--disp); font-weight:600; font-size:12.5px; letter-spacing:.01em;
+  transition:border-color var(--dur) var(--ease), background var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.ac-tile-ic{
+  flex:none; width:32px; height:32px; display:inline-flex; align-items:center; justify-content:center; font-size:16px;
+  color:var(--amber); background:rgba(240,180,41,.08); border:1px solid rgba(240,180,41,.22); border-radius:8px;
+}
+.ac-tile-t{ flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ac-tile-go{ flex:none; color:var(--dim2, var(--dim)); font-size:15px; transition:transform var(--dur) var(--ease), color var(--dur) var(--ease); }
+.ac-tile:hover{ border-color:rgba(240,180,41,.55); background:#171d19; transform:translateY(-1px); }
+.ac-tile:hover .ac-tile-go{ color:var(--amber); transform:translateX(2px); }
+.ac-tile:active{ transform:translateY(0); }
+.ac-tile:focus-visible{ outline:none; border-color:var(--amber); box-shadow:var(--focus-ring); }
+
+/* icon button (Refresh, per-row Test) and the one text+icon button of the page */
+.ac-iconbtn, .ac-btn{
+  display:inline-flex; align-items:center; justify-content:center; gap:8px; cursor:pointer; font:inherit;
+  color:var(--ink-dim); background:var(--panel2); border:1px solid var(--line); border-radius:var(--r-btn);
+  transition:border-color var(--dur) var(--ease), color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.ac-iconbtn{ width:var(--touch-target, 44px); height:var(--touch-target, 44px); padding:0; font-size:18px; }
+.ac-iconbtn.ac-mini{ width:34px; height:34px; min-height:0; padding:0; font-size:16px; }
+.ac-btn{ min-height:var(--touch-target, 44px); padding:0 16px; font-family:var(--disp); font-weight:600; font-size:12.5px; }
+.ac-btn .icon{ font-size:16px; color:var(--amber); }
+.ac-iconbtn:hover:not(:disabled), .ac-btn:hover:not(:disabled){ color:var(--amber); border-color:rgba(240,180,41,.55); background:#171d19; }
+.ac-iconbtn:focus-visible, .ac-btn:focus-visible{ outline:none; border-color:var(--amber); box-shadow:var(--focus-ring); }
+.ac-iconbtn:disabled, .ac-btn:disabled{ cursor:progress; opacity:.7; }
+.ac-iconbtn.is-busy .icon, .ac-btn.is-busy .icon, .ac-iconbtn:disabled .icon{ animation:acSpin 1s linear infinite; }
+@keyframes acSpin{ to{ transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce){
+  .ac-iconbtn.is-busy .icon, .ac-btn.is-busy .icon, .ac-iconbtn:disabled .icon{ animation:none; }
+  .ac-tile, .ac-tile-go{ transition:none; }
+}
+.ac-cell-act{ display:flex; justify-content:flex-end; }
 .ac-link{ display:inline-flex; align-items:center; justify-content:center; text-decoration:none; min-height:38px; }
 .ac-mini{ min-height:32px; padding:5px 12px; font-size:11.5px; }
 
@@ -86,12 +123,16 @@ button.primary.danger:disabled{ opacity:.45; cursor:not-allowed; }
   .ac-row > .ac-main{ grid-column:1 / -1; }
   .ac-dl-row{ grid-template-columns:minmax(0, 1fr); gap:2px; }
   .ac-form{ max-width:none; }
-  .ac-welcome{ flex-direction:column; align-items:stretch; }
-  .ac-welcome > button{ width:100%; }
-  .ac-actions .ac-link{ flex:1 1 calc(50% - 8px); }
-  .ac-foot > button{ width:100%; }
+  .ac-welcome{ flex-wrap:nowrap; }   /* title left, icon button right — an icon doesn't need a full-width row */
+  .ac-welcome > .ac-iconbtn{ flex:none; }
+  .ac-actions{ grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  .ac-tile{ padding:8px 10px; gap:9px; }
+  .ac-tile-go{ display:none; }
+  .ac-foot > .ac-btn{ width:100%; }
+  .ac-cell-act{ justify-content:flex-start; }
   .ac-form .btn-row > button{ flex:1 1 100%; min-height:46px; }
   #panelAccount .btn-row > button{ min-height:44px; }
   /* the sticky sub-tab bar sits under the app bar; keep long section content clear of the fixed bottom tab bar */
   #panelAccount{ padding-bottom:12px; }
 }
+@media (max-width:340px){ .ac-actions{ grid-template-columns:minmax(0, 1fr); } }
