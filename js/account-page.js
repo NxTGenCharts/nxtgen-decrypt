@@ -38,8 +38,9 @@ export const fmtWhen = (ms) => { if(!ms) return '—'; const d = new Date(ms); r
 
 // A bot that is trading (or about to) right now. Paused bots hold no orders or positions, closed/error bots are not running.
 export const isRunning = (b) => !!b && (b.status === 'deploying' || (b.status === 'active' && !b.paused));
+export const isStopped = (b) => !!b && (b.status === 'closed' || b.status === 'stopped');   // 'stopped' = bots stopped by hand before the server was fixed to write 'closed'
 export const botLabel = (b) => (b.nickname && String(b.nickname).trim()) || `${b.symbol || 'Bot'} ${b.type === 'dca' ? 'DCA' : 'Grid'}`;
-export const botState = (b) => b.status === 'deploying' ? 'Deploying' : b.status === 'active' ? (b.paused ? 'Paused' : 'Running') : b.status === 'closed' ? 'Stopped' : b.status === 'error' ? 'Error' : String(b.status || '—');
+export const botState = (b) => b.status === 'deploying' ? 'Deploying' : b.status === 'active' ? (b.paused ? 'Paused' : 'Running') : isStopped(b) ? 'Stopped' : b.status === 'error' ? 'Error' : String(b.status || '—');
 
 // Totals for the stat cards. Realized = closed trades the server booked; unrealized = open bot positions, only where the exchange reported it.
 export function summarize({ keys = [], bots = [], trades = [], day = null } = {}){
@@ -49,7 +50,7 @@ export function summarize({ keys = [], bots = [], trades = [], day = null } = {}
   const unrealized = known.length ? known.reduce((a, b) => a + b.runtime.unrealizedUsd, 0) : null;
   return {
     keyCount: keys.length, keysVerified: keys.filter(k => k.verifiedAt).length,
-    botCount: bots.length, running: running.length, stopped: bots.filter(b => b.status === 'closed').length, errored: bots.filter(b => b.status === 'error').length,
+    botCount: bots.length, running: running.length, stopped: bots.filter(isStopped).length, errored: bots.filter(b => b.status === 'error').length,
     tradeCount: trades.length, realized: trades.length ? realized : null,
     unrealized, unrealizedUnknown: running.length - known.length,
     todayRealized: day && Number.isFinite(day.tbDayRealizedUsd) && day.tbDayKey ? day.tbDayRealizedUsd : null,
@@ -136,7 +137,7 @@ function renderDashboard(){
   const name = (profile && profile.displayName) || accountEmail() || 'there';
   setText('acWelcome', `Welcome, ${name}`);
   const bits = [];
-  if(accountEmail()) bits.push(accountEmail());
+  if(accountEmail() && !(profile && profile.displayName)) bits.push(accountEmail());   // the address is only shown while no username is set
   if(profile && profile.createdAt) bits.push(`Member since ${new Date(profile.createdAt).toLocaleDateString()}`);
   if(profile) bits.push(profile.emailConfirmedAt ? 'Email verified' : 'Email not verified');
   setText('acWelcomeSub', bits.join(' · ') || (isSignedIn() ? '' : 'You are not signed in.'));
@@ -175,7 +176,7 @@ function renderDashboard(){
   // bots
   setText('acBotsScope', status ? '(running on the server)' : '');
   $('acBotList').innerHTML = listHtml(bots.slice().sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)).slice(0, 12).map((b) => {
-    const u = b.runtime && Number.isFinite(b.runtime.unrealizedUsd) ? b.runtime.unrealizedUsd : null;
+    const u = isRunning(b) && b.runtime && Number.isFinite(b.runtime.unrealizedUsd) ? b.runtime.unrealizedUsd : null;   // a stopped bot holds no position: never show its last floating number
     return `<div class="ac-row"><div class="ac-main"><strong>${esc(botLabel(b))}</strong> <span class="ac-dim">${esc(EX_NAMES[b.exchange] || b.exchange)} ${esc(b.mode)}</span></div>` +
       `<div class="ac-cell"><span class="pill ${isRunning(b) ? 'tr-yes' : ''}">${esc(botState(b))}</span></div>` +
       `<div class="ac-cell ${pnlClass(b.realizedUsd)}">${fmtUsd(b.realizedUsd, true)} <span class="ac-dim">realized</span></div>` +

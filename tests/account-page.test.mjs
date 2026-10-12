@@ -55,6 +55,8 @@ test('page helpers: tab routing, money, running bots, summaries and derived even
   ];
   const s = page.summarize({ keys: [{ verifiedAt: 1 }, {}], bots, trades: [{ netUsd: 2 }, { netUsd: -0.5 }], day: { tbDayKey: 'k', tbDayRealizedUsd: 1 } });
   assert.deepEqual([s.keyCount, s.keysVerified, s.running, s.stopped, s.errored, s.realized, s.unrealized, s.todayRealized], [2, 1, 1, 1, 1, 1.5, 1.5, 1]);
+  // a bot stopped by hand (legacy status 'stopped') counts as stopped too
+  assert.equal(page.summarize({ bots: [{ status: 'stopped' }, { status: 'closed' }] }).stopped, 2);
   const none = page.summarize({});
   assert.equal(none.realized, null); assert.equal(none.unrealized, null); assert.equal(none.running, 0);   // nothing invented for a new user
   const ev = page.deriveEvents({ keys: [{ exchange: 'bybit', mode: 'demo', last4: '1234', updatedAt: 100, verifiedAt: 200 }], bots, checks: { 'binance:live': { at: 300, ok: false, message: 'IP not allowed' } } });

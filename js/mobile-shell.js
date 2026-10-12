@@ -112,7 +112,6 @@ function buildAppBar() {
   actions.className = 'm-appbar-actions';
   actions.innerHTML =
     '<span class="m-live" id="mLive"><span class="dot" id="mLiveDot"></span><b id="mLiveText">connecting</b></span>' +
-    `<a class="m-iconbtn m-acctbtn" id="mAcctBtn" href="/account/" aria-label="Account">${icon('user')}</a>` +
     `<button type="button" class="m-iconbtn" id="mMenuBtn" aria-label="Connection status and app menu" aria-haspopup="dialog">${icon('more')}</button>`;
   brand.appendChild(actions);
 
@@ -176,10 +175,11 @@ function buildAppBar() {
 // account.js is imported dynamically so a failure there can never take the navigation down with it. It is the same module instance
 // app.js initialises, so the sign-in state read here is the page's real one.
 function wireAccount() {
-  const btn = $('#mAcctBtn'), who = $('#mWho');
+  const btn = null, who = $('#mWho');   // (no header account button any more: Account is in the bottom bar)
+  let shownName = '';
   import('./account.js').then((acct) => {
     const paint = () => {
-      const on = acct.isSignedIn(), email = acct.accountEmail();
+      const on = acct.isSignedIn(), email = shownName || acct.accountEmail();
       if (btn) {
         btn.setAttribute('aria-label', on ? `Account: ${email}` : 'Sign in');
         btn.href = on ? '/account/' : acct.loginUrl(location.pathname + location.search + location.hash);
@@ -195,8 +195,9 @@ function wireAccount() {
         who.innerHTML = '<div class="m-who-actions"><a class="primary" href="' + acct.loginUrl(location.pathname + location.search + location.hash) + '">Sign in</a><a class="primary ghost" href="/register/">Create account</a></div>';
       }
     };
-    paint();
-    acct.onAccountChange(paint);
+    const loadName = () => { if(!acct.isSignedIn()) { shownName = ''; paint(); return; } acct.fetchProfile().then((p) => { shownName = (p && p.displayName) || ''; paint(); }).catch(() => {}); };
+    paint(); loadName();
+    acct.onAccountChange((type) => { paint(); if(type === 'signin' || type === 'profile') loadName(); });
   }).catch(() => { /* the plain /account/ link in the header still works */ });
 }
 

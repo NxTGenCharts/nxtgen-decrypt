@@ -522,9 +522,10 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
       const lossFloorUsd = maxLossPct ? -bot.investmentUsd * (maxLossPct / 100) : null;
       const profitCeilUsd = profitTargetPct ? bot.investmentUsd * (profitTargetPct / 100) : null;
       // Profit Target counts closed profit PLUS the floating P&L of open legs (same figure as Total P/L and the progress bar).
-      // Max Loss below deliberately stays realized-only.
+      // Max Loss uses the same total (realized + floating): a bot sitting on a big open loss has to be stopped at its limit,
+      // not only after the loss has been realized by an exchange-side stop.
       const targetPnlUsd = bot.realizedUsd + (Number.isFinite(bot.runtime?.unrealizedUsd) ? bot.runtime.unrealizedUsd : 0);
-      if(lossFloorUsd != null && bot.realizedUsd <= lossFloorUsd){
+      if(lossFloorUsd != null && targetPnlUsd <= lossFloorUsd){
         tradingBotLog(bot, `This bot's Max Loss (${maxLossPct}%) reached — flattening.`, true);
         const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_MAX_LOSS');
         if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
@@ -808,7 +809,7 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
     } else {
       tradingBotLog(bot, `Stopped — but the server has no saved ${bot.exchange} ${bot.mode} key, so it could NOT cancel orders or close anything. Check ${bot.symbol} on ${bot.exchange} directly.`, true);
     }
-    bot.status = 'stopped'; bot.stoppedAtMs = Date.now();
+    bot.status = 'closed'; bot.stoppedAtMs = Date.now();   // 'closed' is the one "stopped" status every screen counts (this used to say 'stopped', so the account page never counted manually-stopped bots)
     await store.flushNow();
   }
 

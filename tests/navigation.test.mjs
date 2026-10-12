@@ -35,9 +35,9 @@ test('mobile shell: Account is a bottom tab and in the header; the menu sheet ca
   const js = read('js/mobile-shell.js');
   assert.match(js, /label: 'Account',\s+href: '\/account\/'/);
   for(const tab of ['Home', 'Triangular', 'Trade', 'Cross']) assert.ok(js.includes(`label: '${tab}'`), tab);
-  assert.ok(js.includes('id="mAcctBtn"') && js.includes('id="mSignOut"') && js.includes('Create account'));
-  // the three-dot menu is not the only way in: the account button is its own header control
-  assert.ok(js.indexOf('mAcctBtn') < js.indexOf('id="mMenuBtn"'));
+  assert.ok(js.includes('id="mSignOut"') && js.includes('Create account'));
+  // Account lives in the bottom bar only: no duplicate account icon in the app bar
+  assert.ok(!js.includes('id="mAcctBtn"'));
 });
 
 test('landing page: Sign in and Create account are real links, not hidden on phones', () => {

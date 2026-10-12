@@ -180,13 +180,13 @@ test('a bot caught mid-deployment by a restart is flagged, not silently resumed'
   assert.match(s2.state.tradingBots[0].statusMessage, /restarted while this bot was deploying/);
 });
 
-test('stop flattens the exchange and marks the bot stopped', async () => {
+test('stop flattens the exchange and marks the bot closed (the status every screen counts as stopped)', async () => {
   const { store, ex, engine } = setup({ price: 100 });
   store.setCred('bybit', 'demo', KEYS);
   const bot = engine.handoff(gridBot());
   await engine.deploying.get(bot.id);
   await engine.stopBot(bot.id);
-  assert.equal(bot.status, 'stopped');
+  assert.equal(bot.status, 'closed');
   assert.ok(bot.stoppedAtMs > 0);
   assert.equal(ex.orders.size, 0, 'every resting order cancelled');
 });

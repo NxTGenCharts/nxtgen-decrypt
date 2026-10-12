@@ -517,7 +517,6 @@ export async function initAccount(){
     config = await res.json();
     configProblem = config && config.enabled ? '' : 'disabled';
   }catch(e){ config = { enabled: false }; configProblem = 'unreachable'; }
-  mountUserChip();
   if(!config || !config.enabled){ emit('ready'); return; }
   const stored = readStored();
   if(stored && stored.access_token){
@@ -561,17 +560,3 @@ function gateRedirect(reason){
   location.replace(loginUrl(location.pathname + location.search, reason));
 }
 
-// Small "who am I / sign out" chip in the dashboard header.
-function mountUserChip(){
-  const host = document.querySelector && document.querySelector('.status-cluster');
-  if(!host || !window.__nxtgenProtected || document.getElementById('nxUserChip')) return;
-  const chip = css(h('div'), 'display:none;align-items:center;gap:8px;font-family:var(--mono,monospace);font-size:11px;color:var(--dim,#7f9385);max-width:100%;');
-  chip.id = 'nxUserChip';
-  const who = css(h('a'), 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:min(240px,50vw);color:inherit;text-decoration:none;'); who.href = '/account/'; who.setAttribute('aria-label', 'Open your account');
-  const out = css(h('button', null, 'Sign out'), 'background:none;border:1px solid var(--line,#212a23);border-radius:6px;color:var(--ink-dim,#aebcb2);cursor:pointer;font:inherit;padding:4px 8px;min-height:28px;');
-  out.type = 'button'; out.setAttribute('aria-label', 'Sign out of NxTGen DeCrypt');
-  out.addEventListener('click', () => { out.disabled = true; signOut(); });
-  chip.append(who, out); host.insertBefore(chip, host.firstChild);
-  const paint = () => { const on = isSignedIn(); chip.style.display = on ? 'flex' : 'none'; who.textContent = on ? accountEmail() : ''; who.title = on ? accountEmail() : ''; };
-  paint(); onAccountChange(paint);
-}
