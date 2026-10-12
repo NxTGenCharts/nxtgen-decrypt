@@ -406,3 +406,58 @@ test('database mode: a database that can be read but not written is reported (he
     assert.ok(s.health.lastSaveAt);
   });
 });
+
+// ---------------- daily limit reset, no double booking, fees kept, margin reset ----------------
+test('a booked close carries the exchange fee and is never booked twice', async () => {
+  const { store, ex, engine } = setup({ price: 100 });
+  store.setCred('bybit', 'demo', KEYS);
+  const bot = engine.handoff(gridBot());
+  await engine.deploying.get(bot.id);
+  ex.step(92); await engine.runCycle();
+  ex.step(106); await engine.runCycle();
+  const rows = store.state.trades.filter(t => t.gridId === bot.id);
+  assert.ok(rows.length >= 1);
+  const realized = bot.realizedUsd;
+  // the same close arriving again (another code path / a retry) must change nothing
+  await engine.runCycle(); await engine.runCycle();
+  assert.equal(store.state.trades.filter(t => t.gridId === bot.id).length, rows.length);
+  assert.equal(bot.realizedUsd, realized);
+  assert.ok(rows.every(t => t.closeOrderId != null), 'rows keep the exchange order id');
+});
+
+test('updateDay lifts a loss pause when the limit is raised, and reset zeroes the counter', async () => {
+  const { store, engine } = setup({ price: 100 });
+  const S = store.state;
+  S.tbDayKey = Math.floor(Date.now() / 86_400_000);
+  S.tbDayAnchorInvestmentUsd = 1000; S.tbDayRealizedUsd = -193;
+  S.tbDailyMaxLossPct = 10; S.tbDailyHalted = true; S.tbDailyHaltKind = 'loss'; S.tbDailyHaltMessage = 'Daily max loss (10%) reached';
+  let r = engine.updateDay({ maxLossPct: 15 });
+  assert.equal(r.day.tbDailyHalted, true, '-19.3% is still beyond 15%');
+  r = engine.updateDay({ maxLossPct: 25 });
+  assert.equal(r.day.tbDailyHalted, false);
+  assert.equal(S.tbDailyMaxLossPct, 25);
+  S.tbDailyHalted = true;
+  r = engine.updateDay({ reset: true });
+  assert.equal(S.tbDayRealizedUsd, 0);
+  assert.equal(r.day.tbDailyHalted, false);
+});
+
+test('repair removes duplicate rows and takes their P&L back out of the day counter', () => {
+  const { store, engine } = setup({ price: 100 });
+  const S = store.state, now = Date.now();
+  S.tbDayKey = Math.floor(now / 86_400_000);
+  S.tbDayRealizedUsd = -20;
+  S.trades.push({ id: 'a', gridId: 'B', netUsd: -10, closedAtMs: now }, { id: 'b', gridId: 'B', netUsd: -10, closedAtMs: now + 500 });
+  const r = engine.updateDay({ dedupe: true });
+  assert.equal(r.repaired.removed, 1);
+  assert.equal(S.trades.length, 1);
+  assert.equal(S.tbDayRealizedUsd, -10);
+});
+
+test('resetCommittedMargin only clears bots that are no longer running', () => {
+  const { store, engine } = setup({ price: 100 });
+  store.state.tradingBots.push({ id: 'x', status: 'closed', investmentUsd: 100 }, { id: 'y', status: 'active', investmentUsd: 50 });
+  const r = engine.resetCommittedMargin();
+  assert.deepEqual(r, { count: 1, amount: 100 });
+  assert.equal(store.state.tradingBots.find(b => b.id === 'y').marginExcluded, undefined);
+});

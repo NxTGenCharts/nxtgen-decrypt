@@ -40,8 +40,9 @@ import { DCA_STRATEGY, DCA_DEFAULTS, buildDcaPlan, computeDcaExitPrices } from '
 import { classifyRegime, REGIMES } from './futures/regime.js';
 import { getAiConfirmation } from './ai-signal.js';
 import { exportReportPdf } from './pdf-report.js';
+import { isDuplicateBotTrade, dedupeBotTrades, feeOf } from './futures/tradeLedger.js';
 import { openBotFx, botToast, confirmStopSheet } from './bot-fx.js';
-import { initServerBots, tryHandoff, isServerBot, serverStop, serverPause, serverResume, serverRemove, serverRename } from './server-bots.js';
+import { initServerBots, tryHandoff, isServerBot, serverStop, serverPause, serverResume, serverRemove, serverRename, serverUpdateDay, serverResetMargin } from './server-bots.js';
 
 const CYCLE_MS = 4000; // one synthetic "cycle" every 4s; each cycle advances the mock clock by a few minutes
 const LIVE_CYCLE_MS = 8000; // real API calls — a slower, deliberately conservative cadence than Paper's
@@ -1165,14 +1166,31 @@ function loadPersistentTradeLog(){
   }catch(e){ return []; } // corrupt/blocked storage — treat as empty rather than throw
 }
 
+// Returns true when a NEW row was written, false when the same Trading Bot trade is already in the log
+// (see js/futures/tradeLedger.js) — callers that also add P&L to a bot / the daily counters must only do
+// so on true (bookBotTrade below), otherwise one trade is counted twice.
 function appendPersistentTrade(record){
   try{
     const log = loadPersistentTradeLog();
+    if(isDuplicateBotTrade(log, record)) return false;
     log.unshift({ id: newTradeLogId(record), ...record });
     if(log.length > PERSISTENT_TRADE_LOG_MAX) log.length = PERSISTENT_TRADE_LOG_MAX;
     localStorage.setItem(PERSISTENT_TRADE_LOG_KEY, JSON.stringify(log));
     try{ window.dispatchEvent(new CustomEvent('nxtgen-trade-logged')); }catch(_){ /* lets the Trading Bots trade log refresh live */ }
-  }catch(e){ /* storage full/unavailable — the session-scoped history above still has it */ }
+    return true;
+  }catch(e){ /* storage full/unavailable — the session-scoped history above still has it */ return false; }
+}
+
+// The ONE way a Trading Bot close is booked: write the log row first and only if it is new add its net P&L
+// to the bot's Realized and to the cross-bot daily counters. Several paths can notice the same close (the
+// management cycle, Stop / Pause, a daily-limit flatten, "Add missing closes") — whichever gets here second
+// is a no-op instead of a second loss against the Daily Max Loss.
+function bookBotTrade(bot, record){
+  if(!appendPersistentTrade(record)) return false;
+  const net = Number(record.netUsd) || 0;
+  bot.realizedUsd = (bot.realizedUsd || 0) + net;
+  addTradingBotsRealized(net);
+  return true;
 }
 
 // One definition of the Trade Log summary maths, shared by the Futures page's Trade Log
@@ -1314,7 +1332,7 @@ function tradeLogColumns(){
     { label: 'Leverage', get: t => t.leverage != null ? `${t.leverage}x` : '' },
     { label: 'Qty', get: t => t.qty != null ? t.qty : '' },
     { label: 'Gross', get: t => t.grossUsd != null ? Number(t.grossUsd) : '' },
-    { label: 'Fees', get: t => t.feesUsd != null ? Number(t.feesUsd) : '' },
+    { label: 'Fees', get: t => feeOf(t) != null ? feeOf(t) : '' },
     { label: 'Net', get: t => t.netUsd != null ? Number(t.netUsd) : '' },
     { label: 'Duration (min)', get: t => t.durationMin != null ? t.durationMin : '' },
     { label: 'Strategy', get: t => t.setupType || '' },
@@ -1345,6 +1363,11 @@ function renderTradeLog(){
 
   const count = rows.length;
   const sum = summarizeTradeRows(rows);
+  if(els.fuLogDedupeBtn){
+    const dupes = dedupeBotTrades(loadPersistentTradeLog()).removed.length;
+    els.fuLogDedupeBtn.style.display = dupes ? '' : 'none';
+    els.fuLogDedupeBtn.textContent = `Remove ${dupes} duplicate${dupes === 1 ? '' : 's'}`;
+  }
   if(els.fuLogCount) els.fuLogCount.textContent = String(count);
   if(els.fuLogGross) els.fuLogGross.textContent = (sum.grossApprox ? '~' : '') + fmtUsd(sum.grossSum);
   if(els.fuLogFees) els.fuLogFees.textContent = (sum.feesApprox ? '~' : '') + fmtMoney(sum.feesSum);
@@ -1475,6 +1498,30 @@ async function exportTradeLogPdf(){
   }catch(err){
     showLiveMessage(`PDF export failed: ${err.message}`, 'error');
   }
+}
+
+// Collapses the same bot trade logged more than once (see js/futures/tradeLedger.js) and takes the extra P&L back out
+// of non-server bots' Realized and of today's loss counter. Server-held trades/counters are repaired on the server.
+async function removeDuplicateTradeRows(){
+  const { kept, removed } = dedupeBotTrades(loadPersistentTradeLog());
+  if(!removed.length){ showLiveMessage('No duplicate bot trades found.'); return; }
+  const extra = removed.reduce((a, t) => a + (Number(t.netUsd) || 0), 0);
+  if(!confirm(`Remove ${removed.length} duplicate bot trade row(s)? They add ${fmtUsd(extra)} that was counted twice. The first copy of each trade is kept.`)) return;
+  try{ localStorage.setItem(PERSISTENT_TRADE_LOG_KEY, JSON.stringify(kept)); }
+  catch(e){ showLiveMessage(`Could not save: ${e.message}`, 'error'); return; }
+  const f = fu();
+  const dayStart = (f.tbDayKey != null ? f.tbDayKey : Math.floor(Date.now() / 86_400_000)) * 86_400_000;
+  for(const t of removed){
+    const n = Number(t.netUsd) || 0;
+    const bot = f.tradingBots.find(b => b.id === t.gridId);
+    if(bot && bot.type === 'grid' && !isServerBot(bot)) bot.realizedUsd = (bot.realizedUsd || 0) - n;
+    if((t.closedAtMs || 0) >= dayStart) f.tbDayRealizedUsd -= n;
+  }
+  selectedTradeLogIds.clear();
+  const r = await serverUpdateDay({ dedupe: true });
+  const lifted = liftDailyHaltIfNoLongerBreached();
+  renderTradeLog(); renderTradingBotsList(); renderTradingBotsDailyLimits();
+  showLiveMessage(`Removed ${removed.length} duplicate trade row(s).${lifted ? " Today's daily-limit pause was lifted — the loss was overstated." : ''}${r && r.ok === false && !r.skipped ? ' (The server copy could not be repaired: ' + (r.message || 'error') + '.)' : ''}`);
 }
 
 function deleteSelectedTradeLogRows(){
@@ -2096,6 +2143,7 @@ function initTradeLog(){
     renderTradeLog();
   });
   if(els.fuLogDeleteBtn) els.fuLogDeleteBtn.addEventListener('click', deleteSelectedTradeLogRows);
+  if(els.fuLogDedupeBtn) els.fuLogDedupeBtn.addEventListener('click', removeDuplicateTradeRows);
   if(els.fuLogExportCsvBtn) els.fuLogExportCsvBtn.addEventListener('click', exportTradeLogCsv);
   if(els.fuLogExportXlsBtn) els.fuLogExportXlsBtn.addEventListener('click', exportTradeLogXls);
   if(els.fuLogExportPdfBtn) els.fuLogExportPdfBtn.addEventListener('click', exportTradeLogPdf);
@@ -2849,12 +2897,133 @@ function renderTradingBotsCreate(){
   renderTradingBotsDailyLimits();
 }
 
+// -------------------------------------------------------------
+// Daily Risk Limits — the cross-bot Max Loss / Profit Target. These used to live only in a create-form that no
+// page renders any more, so when the day was paused there was nowhere to change anything. They now have a card at
+// the top of Utilities & Tools -> Trading Bots. Limits are remembered per browser and, for bots running on the
+// server, enforced there — so every change/reset is sent to the server as well as applied here.
+// -------------------------------------------------------------
+const TB_DAY_LIMITS_KEY = 'nxtgen_tb_day_limits_v1';
+
+function loadTradingBotDayLimits(){
+  try{
+    const p = JSON.parse(localStorage.getItem(TB_DAY_LIMITS_KEY) || 'null');
+    const f = fu();
+    if(p && Number.isFinite(p.maxLossPct) && p.maxLossPct >= 0.5) f.tbDailyMaxLossPct = p.maxLossPct;
+    if(p && Number.isFinite(p.profitTargetPct) && p.profitTargetPct >= 0.5) f.tbDailyProfitTargetPct = p.profitTargetPct;
+  }catch(e){ /* blocked/corrupt storage — keep the defaults */ }
+}
+function saveTradingBotDayLimits(){
+  const f = fu();
+  try{ localStorage.setItem(TB_DAY_LIMITS_KEY, JSON.stringify({ maxLossPct: f.tbDailyMaxLossPct, profitTargetPct: f.tbDailyProfitTargetPct })); }catch(e){ /* non-fatal */ }
+}
+
+function tradingBotsDayPct(){
+  const f = fu();
+  return f.tbDayAnchorInvestmentUsd > 0 ? (f.tbDayRealizedUsd / f.tbDayAnchorInvestmentUsd) * 100 : 0;
+}
+
+// After a limit changes: lift today's pause if today's P&L no longer breaches either limit.
+function liftDailyHaltIfNoLongerBreached(){
+  const f = fu();
+  if(!f.tbDailyHalted) return false;
+  const pct = tradingBotsDayPct();
+  const breached = pct >= f.tbDailyProfitTargetPct || (f.tbDailyMaxLossPct && pct <= -f.tbDailyMaxLossPct);
+  if(breached) return false;
+  f.tbDailyHalted = false; f.tbDailyHaltMessage = null; f.tbDailyHaltKind = null;
+  return true;
+}
+
+async function applyTradingBotDayLimits(maxLossPct, profitTargetPct){
+  const f = fu();
+  if(Number.isFinite(maxLossPct)) f.tbDailyMaxLossPct = Math.min(100, Math.max(0.5, maxLossPct));
+  if(Number.isFinite(profitTargetPct)) f.tbDailyProfitTargetPct = Math.min(1000, Math.max(0.5, profitTargetPct));
+  saveTradingBotDayLimits();
+  const lifted = liftDailyHaltIfNoLongerBreached();
+  renderSbDayLimits(true); renderTradingBotsDailyLimits();
+  const r = await serverUpdateDay({ maxLossPct: f.tbDailyMaxLossPct, profitTargetPct: f.tbDailyProfitTargetPct });
+  const serverNote = r && r.ok === false && !r.skipped ? ` (the server did not take the change: ${r.message || 'unknown error'})` : '';
+  sbDayLimitsMsg(lifted ? `Limits saved — today's pause lifted, you can create bots again.${serverNote}` : (f.tbDailyHalted ? `Limits saved, but today's loss is still beyond them — raise the limit further or reset today's counters.${serverNote}` : `Limits saved.${serverNote}`), !!serverNote || f.tbDailyHalted);
+  renderSbDayLimits(true);
+}
+
+// Zero today's realized counter, re-anchor it to the bots running right now and lift the pause. The loss guard
+// starts again from 0% — i.e. you can lose up to the Max Loss % again today. Nothing is closed or deleted.
+async function resetTradingBotsDayCounters(){
+  const f = fu();
+  const running = f.tradingBots.filter(b => (b.status === 'active' || b.status === 'deploying') && b.investmentUsd > 0);
+  if(!window.confirm(`Reset today's counters and resume?\n\nToday's realized P&L (${fmtUsd(f.tbDayRealizedUsd)}) is set back to $0 and the daily limit starts counting again from zero, so up to ${f.tbDailyMaxLossPct}% more can be lost today before the pause triggers again. No bot is closed and no trade is deleted.`)) return;
+  f.tbDayRealizedUsd = 0;
+  f.tbDayAnchorInvestmentUsd = running.reduce((a, b) => a + (b.investmentUsd || 0), 0);
+  f.tbDailyHalted = false; f.tbDailyHaltMessage = null; f.tbDailyHaltKind = null;
+  renderSbDayLimits(true); renderTradingBotsDailyLimits();
+  const r = await serverUpdateDay({ reset: true, maxLossPct: f.tbDailyMaxLossPct, profitTargetPct: f.tbDailyProfitTargetPct });
+  const bad = r && r.ok === false && !r.skipped;
+  sbDayLimitsMsg(bad ? `Reset here, but the server did not take it: ${r.message || 'unknown error'} — bots running on the server stay paused until it does.` : 'Counters reset — trading resumed for today.', !!bad);
+  renderSbDayLimits(true);
+}
+
+let sbDayMsgText = '', sbDayMsgErr = false;
+function sbDayLimitsMsg(text, isErr){ sbDayMsgText = text; sbDayMsgErr = !!isErr; const el = document.getElementById('sbDayMsg'); if(el){ el.textContent = text; el.style.color = isErr ? 'var(--red)' : 'var(--green)'; } }
+
+function renderSbDayLimits(force){
+  const host = document.getElementById('sbDayLimitsHost');
+  if(!host) return;
+  const f = fu();
+  const active = document.activeElement;
+  const typing = host.contains(active) && active && active.tagName === 'INPUT';
+  if(!host.dataset.built || force === 'rebuild'){
+    host.dataset.built = '1';
+    host.innerHTML = `
+      <div class="ov-block" style="padding:12px;margin-bottom:12px;">
+        <strong style="font-size:12.5px;">Daily Risk Limits — all Trading Bots combined</strong>
+        <div style="font-size:11px;color:var(--dim);margin:4px 0 8px;line-height:1.5;">
+          Measured against the total invested in bots created today. When Max Loss is hit every running bot is stopped and no new bot can be created until the next UTC day (00:00 UTC) — unless you raise the limit or reset today's counters here. Limits apply to browser-run and server-run bots alike.
+        </div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
+          <label style="font-size:11px;color:var(--dim);">Daily Max Loss (%)
+            <input id="sbDayMaxLoss" type="number" min="0.5" max="100" step="any" style="display:block;margin-top:3px;min-width:100px;">
+          </label>
+          <label style="font-size:11px;color:var(--dim);">Daily Profit Target (%)
+            <input id="sbDayProfit" type="number" min="0.5" max="1000" step="any" style="display:block;margin-top:3px;min-width:100px;">
+          </label>
+          <button type="button" class="primary" id="sbDayApply" style="font-size:12px;padding:6px 14px;">Save limits</button>
+          <button type="button" class="primary ghost" id="sbDayReset" style="font-size:12px;padding:6px 14px;" title="Zero today's realized P&amp;L counter and resume — nothing is closed or deleted">Reset today's counters &amp; resume</button>
+        </div>
+        <div id="sbDayToday" style="font-size:12px;margin-top:8px;"></div>
+        <div id="sbDayHalt" style="display:none;margin-top:8px;font-size:12px;color:var(--red);border:1px solid var(--red);border-radius:6px;padding:6px 10px;"></div>
+        <div id="sbDayMsg" style="font-size:11.5px;margin-top:6px;"></div>
+      </div>`;
+    host.addEventListener('click', (e) => {
+      if(e.target.closest('#sbDayApply')){
+        const loss = parseFloat(document.getElementById('sbDayMaxLoss').value), prof = parseFloat(document.getElementById('sbDayProfit').value);
+        if(!(loss >= 0.5) || !(prof >= 0.5)){ sbDayLimitsMsg('Enter a Max Loss and a Profit Target of at least 0.5%.', true); return; }
+        applyTradingBotDayLimits(loss, prof);
+      } else if(e.target.closest('#sbDayReset')) resetTradingBotsDayCounters();
+    });
+  }
+  // Refresh values without ever overwriting what the person is typing (this re-renders on every server mirror, every ~6 s).
+  const lossEl = document.getElementById('sbDayMaxLoss'), profEl = document.getElementById('sbDayProfit');
+  if(!typing || force === true){
+    if(lossEl && active !== lossEl) lossEl.value = f.tbDailyMaxLossPct;
+    if(profEl && active !== profEl) profEl.value = f.tbDailyProfitTargetPct;
+  }
+  const pct = tradingBotsDayPct();
+  const today = document.getElementById('sbDayToday');
+  if(today) today.innerHTML = `Today: <strong style="color:${pct >= 0 ? 'var(--green)' : 'var(--red)'};">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</strong> (${fmtUsd(f.tbDayRealizedUsd)} realized on ${fmtMoney(f.tbDayAnchorInvestmentUsd)} committed today)`;
+  const halt = document.getElementById('sbDayHalt');
+  if(halt){ halt.style.display = f.tbDailyHalted ? '' : 'none'; if(f.tbDailyHalted) halt.innerHTML = `${icon('pause')} PAUSED for today: ${escapeHtmlText(f.tbDailyHaltMessage || 'daily limit reached')} — resumes automatically at 00:00 UTC, or raise the limit / reset today's counters above.`; }
+  const msg = document.getElementById('sbDayMsg');
+  if(msg){ msg.textContent = sbDayMsgText; msg.style.color = sbDayMsgErr ? 'var(--red)' : 'var(--green)'; }
+}
+
 // Refreshes ONLY the daily-limits banner (target %, today's progress,
 // paused state) — deliberately separate from renderTradingBotsCreate so
 // updating it (which happens mid-deploy, every cycle, and on every
 // realized close) never wipes out whatever the person is mid-typing in
 // the create form below it.
 function renderTradingBotsDailyLimits(){
+  renderSbDayLimits();
   const host = document.getElementById('tbDailyLimitsBar');
   if(!host) return;
   const f = fu();
@@ -3070,6 +3239,7 @@ function tbCreateStatus(msg, isError){
 }
 
 function initTradingBots(){
+  loadTradingBotDayLimits();
   loadTradingBotsSnapshot();
   initServerBots({
     fu,
@@ -3117,8 +3287,8 @@ function initTradingBots(){
       if(e.target.id === 'tbType'){ f.tbCreateType = e.target.value; renderTradingBotTypeFields(); }
       else if(e.target.id === 'tbExchange'){ readTradingBotFormNumbers(); f.tbCreateExchange = e.target.value; renderTradingBotsCreate(); }
       else if(e.target.id === 'tbSymbol'){ f.tbCreateSymbol = e.target.value.trim().toUpperCase(); }
-      else if(e.target.id === 'tbDailyProfitTarget'){ f.tbDailyProfitTargetPct = Math.max(0.5, parseFloat(e.target.value) || 20); }
-      else if(e.target.id === 'tbDailyMaxLoss'){ f.tbDailyMaxLossPct = Math.max(0.5, parseFloat(e.target.value) || 10); }
+      else if(e.target.id === 'tbDailyProfitTarget'){ applyTradingBotDayLimits(NaN, Math.max(0.5, parseFloat(e.target.value) || 20)); }
+      else if(e.target.id === 'tbDailyMaxLoss'){ applyTradingBotDayLimits(Math.max(0.5, parseFloat(e.target.value) || 10), NaN); }
       else if(e.target.id === 'tbBtSymbol'){ f.tbBacktestSymbol = e.target.value; }
       else if(e.target.id === 'tbBtTimeframe'){ f.tbBacktestTimeframe = e.target.value; }
       else if(e.target.id === 'tbBtDays'){ f.tbBacktestDays = Math.max(3, Math.min(180, parseInt(e.target.value, 10) || 30)); }
@@ -3284,7 +3454,7 @@ async function runTradingBotsGridBacktestFromForm(){
 async function createTradingBotFromForm(){
   const f = fu();
   rollTradingBotsDay(Date.now());
-  if(f.tbDailyHalted){ tbCreateStatus(`Paused for today: ${f.tbDailyHaltMessage || 'daily limit reached'} — try again after the next UTC day rollover.`, true); return; }
+  if(f.tbDailyHalted){ tbCreateStatus(`Paused for today: ${f.tbDailyHaltMessage || 'daily limit reached'} — raise the limit or press "Reset today's counters & resume" under Utilities & Tools \u2192 Trading Bots \u2192 Daily Risk Limits, or wait for the next UTC day rollover (00:00 UTC).`, true); return; }
   const type = f.tbCreateType || 'grid';
   const exchange = f.tbCreateExchange || 'bybit';
   if(!GRID_LIVE_EXCHANGES.includes(exchange)){ tbCreateStatus('Trading Bots only support Bybit or Binance.', true); return; }
@@ -3536,12 +3706,11 @@ function bookGridCloseRows(bot, rows, defaultReason){
     const net = Number(r.closedPnl) || 0;
     const closedAt = r.createdTime || Date.now();
     total += net; count++;
-    bot.realizedUsd = (bot.realizedUsd || 0) + net;
-    addTradingBotsRealized(net);
-    appendPersistentTrade({
+    bookBotTrade(bot, {
       closedAtMs: closedAt, openedAtMs: lvl && lvl.openedAt ? lvl.openedAt : null, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: direction, direction,
       entry: r.avgEntryPrice, exit: r.avgExitPrice, qty: r.qty, leverage: bot.plan?.leverage ?? null,
-      grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: net, pnlSource: 'exchange',
+      grossUsd: r.feesUsd != null ? net + Math.abs(r.feesUsd) : null, feesUsd: r.feesUsd != null ? Math.abs(r.feesUsd) : null, feesReal: r.feesUsd != null, fundingUsd: null, slippageUsd: null, netUsd: net, pnlSource: 'exchange',
+      closeOrderId: r.orderId, entryOrderId: lvl ? lvl.entryOrderId : null,
       confidence: null, setupType: 'Trading Bot: Grid', exitReason: lvl ? 'GRID_CYCLE_TP' : defaultReason,
       durationMin: lvl && lvl.openedAt ? Math.max(0, Math.round((closedAt - lvl.openedAt) / 60_000)) : null,
       gridId: bot.id, gridLevel: lvl ? lvl.levelIndex : null, cycleResult: net > 0 ? 'WIN' : 'LOSS',
@@ -3581,9 +3750,7 @@ async function flattenGridBot(bot, proxyArgs, exitReason){
     }
   } else if(hadOpen && posKnown){
     total = unrealized; count = 1;
-    bot.realizedUsd = (bot.realizedUsd || 0) + unrealized;
-    addTradingBotsRealized(unrealized);
-    appendPersistentTrade({
+    bookBotTrade(bot, {
       closedAtMs: Date.now(), exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: bot.direction || 'GRID', netUsd: unrealized, pnlSource: 'estimate',
       leverage: bot.plan?.leverage ?? null, setupType: 'Trading Bot: Grid', exitReason: `${exitReason}_EST`, gridId: bot.id,
     });
@@ -3752,18 +3919,16 @@ async function manageGridBotInstance(bot, cred, nowMs){
         const estimate = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: level.targetPrice, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
         const pnl = await resolveGridCyclePnl(proxyArgs, level.closeOrderId, estimate);
         claimRow(level.closeOrderId);
-        bot.realizedUsd += pnl.netUsd;
-        addTradingBotsRealized(pnl.netUsd);
         tradingBotLog(bot, `Level ${level.levelIndex} cycle closed — ${fmtUsd(pnl.netUsd)} (${pnl.pnlSource === 'exchange' ? 'Bybit-verified' : 'estimated'}).`, false);
         const closedAt = pnl.closedAtMs || (await getFillTimes()).get(String(level.closeOrderId)) || nowMs;
         // Entry/exit/qty come from the SAME Bybit row as the P&L so a row's prices always reproduce its P&L
         // (Bybit realizes hedge-mode closes against the position's AVERAGE entry, not this level's own price).
-        appendPersistentTrade({
+        bookBotTrade(bot, {
           closedAtMs: closedAt, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
           entry: pnl.avgEntryPrice || level.entryPrice, exit: pnl.avgExitPrice || level.targetPrice, qty: pnl.qty || qty, leverage: plan.leverage,
           grossUsd: pnl.grossUsd != null ? pnl.grossUsd : estimate.grossUsd, feesUsd: pnl.feesUsd != null ? pnl.feesUsd : estimate.feesUsd,
           fundingUsd: pnl.fundingUsd != null ? pnl.fundingUsd : estimate.fundingUsd, slippageUsd: pnl.slippageUsd != null ? pnl.slippageUsd : estimate.slippageUsd,
-          netUsd: pnl.netUsd, pnlSource: pnl.pnlSource,
+          netUsd: pnl.netUsd, pnlSource: pnl.pnlSource, feesReal: pnl.pnlSource === 'exchange' && pnl.feesUsd != null,
           confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_CYCLE_TP', durationMin: Math.max(0, Math.round((closedAt - level.openedAt) / 60_000)), durationSec: Math.max(0, Math.round((closedAt - level.openedAt) / 1000)),
           gridId: bot.id, gridLevel: level.levelIndex, entryOrderId: level.entryOrderId, closeOrderId: level.closeOrderId, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
         });
@@ -3784,12 +3949,10 @@ async function manageGridBotInstance(bot, cred, nowMs){
         for(const r of stopRows){
           claimRow(r.orderId);
           total += r.closedPnl;
-          bot.realizedUsd += r.closedPnl;
-          addTradingBotsRealized(r.closedPnl);
-          appendPersistentTrade({
+          bookBotTrade(bot, {
             closedAtMs: r.createdTime || nowMs, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
             entry: r.avgEntryPrice, exit: r.avgExitPrice, qty: r.qty, leverage: plan.leverage,
-            grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: r.closedPnl, pnlSource: 'exchange',
+            grossUsd: r.feesUsd != null ? r.closedPnl + Math.abs(r.feesUsd) : null, feesUsd: r.feesUsd != null ? Math.abs(r.feesUsd) : null, feesReal: r.feesUsd != null, fundingUsd: null, slippageUsd: null, netUsd: r.closedPnl, pnlSource: 'exchange',
             confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_SIDE_STOP', durationMin: Math.max(0, Math.round(((r.createdTime || nowMs) - level.openedAt) / 60_000)),
             gridId: bot.id, gridLevel: level.levelIndex, entryOrderId: level.entryOrderId, closeOrderId: r.orderId, cycleResult: r.closedPnl > 0 ? 'WIN' : 'LOSS',
           });
@@ -3809,14 +3972,13 @@ async function manageGridBotInstance(bot, cred, nowMs){
       level.missTicks = (level.missTicks || 0) + 1;
       const waitTicks = bot.exchange === 'bybit' ? 4 : 0;
       if(level.missTicks <= waitTicks){ continue; }
+      if(level.closeOrderId != null) claimRow(level.closeOrderId); // booked below as an estimate — the exchange row for this order must never be booked a second time
       const stopPx = level.direction === 'LONG' ? plan.lower : plan.upper;
       const stoppedOut = level.direction === 'LONG' ? snap.price <= stopPx : snap.price >= stopPx;
       const exitPx = stoppedOut ? stopPx : level.targetPrice;
       const estimate = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: exitPx, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
-      bot.realizedUsd += estimate.netUsd;
-      addTradingBotsRealized(estimate.netUsd);
       tradingBotLog(bot, `Level ${level.levelIndex} closed — ${fmtUsd(estimate.netUsd)} (estimated ${stoppedOut ? 'as a stop-out' : 'as a take-profit'}; exchange P&L not available). Use Verify with Bybit to reconcile.`, true);
-      appendPersistentTrade({
+      bookBotTrade(bot, {
         closedAtMs: nowMs, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
         entry: level.entryPrice, exit: exitPx, qty, leverage: plan.leverage,
         grossUsd: estimate.grossUsd, feesUsd: estimate.feesUsd, fundingUsd: estimate.fundingUsd, slippageUsd: estimate.slippageUsd, netUsd: estimate.netUsd, pnlSource: 'estimate',
@@ -3944,9 +4106,10 @@ async function manageDcaBotInstance(bot, cred, nowMs){
       netUsd: closed ? closed.closedPnl : 0, pnlSource: closed && closed.pnlSource ? closed.pnlSource : null,
       setupType: 'Trading Bot: DCA', durationMin: Math.round((nowMs - bot.runtime.openedAtMs) / 60_000), gridId: bot.id,
     };
-    bot.realizedUsd = record.netUsd || 0;
-    addTradingBotsRealized(bot.realizedUsd);
-    appendPersistentTrade(record);
+    if(appendPersistentTrade(record)){
+      bot.realizedUsd = record.netUsd || 0;
+      addTradingBotsRealized(bot.realizedUsd);
+    } // else: a Stop / daily-limit flatten already booked this same close — don't count it twice
     bot.status = 'closed'; bot.stoppedAtMs = Date.now();
     tradingBotLog(bot, `Position closed — ${fmtUsd(bot.realizedUsd)} realized.`, false);
     return;
@@ -3987,12 +4150,16 @@ function rollTradingBotsDay(nowMs){
   f.tbDayRealizedUsd = 0;
   f.tbDailyHalted = false;
   f.tbDailyHaltMessage = null;
+  f.tbDailyHaltKind = null;
 }
 
 function addTradingBotsRealized(deltaUsd){
   const f = fu();
   f.tbDayRealizedUsd += deltaUsd;
-  checkTradingBotsDailyLimits();
+  // Checked on the next tick, not inline: the code that called us is still mid-booking (trade row, bot
+  // status). A halt started right here would flatten that same bot while its close is still being
+  // written, and book the close a second time.
+  setTimeout(checkTradingBotsDailyLimits, 0);
 }
 
 function checkTradingBotsDailyLimits(){
@@ -4029,6 +4196,7 @@ async function haltTradingBotsForToday(reason, { flattenActive = true } = {}){
   if(f.tbDailyHalted) return; // already in progress/done — avoid double-flattening if this fires twice in the same tick
   f.tbDailyHalted = true;
   f.tbDailyHaltMessage = reason;
+  f.tbDailyHaltKind = flattenActive ? 'loss' : 'profit';
   if(flattenActive){
     const activeBots = f.tradingBots.filter(b => b.status === 'active');
     for(const bot of activeBots){
@@ -4302,9 +4470,7 @@ async function closeBotPositionForcefully(bot, cred, reasonLabel){
   }
 
   if(hadSomethingOpen){
-    bot.realizedUsd = (bot.realizedUsd || 0) + netUsd;
-    addTradingBotsRealized(netUsd);
-    appendPersistentTrade({
+    bookBotTrade(bot, {
       closedAtMs: Date.now(), exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: bot.direction,
       entry, exit, leverage: bot.leverage || bot.plan?.leverage || null, qty, netUsd,
       setupType: `Trading Bot: ${bot.type === 'grid' ? 'Grid' : 'DCA'} (${reasonLabel === 'PAUSED' ? 'paused' : 'stopped'})`,
@@ -4315,7 +4481,17 @@ async function closeBotPositionForcefully(bot, cred, reasonLabel){
   return { ok:true, netUsd, hadSomethingOpen };
 }
 
+// One stop at a time per bot, and never on a bot that is already stopped: Stop button + daily-limit
+// halt + the management cycle can all reach here for the same bot within seconds.
+const stoppingBotIds = new Set();
 async function stopTradingBot(id){
+  const bot = fu().tradingBots.find(b => b.id === id);
+  if(!bot || bot.status === 'closed' || bot.status === 'stopped' || stoppingBotIds.has(id)) return;
+  stoppingBotIds.add(id);
+  try{ return await stopTradingBotNow(id); }
+  finally{ stoppingBotIds.delete(id); }
+}
+async function stopTradingBotNow(id){
   const f = fu();
   const bot = f.tradingBots.find(b => b.id === id);
   if(!bot) return;
@@ -4938,11 +5114,14 @@ function resetSmartBotsCommittedMargin(){
   if(!window.confirm(`Reset Committed Margin?\n\nThis removes ${fmtMoney(amount)} from ${toReset.length} stopped bot${toReset.length === 1 ? '' : 's'} from the counter. Bots, trade history and Bots Profit are not touched. Running bots keep counting.`)) return;
   toReset.forEach(b => { b.marginExcluded = true; });
   renderSmartBotsPanel(); // also persists the snapshot
+  serverResetMargin().catch(() => {}); // bots held on the server keep this flag there, so every device and the next mirror agree
 }
 
 function renderSmartBotsList(){
   if(!els.sbListHost) return;
   const f = fu();
+  rollTradingBotsDay(Date.now());
+  renderSbDayLimits();
   const bots = smartBots();
   const tab = f.sbListTab || 'active';
   const shown = bots.filter(b => tab === 'active' ? (b.status === 'active' || b.status === 'deploying') : (b.status === 'stopped' || b.status === 'closed' || b.status === 'error'));
@@ -5697,7 +5876,7 @@ function readSmartBotFormNumbers(){
 async function createSmartBotFromFormInner(){
   const f = sbState();
   rollTradingBotsDay(Date.now());
-  if(f.tbDailyHalted){ sbCreateStatus(`Paused for today: ${f.tbDailyHaltMessage || 'daily limit reached'} — try again after the next UTC day rollover.`, true); return; }
+  if(f.tbDailyHalted){ sbCreateStatus(`Paused for today: ${f.tbDailyHaltMessage || 'daily limit reached'} — raise the limit or press "Reset today's counters & resume" on the Trading Bots list (Daily Risk Limits), or wait for the next UTC day rollover (00:00 UTC).`, true); return; }
   readSmartBotFormNumbers();
   const type = f.sbCreateType || 'dca';
   const exchange = f.sbCreateExchange || 'bybit';
@@ -6438,7 +6617,7 @@ function renderSbTradeLog(){
       <div class="ov-card ov-highlight"><span class="ov-label">Net P&amp;L</span><span class="ov-value">${fmtUsd(sum.netSum)}</span></div>
     </div>
     ${rows.length ? `<div class="table-scroll"><table class="tb-orders-table">
-      <thead><tr><th>Time</th><th>Exchange</th><th>Pair</th><th>Bot</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Lev</th><th>Net</th></tr></thead>
+      <thead><tr><th>Time</th><th>Exchange</th><th>Pair</th><th>Bot</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Lev</th><th>Gross</th><th>Fees</th><th>Net</th></tr></thead>
       <tbody>${rows.slice(0, 200).map(t => `<tr>
         <td>${new Date(t.closedAtMs).toLocaleString()}</td>
         <td>${t.exchange || '\u2014'}${t.mode ? ` (${t.mode})` : ''}</td>
@@ -6448,6 +6627,8 @@ function renderSbTradeLog(){
         <td>${t.entry != null ? Number(t.entry).toFixed(4) : '\u2014'}</td>
         <td>${t.exit != null ? Number(t.exit).toFixed(4) : '\u2014'}</td>
         <td>${t.leverage != null ? t.leverage + 'x' : '\u2014'}</td>
+        <td>${t.grossUsd != null ? fmtUsd(t.grossUsd) : (t.netUsd != null && feeOf(t) != null ? fmtUsd(t.netUsd + feeOf(t)) : '\u2014')}</td>
+        <td>${feeOf(t) != null ? fmtMoney(feeOf(t)) : '\u2014'}</td>
         <td style="color:${(t.netUsd || 0) >= 0 ? 'var(--green)' : 'var(--red)'};font-weight:700;">${t.netUsd != null ? fmtUsd(t.netUsd) : '\u2014'}</td>
       </tr>`).join('')}</tbody></table></div>
       <div class="sbf-hint" style="margin-top:8px;">${rows.length > 200 ? `Showing the latest 200 of ${rows.length}. ` : ''}Trades placed by your Smart Bots only, kept in this browser. Win rate = trades with a positive net &divide; all trades with a known net. Delete or export from the Futures Engine Trade Log.</div>`

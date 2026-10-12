@@ -20,6 +20,7 @@ import { GRID_DEFAULTS, detectGridBreakout, buildManualGridPlan, suggestGridRang
 import { buildDcaPlan, computeDcaExitPrices } from '../js/futures/dca.js';
 import { estimateLiquidationPrice, RISK_DEFAULTS } from '../js/futures/risk.js';
 import { classifyRegime } from '../js/futures/regime.js';
+import { isDuplicateBotTrade, dedupeBotTrades } from '../js/futures/tradeLedger.js';
 
 export const BOT_EXCHANGES = ['bybit', 'binance'];
 // Exchanges whose API keys can be saved (encrypted) on an account. Wider than BOT_EXCHANGES: the 24/7 bot engine only trades Bybit/Binance,
@@ -54,10 +55,23 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
     store.touch();
   }
 
+  // Returns true when a NEW row was written, false when the same bot trade is already stored (see
+  // js/futures/tradeLedger.js). bookBotTrade only adds P&L to the bot / daily counters on true.
   function appendPersistentTrade(record){
+    if(isDuplicateBotTrade(S.trades, record)) return false;
     S.trades.unshift({ id: `${record.closedAtMs || Date.now()}_${record.symbol || ''}_${Math.random().toString(36).slice(2, 9)}`, ...record });
     if(S.trades.length > MAX_TRADES) S.trades.length = MAX_TRADES;
     store.touch();
+    return true;
+  }
+
+  // The ONE way a bot close is booked — row first, P&L counted only if the row is new.
+  function bookBotTrade(bot, record){
+    if(!appendPersistentTrade(record)) return false;
+    const net = Number(record.netUsd) || 0;
+    bot.realizedUsd = (bot.realizedUsd || 0) + net;
+    addTradingBotsRealized(net);
+    return true;
   }
 
   // ---------------- lifted from js/futures-ui.js (unchanged) ----------------
@@ -211,12 +225,11 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
       const net = Number(r.closedPnl) || 0;
       const closedAt = r.createdTime || Date.now();
       total += net; count++;
-      bot.realizedUsd = (bot.realizedUsd || 0) + net;
-      addTradingBotsRealized(net);
-      appendPersistentTrade({
+      bookBotTrade(bot, {
         closedAtMs: closedAt, openedAtMs: lvl && lvl.openedAt ? lvl.openedAt : null, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: direction, direction,
         entry: r.avgEntryPrice, exit: r.avgExitPrice, qty: r.qty, leverage: bot.plan?.leverage ?? null,
-        grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: net, pnlSource: 'exchange',
+        grossUsd: r.feesUsd != null ? net + Math.abs(r.feesUsd) : null, feesUsd: r.feesUsd != null ? Math.abs(r.feesUsd) : null, feesReal: r.feesUsd != null, fundingUsd: null, slippageUsd: null, netUsd: net, pnlSource: 'exchange',
+        closeOrderId: r.orderId, entryOrderId: lvl ? lvl.entryOrderId : null,
         confidence: null, setupType: 'Trading Bot: Grid', exitReason: lvl ? 'GRID_CYCLE_TP' : defaultReason,
         durationMin: lvl && lvl.openedAt ? Math.max(0, Math.round((closedAt - lvl.openedAt) / 60_000)) : null,
         gridId: bot.id, gridLevel: lvl ? lvl.levelIndex : null, cycleResult: net > 0 ? 'WIN' : 'LOSS',
@@ -256,9 +269,7 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
       }
     } else if(hadOpen && posKnown){
       total = unrealized; count = 1;
-      bot.realizedUsd = (bot.realizedUsd || 0) + unrealized;
-      addTradingBotsRealized(unrealized);
-      appendPersistentTrade({
+      bookBotTrade(bot, {
         closedAtMs: Date.now(), exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: bot.direction || 'GRID', netUsd: unrealized, pnlSource: 'estimate',
         leverage: bot.plan?.leverage ?? null, setupType: 'Trading Bot: Grid', exitReason: `${exitReason}_EST`, gridId: bot.id,
       });
@@ -427,18 +438,16 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
           const estimate = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: level.targetPrice, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
           const pnl = await resolveGridCyclePnl(proxyArgs, level.closeOrderId, estimate);
           claimRow(level.closeOrderId);
-          bot.realizedUsd += pnl.netUsd;
-          addTradingBotsRealized(pnl.netUsd);
           tradingBotLog(bot, `Level ${level.levelIndex} cycle closed — ${fmtUsd(pnl.netUsd)} (${pnl.pnlSource === 'exchange' ? 'Bybit-verified' : 'estimated'}).`, false);
           const closedAt = pnl.closedAtMs || (await getFillTimes()).get(String(level.closeOrderId)) || nowMs;
           // Entry/exit/qty come from the SAME Bybit row as the P&L so a row's prices always reproduce its P&L
           // (Bybit realizes hedge-mode closes against the position's AVERAGE entry, not this level's own price).
-          appendPersistentTrade({
+          bookBotTrade(bot, {
             closedAtMs: closedAt, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
             entry: pnl.avgEntryPrice || level.entryPrice, exit: pnl.avgExitPrice || level.targetPrice, qty: pnl.qty || qty, leverage: plan.leverage,
             grossUsd: pnl.grossUsd != null ? pnl.grossUsd : estimate.grossUsd, feesUsd: pnl.feesUsd != null ? pnl.feesUsd : estimate.feesUsd,
             fundingUsd: pnl.fundingUsd != null ? pnl.fundingUsd : estimate.fundingUsd, slippageUsd: pnl.slippageUsd != null ? pnl.slippageUsd : estimate.slippageUsd,
-            netUsd: pnl.netUsd, pnlSource: pnl.pnlSource,
+            netUsd: pnl.netUsd, pnlSource: pnl.pnlSource, feesReal: pnl.pnlSource === 'exchange' && pnl.feesUsd != null,
             confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_CYCLE_TP', durationMin: Math.max(0, Math.round((closedAt - level.openedAt) / 60_000)), durationSec: Math.max(0, Math.round((closedAt - level.openedAt) / 1000)),
             gridId: bot.id, gridLevel: level.levelIndex, entryOrderId: level.entryOrderId, closeOrderId: level.closeOrderId, cycleResult: pnl.netUsd > 0 ? 'WIN' : 'LOSS',
           });
@@ -459,12 +468,10 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
           for(const r of stopRows){
             claimRow(r.orderId);
             total += r.closedPnl;
-            bot.realizedUsd += r.closedPnl;
-            addTradingBotsRealized(r.closedPnl);
-            appendPersistentTrade({
+            bookBotTrade(bot, {
               closedAtMs: r.createdTime || nowMs, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
               entry: r.avgEntryPrice, exit: r.avgExitPrice, qty: r.qty, leverage: plan.leverage,
-              grossUsd: null, feesUsd: null, fundingUsd: null, slippageUsd: null, netUsd: r.closedPnl, pnlSource: 'exchange',
+              grossUsd: r.feesUsd != null ? r.closedPnl + Math.abs(r.feesUsd) : null, feesUsd: r.feesUsd != null ? Math.abs(r.feesUsd) : null, feesReal: r.feesUsd != null, fundingUsd: null, slippageUsd: null, netUsd: r.closedPnl, pnlSource: 'exchange',
               confidence: null, setupType: 'Trading Bot: Grid', exitReason: 'GRID_SIDE_STOP', durationMin: Math.max(0, Math.round(((r.createdTime || nowMs) - level.openedAt) / 60_000)),
               gridId: bot.id, gridLevel: level.levelIndex, entryOrderId: level.entryOrderId, closeOrderId: r.orderId, cycleResult: r.closedPnl > 0 ? 'WIN' : 'LOSS',
             });
@@ -484,14 +491,13 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
         level.missTicks = (level.missTicks || 0) + 1;
         const waitTicks = bot.exchange === 'bybit' ? 4 : 0;
         if(level.missTicks <= waitTicks){ continue; }
+        if(level.closeOrderId != null) claimRow(level.closeOrderId); // booked below as an estimate — the exchange row for this order must never be booked a second time
         const stopPx = level.direction === 'LONG' ? plan.lower : plan.upper;
         const stoppedOut = level.direction === 'LONG' ? snap.price <= stopPx : snap.price >= stopPx;
         const exitPx = stoppedOut ? stopPx : level.targetPrice;
         const estimate = netCycleProfit({ entryPrice: level.entryPrice, exitPrice: exitPx, qty, direction: level.direction, exchange: bot.exchange, holdMinutes: (nowMs - level.openedAt) / 60_000, fundingRatePct: snap.meta.fundingRatePct, slippagePct: snap.meta.spreadPct });
-        bot.realizedUsd += estimate.netUsd;
-        addTradingBotsRealized(estimate.netUsd);
         tradingBotLog(bot, `Level ${level.levelIndex} closed — ${fmtUsd(estimate.netUsd)} (estimated ${stoppedOut ? 'as a stop-out' : 'as a take-profit'}; exchange P&L not available). Use Verify with Bybit to reconcile.`, true);
-        appendPersistentTrade({
+        bookBotTrade(bot, {
           closedAtMs: nowMs, openedAtMs: level.openedAt, exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: level.direction, direction: level.direction,
           entry: level.entryPrice, exit: exitPx, qty, leverage: plan.leverage,
           grossUsd: estimate.grossUsd, feesUsd: estimate.feesUsd, fundingUsd: estimate.fundingUsd, slippageUsd: estimate.slippageUsd, netUsd: estimate.netUsd, pnlSource: 'estimate',
@@ -620,9 +626,10 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
         netUsd: closed ? closed.closedPnl : 0, pnlSource: closed && closed.pnlSource ? closed.pnlSource : null,
         setupType: 'Trading Bot: DCA', durationMin: Math.round((nowMs - bot.runtime.openedAtMs) / 60_000), gridId: bot.id,
       };
-      bot.realizedUsd = record.netUsd || 0;
-      addTradingBotsRealized(bot.realizedUsd);
-      appendPersistentTrade(record);
+      if(appendPersistentTrade(record)){
+        bot.realizedUsd = record.netUsd || 0;
+        addTradingBotsRealized(bot.realizedUsd);
+      } // else: a Stop / daily-limit flatten already booked this same close — don't count it twice
       bot.status = 'closed'; bot.stoppedAtMs = Date.now();
       tradingBotLog(bot, `Position closed — ${fmtUsd(bot.realizedUsd)} realized.`, false);
       return;
@@ -663,12 +670,15 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
     f.tbDayRealizedUsd = 0;
     f.tbDailyHalted = false;
     f.tbDailyHaltMessage = null;
+    f.tbDailyHaltKind = null;
   }
 
   function addTradingBotsRealized(deltaUsd){
     const f = fu();
     f.tbDayRealizedUsd += deltaUsd;
-    checkTradingBotsDailyLimits();
+    // Checked on the next tick, not inline: the booking code that called us is still mid-way (trade row, bot
+    // status). A halt started right here would flatten that same bot and book its close a second time.
+    setTimeout(checkTradingBotsDailyLimits, 0);
   }
 
   function checkTradingBotsDailyLimits(){
@@ -705,6 +715,7 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
     if(f.tbDailyHalted) return; // already in progress/done — avoid double-flattening if this fires twice in the same tick
     f.tbDailyHalted = true;
     f.tbDailyHaltMessage = reason;
+    f.tbDailyHaltKind = flattenActive ? 'loss' : 'profit';
     if(flattenActive){
       const activeBots = f.tradingBots.filter(b => b.status === 'active');
       for(const bot of activeBots){
@@ -771,9 +782,7 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
     }
 
     if(hadSomethingOpen){
-      bot.realizedUsd = (bot.realizedUsd || 0) + netUsd;
-      addTradingBotsRealized(netUsd);
-      appendPersistentTrade({
+      bookBotTrade(bot, {
         closedAtMs: Date.now(), exchange: bot.exchange, mode: bot.mode, symbol: bot.symbol, side: bot.direction,
         entry, exit, leverage: bot.leverage || bot.plan?.leverage || null, qty, netUsd,
         setupType: `Trading Bot: ${bot.type === 'grid' ? 'Grid' : 'DCA'} (${reasonLabel === 'PAUSED' ? 'paused' : 'stopped'})`,
@@ -798,7 +807,17 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
   const saveSoon = () => { Promise.resolve(store.flushNow()).catch(() => {}); };
 
   // Stop = flatten everything this bot has on the exchange, then mark it stopped. Same as the Stop button.
+  // One stop at a time per bot, and never on a bot that is already stopped (Stop button + daily-limit halt +
+  // the cycle can all reach here for the same bot within seconds).
+  const stoppingBotIds = new Set();
   async function stopTradingBot(id){
+    const bot = S.tradingBots.find(b => b.id === id);
+    if(!bot || bot.status === 'closed' || stoppingBotIds.has(id)) return;
+    stoppingBotIds.add(id);
+    try{ return await stopTradingBotNow(id); }
+    finally{ stoppingBotIds.delete(id); }
+  }
+  async function stopTradingBotNow(id){
     const bot = S.tradingBots.find(b => b.id === id);
     if(!bot) return;
     const cred = liveCred(bot.exchange, bot.mode);
@@ -980,18 +999,78 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
   }
   function shutdown(){ if(timer){ clearInterval(timer); timer = null; } store.close(); }
 
+  // Change today's cross-bot limits and/or lift today's pause. This is the ONLY way (besides the UTC day
+  // rollover) to clear a Daily Max Loss / Profit Target pause, because the pause lives on the server for
+  // server-run bots — editing the % box in the browser alone never reached it.
+  //   maxLossPct / profitTargetPct — new limits; if the pause no longer applies under them it is lifted.
+  //   reset: true — also zero today's realized P&L counter and re-anchor it to the bots that are running
+  //          right now, then lift the pause (the loss guard starts counting again from zero).
+  const clampPct = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+  // Removes the same bot trade stored twice (older versions booked a close from more than one code path) and takes
+  // the extra P&L back out of the bots' Realized and of today's counter. Keeps the oldest copy of each trade.
+  function repairDuplicateTrades(){
+    const { kept, removed } = dedupeBotTrades(S.trades);
+    if(!removed.length) return { removed: 0, netUsd: 0 };
+    S.trades.length = 0; S.trades.push(...kept);
+    const dayStart = (S.tbDayKey != null ? S.tbDayKey : Math.floor(Date.now() / 86_400_000)) * 86_400_000;
+    let netUsd = 0;
+    for(const t of removed){
+      const n = Number(t.netUsd) || 0; netUsd += n;
+      const bot = S.tradingBots.find(b => b.id === t.gridId);
+      if(bot && bot.type === 'grid') bot.realizedUsd = (bot.realizedUsd || 0) - n;   // grid bots add each close; a DCA bot just stores its one close
+      if((t.closedAtMs || 0) >= dayStart) S.tbDayRealizedUsd -= n;
+    }
+    store.touch();
+    return { removed: removed.length, netUsd };
+  }
+
+  function updateDay(input){
+    const { maxLossPct, profitTargetPct, reset, dedupe } = input || {};
+    rollTradingBotsDay(Date.now());
+    const repaired = dedupe === true ? repairDuplicateTrades() : null;
+    if(num(maxLossPct)) S.tbDailyMaxLossPct = clampPct(maxLossPct, 0.5, 100);
+    if(num(profitTargetPct)) S.tbDailyProfitTargetPct = clampPct(profitTargetPct, 0.5, 1000);
+    if(reset === true){
+      S.tbDayRealizedUsd = 0;
+      S.tbDayAnchorInvestmentUsd = S.tradingBots
+        .filter(b => (b.status === 'active' || b.status === 'deploying') && num(b.investmentUsd))
+        .reduce((a, b) => a + b.investmentUsd, 0);
+      S.tbDailyHalted = false; S.tbDailyHaltMessage = null; S.tbDailyHaltKind = null;
+    } else if(S.tbDailyHalted){
+      const pct = S.tbDayAnchorInvestmentUsd > 0 ? (S.tbDayRealizedUsd / S.tbDayAnchorInvestmentUsd) * 100 : 0;
+      const breached = pct >= S.tbDailyProfitTargetPct || (S.tbDailyMaxLossPct && pct <= -S.tbDailyMaxLossPct);
+      if(!breached){ S.tbDailyHalted = false; S.tbDailyHaltMessage = null; S.tbDailyHaltKind = null; }
+    }
+    store.touch();
+    return { day: snapshot().day, repaired };
+  }
+
+  // "Reset Committed Margin" on the Trading Bots list, kept ON THE SERVER so every device/browser sees the
+  // same counter (it used to be a flag in one browser's local storage and got overwritten by the server's
+  // copy of each bot a few seconds later). Only bots that are no longer running are cleared.
+  function resetCommittedMargin(){
+    let count = 0, amount = 0;
+    for(const b of S.tradingBots){
+      if(b.status === 'active' || b.status === 'deploying' || b.marginExcluded || !(b.investmentUsd > 0)) continue;
+      b.marginExcluded = true; count++; amount += b.investmentUsd;
+    }
+    store.touch();
+    return { count, amount };
+  }
+
   function snapshot(){
     return {
       bots: S.tradingBots,
       day: {
         tbDayKey: S.tbDayKey, tbDayAnchorInvestmentUsd: S.tbDayAnchorInvestmentUsd, tbDayRealizedUsd: S.tbDayRealizedUsd,
-        tbDailyHalted: S.tbDailyHalted, tbDailyHaltMessage: S.tbDailyHaltMessage,
+        tbDailyHalted: S.tbDailyHalted, tbDailyHaltMessage: S.tbDailyHaltMessage, tbDailyHaltKind: S.tbDailyHaltKind || null,
         tbDailyProfitTargetPct: S.tbDailyProfitTargetPct, tbDailyMaxLossPct: S.tbDailyMaxLossPct,
       },
     };
   }
 
-  return { start, shutdown, runCycle, handoff, stopBot: stopTradingBot, pauseBot, resumeBot, removeBot, renameBot, snapshot, getBot, deploying };
+  return { start, shutdown, runCycle, handoff, stopBot: stopTradingBot, pauseBot, resumeBot, removeBot, renameBot, updateDay, resetCommittedMargin, snapshot, getBot, deploying };
 }
 
 export function httpErr(status, message){ const e = new Error(message); e.status = status; return e; }

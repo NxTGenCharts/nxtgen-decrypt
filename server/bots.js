@@ -181,6 +181,11 @@ export function attachBots(app, { baseUrl, internalKey, env = process.env, log =
     return { bot: botView(bot) };
   }));
 
+  // Today's cross-bot limits: change them and/or lift the Daily Max Loss / Profit Target pause.
+  app.post('/api/bots/day', access('admin'), guard, bigJson, wrap(async (req) => req.ctx.engine.updateDay(req.body || {})));
+  // Committed Margin reset — account-wide, so every device agrees.
+  app.post('/api/bots/margin/reset', access('admin'), guard, bigJson, wrap(async (req) => req.ctx.engine.resetCommittedMargin()));
+
   const botAction = (name, fn) => app.post(`/api/bots/:id/${name}`, access('admin'), guard, bigJson, wrap(async (req) => fn(req)));
   botAction('stop', async (req) => { await req.ctx.engine.stopBot(req.params.id); return { bot: botView(req.ctx.engine.getBot(req.params.id)) }; });
   botAction('pause', async (req) => ({ bot: botView(await req.ctx.engine.pauseBot(req.params.id)) }));
@@ -280,7 +285,7 @@ export function attachBots(app, { baseUrl, internalKey, env = process.env, log =
       for(const b of L.tradingBots) if(!have.has(b.id)){ U.tradingBots.push(JSON.parse(JSON.stringify(b))); nBots++; }
       for(const t of L.trades) if(!haveT.has(t.id)){ U.trades.push(JSON.parse(JSON.stringify(t))); nTrades++; }
       U.trades.sort((a, b) => (b.closedAtMs || 0) - (a.closedAtMs || 0));
-      for(const k of ['tbDayKey', 'tbDayAnchorInvestmentUsd', 'tbDayRealizedUsd', 'tbDailyHalted', 'tbDailyHaltMessage', 'tbDailyProfitTargetPct', 'tbDailyMaxLossPct']) if(U.tradingBots.length === nBots) U[k] = L[k];
+      for(const k of ['tbDayKey', 'tbDayAnchorInvestmentUsd', 'tbDayRealizedUsd', 'tbDailyHalted', 'tbDailyHaltMessage', 'tbDailyHaltKind', 'tbDailyProfitTargetPct', 'tbDailyMaxLossPct']) if(U.tradingBots.length === nBots) U[k] = L[k];
       for(const c of legacy.store.listCreds()){
         if(ctx.store.getCred(c.exchange, c.mode)) continue;               // never overwrite a key the account already saved
         const plain = legacy.store.getCred(c.exchange, c.mode); if(plain){ await ctx.store.setCred(c.exchange, c.mode, plain); nKeys++; }

@@ -41,6 +41,7 @@ function freshState(){
     tbDayRealizedUsd: 0,
     tbDailyHalted: false,
     tbDailyHaltMessage: null,
+    tbDailyHaltKind: null,
     tbDailyProfitTargetPct: 20,
     tbDailyMaxLossPct: 10,
   };

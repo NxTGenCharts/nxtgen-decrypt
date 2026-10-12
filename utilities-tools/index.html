@@ -64,12 +64,12 @@
 
 <div class="panel active" id="panelUtilities">
     <nav class="term-subnav" role="tablist" aria-label="Utilities and Tools sub-tabs">
-      <a class="navtab subnavtab" id="tabSmartBotsBtn" href="#trading-bots" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-bot"/></svg></span>Trading Bots</a>
+      <a class="navtab subnavtab active" id="tabSmartBotsBtn" href="#trading-bots" role="tab" aria-selected="true"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-bot"/></svg></span>Trading Bots</a>
       <a class="navtab subnavtab" id="tabBacktestBtn" href="#backtesting" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-history"/></svg></span>Backtesting</a>
-      <a class="navtab subnavtab active" id="tabPaperBtn" href="#paper-trading" role="tab" aria-selected="true"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-clipboard-list"/></svg></span>Paper Trading</a>
+      <a class="navtab subnavtab" id="tabPaperBtn" href="#paper-trading" role="tab" aria-selected="false"><span class="ic"><svg class="icon" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-clipboard-list"/></svg></span>Paper Trading</a>
     </nav>
 
-  <div class="panel active" id="panelPaper">
+  <div class="panel" id="panelPaper">
 
     <div class="ov-head">
       <h2>Paper Trading <span class="pill" id="fuStatus" style="margin-left:8px;">PAUSED · PAPER</span></h2>
@@ -321,13 +321,14 @@
 
   </div>
 
-  <div class="panel" id="panelSmartBots">
+  <div class="panel active" id="panelSmartBots">
 
     <div class="ov-block fu-strategies" id="fuSmartBotsDetails" style="margin-bottom:18px;">
       <div class="ov-block-title">Trading Bots <span class="fu-strategies-badge" id="fuSmartBotsBadge"></span></div>
       <div id="sbListView">
         <div id="sbServerHost"></div>
         <div id="sbBalanceHost"></div>
+        <div id="sbDayLimitsHost"></div>
         <div id="sbSummaryHost"></div>
         <div id="sbTabsHost"></div>
         <div id="sbListHost"></div>
@@ -349,12 +350,12 @@
 </div>
 
 <script>
-/* Show the tab named in the URL before app.js has finished loading, so opening
-   #backtesting or #trading-bots never flashes Paper Trading first. The real routing
+/* Trading Bots is the default tab (the markup above ships with it active). Show the tab named in the URL before
+   app.js has finished loading, so opening #backtesting or #paper-trading never flashes the wrong tab first. The real routing
    lives in js/ui.js (SUBTAB_GROUPS) - keep these slugs in sync with it. */
 (function(){
   var h = (location.hash || '').replace(/^#/, '').toLowerCase();
-  var map = { 'backtesting': 'backtest', 'backtest': 'backtest', 'trading-bots': 'smartbots', 'bots': 'smartbots', 'smart-bots': 'smartbots', 'smartbots': 'smartbots' };
+  var map = { 'paper-trading': 'paper', 'paper': 'paper', 'backtesting': 'backtest', 'backtest': 'backtest', 'trading-bots': 'smartbots', 'bots': 'smartbots', 'smart-bots': 'smartbots', 'smartbots': 'smartbots' };
   var which = map[h]; if(!which) return;
   var ids = { paper: ['tabPaperBtn', 'panelPaper'], backtest: ['tabBacktestBtn', 'panelBacktest'], smartbots: ['tabSmartBotsBtn', 'panelSmartBots'] };
   Object.keys(ids).forEach(function(k){

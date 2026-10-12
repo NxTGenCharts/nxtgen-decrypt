@@ -126,11 +126,16 @@ function applyStatus(st){
   for(const sb of incoming){
     sb.server = true;
     const i = f.tradingBots.findIndex(b => b.id === sb.id);
-    if(i >= 0) f.tradingBots[i] = sb; else f.tradingBots.push(sb);
+    // marginExcluded (Reset Committed Margin) is kept on the server; if this device cleared it before the
+    // server knew, carry it over instead of letting the incoming copy silently un-clear it.
+    if(i >= 0){ if(f.tradingBots[i].marginExcluded && !sb.marginExcluded) sb.marginExcluded = true; f.tradingBots[i] = sb; }
+    else f.tradingBots.push(sb);
   }
   // The cross-bot daily counters are authoritative on the server for server bots (the targets stay yours).
   if(st.day && !f.tradingBots.some(b => !b.server && b.status === 'active')){
-    for(const k of ['tbDayKey', 'tbDayAnchorInvestmentUsd', 'tbDayRealizedUsd', 'tbDailyHalted', 'tbDailyHaltMessage']) f[k] = st.day[k];
+    for(const k of ['tbDayKey', 'tbDayAnchorInvestmentUsd', 'tbDayRealizedUsd', 'tbDailyHalted', 'tbDailyHaltMessage', 'tbDailyHaltKind']) f[k] = st.day[k];
+    // The limits themselves are the server's too (it enforces them for server bots) — show what it is really using.
+    for(const k of ['tbDailyMaxLossPct', 'tbDailyProfitTargetPct']) if(typeof st.day[k] === 'number') f[k] = st.day[k];
   }
 }
 
@@ -246,6 +251,19 @@ async function act(id, action, body){
     return r;
   }catch(e){ return { ok: false, message: e.message }; }
 }
+// Day limits / Committed Margin live on the server for server-run bots. These return { ok:false, skipped:true } when
+// there is no server session at all (browser-only mode), so callers can simply apply the change locally.
+async function serverCall(path, body){
+  const token = await getToken(false);
+  if(!token) return { ok: false, skipped: true };
+  try{
+    const r = await api(path, 'POST', body || {}, token);
+    if(r && r.ok) await refresh();
+    return r;
+  }catch(e){ return { ok: false, message: e.message }; }
+}
+export const serverUpdateDay = (body) => serverCall('/api/bots/day', body);
+export const serverResetMargin = () => serverCall('/api/bots/margin/reset', {});
 export const serverStop = (id) => act(id, 'stop');
 export const serverPause = (id) => act(id, 'pause');
 export const serverResume = (id) => act(id, 'resume');

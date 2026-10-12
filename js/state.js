@@ -193,6 +193,7 @@ export const els = {
   fuLogSelectAll: document.getElementById('fuLogSelectAll'),
   fuLogSelectedCount: document.getElementById('fuLogSelectedCount'),
   fuLogDeleteBtn: document.getElementById('fuLogDeleteBtn'),
+  fuLogDedupeBtn: document.getElementById('fuLogDedupeBtn'),
   fuLogExportCsvBtn: document.getElementById('fuLogExportCsvBtn'),
   fuLogExportXlsBtn: document.getElementById('fuLogExportXlsBtn'),
   fuLogExportPdfBtn: document.getElementById('fuLogExportPdfBtn'),
@@ -473,6 +474,7 @@ export const state = {
     tbDayKey: null,
     tbDailyHalted: false,
     tbDailyHaltMessage: null,
+    tbDailyHaltKind: null,       // 'loss' | 'profit' — which limit paused today
     // Futures Grid Auto-Scan — watches GRID_SYMBOLS (the same watchlist
     // NxTGen Grid uses) and auto-creates new Trading Bots grid deployments
     // sized with tbAutoScanConfig's fixed investment/leverage the moment a

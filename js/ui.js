@@ -98,7 +98,7 @@ export function switchTabAll(which){
 //
 // The active sub-tab lives in the URL hash so it can be linked to, survives a
 // reload, and works with the browser's Back/Forward buttons, e.g.
-//   /utilities-tools/#paper-trading          (also the default with no hash)
+//   /utilities-tools/#trading-bots           (also the default with no hash)
 //   /utilities-tools/#backtesting
 //   /utilities-tools/#trading-bots
 // Old short links (#auto, #futures, #bots) keep working as aliases where the
@@ -106,7 +106,7 @@ export function switchTabAll(which){
 // Utilities & Tools by an inline script in that page.)
 const SUBTAB_GROUPS = [
   {
-    defaultKey: 'paper',
+    defaultKey: 'smartbots',
     btn: { paper: 'tabPaperBtn', backtest: 'tabBacktestBtn', smartbots: 'tabSmartBotsBtn' },
     panel: { paper: 'panelPaper', backtest: 'panelBacktest', smartbots: 'panelSmartBots' },
     slug: { paper: 'paper-trading', backtest: 'backtesting', smartbots: 'trading-bots' },
@@ -172,6 +172,6 @@ export function initSubTabRouting(){
   };
   window.addEventListener('hashchange', syncFromUrl);
   window.addEventListener('popstate', syncFromUrl);
-  const initial = subTabFromHash();
+  const initial = subTabFromHash() || (location.hash ? null : g.defaultKey);
   if(initial) switchSubTab(initial);
 }
