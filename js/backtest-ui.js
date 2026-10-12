@@ -14,6 +14,7 @@ import { WATCHLIST_TOP_N, rankTopByVolume } from './futures/watchlist.js';
 import { STRATEGY_REGISTRY } from './futures/setups.js';
 import { DEFAULT_FEE_CONFIG } from './futures/costs.js';
 import { runBacktest, summarizeTrades } from './futures/backtest.js';
+import { exportReportPdf } from './pdf-report.js';
 import { RISK_DEFAULTS } from './futures/risk.js';
 import { GRID_STRATEGY, GRID_DEFAULTS, runGridBacktestMulti, summarizeGridTrades } from './futures/grid.js';
 
@@ -507,42 +508,29 @@ function exportBacktestXls(){
   downloadBlobBt(`nxtgen-backtest-${Date.now()}.xls`, html, 'application/vnd.ms-excel');
 }
 
-async function ensureJsPdfBt(){
-  if(window.jspdf && window.jspdf.jsPDF) return window.jspdf;
-  const loadScript = src => new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = src; s.onload = () => resolve(); s.onerror = () => reject(new Error(`could not load ${src}`));
-    document.head.appendChild(s);
-  });
-  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js');
-  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.4/jspdf.plugin.autotable.min.js');
-  if(!window.jspdf || !window.jspdf.jsPDF) throw new Error('PDF library failed to initialize');
-  return window.jspdf;
-}
-
 async function exportBacktestPdf(){
   if(!lastResult || !lastResult.trades.length){ showBtMessage('Run a backtest first — nothing to export yet.', 'error'); return; }
   showBtMessage('Building PDF…');
   try{
-    const { jsPDF } = await ensureJsPdfBt();
-    const cols = btColumns();
-    const stats = summarizeTrades(lastResult.trades, lastResult.startingEquity);
-    const doc = new jsPDF({ orientation: 'landscape' });
-    doc.setFontSize(12);
-    doc.text('NxTGen Backtest Results', 14, 14);
-    doc.setFontSize(8);
-    doc.text(`${stats.count} trades · ${stats.winRate.toFixed(1)}% win rate · net ${fmtUsd(stats.netUsd)} · ${new Date().toLocaleString()}`, 14, 20);
-    doc.autoTable({
-      startY: 24,
-      head: [cols.map(c => c.label)],
-      body: lastResult.trades.map(t => cols.map(c => String(c.get(t)))),
-      styles: { fontSize: 7 },
-      headStyles: { fillColor: [20, 20, 30] },
+    const trades = lastResult.trades;
+    const stats = summarizeTrades(trades, lastResult.startingEquity);
+    const pf = stats.profitFactor;
+    const result = await exportReportPdf({
+      title: 'Backtest Results', kicker: 'Strategy backtest report',
+      subtitle: `${stats.count} trades \u00b7 starting balance ${fmtUsd(lastResult.startingEquity)}`,
+      summary: [
+        { label: 'Trades', value: String(stats.count) },
+        { label: 'Win rate', value: `${stats.winRate.toFixed(1)}%`, tone: stats.winRate >= 50 ? 'pos' : 'neg' },
+        { label: 'Profit factor', value: pf === Infinity ? '\u221e' : pf.toFixed(2), note: pf === Infinity ? 'no losing trades' : '' },
+        { label: 'Net P&L', value: fmtUsd(stats.netUsd), note: `${stats.netReturnPct >= 0 ? '+' : ''}${stats.netReturnPct.toFixed(2)}% return`, tone: stats.netUsd > 0 ? 'pos' : stats.netUsd < 0 ? 'neg' : '' },
+        { label: 'Expectancy', value: fmtUsd(stats.expectancyUsd), note: 'per trade', tone: stats.expectancyUsd > 0 ? 'pos' : stats.expectancyUsd < 0 ? 'neg' : '' },
+      ],
+      columns: btColumns(), rows: trades, sumColumns: ['Gross', 'Fees', 'Net'],
+      filename: `nxtgen-backtest-${Date.now()}.pdf`,
     });
-    doc.save(`nxtgen-backtest-${Date.now()}.pdf`);
-    showBtMessage('Exported PDF.', 'ok');
+    showBtMessage(`Exported PDF (${result.pages} page${result.pages === 1 ? '' : 's'}).`, 'ok');
   }catch(err){
-    showBtMessage(`PDF export failed: ${err.message} — needs an internet connection the first time, to load the PDF library.`, 'error');
+    showBtMessage(`PDF export failed: ${err.message}`, 'error');
   }
 }
 

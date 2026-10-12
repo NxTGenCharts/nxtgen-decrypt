@@ -13,7 +13,7 @@
 // on the very next load (no stale-app trap), while a slow or dead
 // connection still opens the app from cache after ~3.5s.
 // =============================================================
-const VERSION = 'nxtgen-shell-v53';
+const VERSION = 'nxtgen-shell-v54';
 const NETWORK_TIMEOUT_MS = 3500;
 const PRECACHE = [
   "/",
@@ -26,6 +26,7 @@ const PRECACHE = [
   "/css/landing.css",
   "/css/buttons.css",
   "/js/button-icons.js",
+  "/js/pdf-report.js",
   "/js/landing.js",
   "/triangular-arbitrage/",
   "/cross-arbitrage/",

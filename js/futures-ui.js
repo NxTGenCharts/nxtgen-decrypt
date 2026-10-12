@@ -39,6 +39,7 @@ import { GRID_STRATEGY, GRID_DEFAULTS, GRID_SYMBOLS, createGridSession, stepGrid
 import { DCA_STRATEGY, DCA_DEFAULTS, buildDcaPlan, computeDcaExitPrices } from './futures/dca.js';
 import { classifyRegime, REGIMES } from './futures/regime.js';
 import { getAiConfirmation } from './ai-signal.js';
+import { exportReportPdf } from './pdf-report.js';
 import { openBotFx, botToast, confirmStopSheet } from './bot-fx.js';
 import { initServerBots, tryHandoff, isServerBot, serverStop, serverPause, serverResume, serverRemove, serverRename } from './server-bots.js';
 
@@ -1438,23 +1439,16 @@ function exportTradeLogXls(){
   showLiveMessage(`Exported ${rows.length} trade(s) to XLS.`);
 }
 
-// jsPDF + autoTable are lazy-loaded from cdnjs only when a PDF export is
-// actually requested — keeps the base app dependency-free and working
-// fully offline for everything else, at the cost of needing a real
-// internet connection the first time this specific button is used.
-async function ensureJsPdf(){
-  if(window.jspdf && window.jspdf.jsPDF) return window.jspdf;
-  const loadScript = src => new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = src;
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error(`could not load ${src}`));
-    document.head.appendChild(s);
-  });
-  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js');
-  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.4/jspdf.plugin.autotable.min.js');
-  if(!window.jspdf || !window.jspdf.jsPDF) throw new Error('PDF library failed to initialize');
-  return window.jspdf;
+// PDF export: built in the browser by js/pdf-report.js (no library, no network — the old version lazy-loaded jsPDF from a CDN
+// and did nothing when that request was blocked). Branded header with the logo, summary cards, the table and a totals row.
+function tradeLogRangeLabel(){
+  const { preset, fromMs, toMs } = tradeLogRange;
+  const d = ms => new Date(ms).toLocaleDateString();
+  if(preset === 'today') return 'Today';
+  if(preset === 'week') return 'Last 7 days';
+  if(preset === 'month') return 'Last 30 days';
+  if(preset === 'all') return 'All time';
+  return fromMs ? `${d(fromMs)} \u2013 ${d(toMs)}` : `Up to ${d(toMs)}`;
 }
 
 async function exportTradeLogPdf(){
@@ -1462,24 +1456,24 @@ async function exportTradeLogPdf(){
   if(!rows.length){ showLiveMessage('No trades to export — nothing checked and nothing in the current range.', 'error'); return; }
   showLiveMessage('Building PDF…');
   try{
-    const { jsPDF } = await ensureJsPdf();
-    const cols = tradeLogColumns();
-    const doc = new jsPDF({ orientation: 'landscape' });
-    doc.setFontSize(12);
-    doc.text('NxTGen Trade Log', 14, 14);
-    doc.setFontSize(8);
-    doc.text(new Date().toLocaleString(), 14, 20);
-    doc.autoTable({
-      startY: 24,
-      head: [cols.map(c => c.label)],
-      body: rows.map(t => cols.map(c => String(c.get(t)))),
-      styles: { fontSize: 7 },
-      headStyles: { fillColor: [20, 20, 30] },
+    const sum = summarizeTradeRows(rows);
+    const picked = selectedTradeLogIds.size > 0;
+    const result = await exportReportPdf({
+      title: 'Trade Log', kicker: 'Trade log report',
+      subtitle: `${picked ? `${rows.length} selected trade(s)` : tradeLogRangeLabel()} \u00b7 ${rows.length} trade${rows.length === 1 ? '' : 's'}`,
+      summary: [
+        { label: 'Trades', value: String(sum.count), note: picked ? 'selected rows' : tradeLogRangeLabel() },
+        { label: 'Win rate', value: sum.winRatePct == null ? '\u2014' : `${sum.winRatePct.toFixed(1)}%`, note: sum.winRatePct == null ? '' : `${sum.wins}W \u00b7 ${sum.losses}L${sum.flat ? ` \u00b7 ${sum.flat} flat` : ''}`, tone: sum.winRatePct == null ? '' : (sum.winRatePct >= 50 ? 'pos' : 'neg') },
+        { label: 'Gross P&L', value: (sum.grossApprox ? '~' : '') + fmtUsd(sum.grossSum), tone: sum.grossSum > 0 ? 'pos' : sum.grossSum < 0 ? 'neg' : '' },
+        { label: 'Fees', value: (sum.feesApprox ? '~' : '') + fmtMoney(sum.feesSum) },
+        { label: 'Net P&L', value: fmtUsd(sum.netSum), tone: sum.netSum > 0 ? 'pos' : sum.netSum < 0 ? 'neg' : '' },
+      ],
+      columns: tradeLogColumns(), rows, sumColumns: ['Gross', 'Fees', 'Net'],
+      filename: `nxtgen-trade-log-${Date.now()}.pdf`,
     });
-    doc.save(`nxtgen-trade-log-${Date.now()}.pdf`);
-    showLiveMessage(`Exported ${rows.length} trade(s) to PDF.`);
+    showLiveMessage(`Exported ${rows.length} trade(s) to PDF (${result.pages} page${result.pages === 1 ? '' : 's'}).`);
   }catch(err){
-    showLiveMessage(`PDF export failed: ${err.message} — this needs an internet connection the first time it's used, to load the PDF library.`, 'error');
+    showLiveMessage(`PDF export failed: ${err.message}`, 'error');
   }
 }
 
