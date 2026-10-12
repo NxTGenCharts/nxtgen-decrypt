@@ -3852,14 +3852,17 @@ async function manageGridBotInstance(bot, cred, nowMs){
     const profitTargetPct = bot.config?.profitTargetPct;
     const lossFloorUsd = maxLossPct ? -bot.investmentUsd * (maxLossPct / 100) : null;
     const profitCeilUsd = profitTargetPct ? bot.investmentUsd * (profitTargetPct / 100) : null;
+    // Profit Target counts closed profit PLUS the floating P&L of open legs (same figure as Total P/L and the progress bar).
+    // Max Loss below deliberately stays realized-only.
+    const targetPnlUsd = bot.realizedUsd + (Number.isFinite(bot.runtime?.unrealizedUsd) ? bot.runtime.unrealizedUsd : 0);
     if(lossFloorUsd != null && bot.realizedUsd <= lossFloorUsd){
       tradingBotLog(bot, `This bot's Max Loss (${maxLossPct}%) reached — flattening.`, true);
       const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_MAX_LOSS');
       if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
       else logGridFlattenResult(bot, flat);
       bot.status = 'closed'; bot.stoppedAtMs = Date.now();
-    } else if(profitCeilUsd != null && bot.realizedUsd >= profitCeilUsd){
-      tradingBotLog(bot, `This bot's Profit Target (${profitTargetPct}%) reached — flattening.`, false);
+    } else if(profitCeilUsd != null && targetPnlUsd >= profitCeilUsd){
+      tradingBotLog(bot, `This bot's Profit Target (${profitTargetPct}%) reached (${fmtUsd(targetPnlUsd)} incl. floating) — flattening.`, false);
       const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_TARGET');
       if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
       else logGridFlattenResult(bot, flat);
@@ -4521,11 +4524,19 @@ function sbProfitTargetProgress(bot){
   if(!Number.isFinite(profitTargetPct) || profitTargetPct <= 0 || !(bot.investmentUsd > 0)) return null;
   const targetUsd = bot.investmentUsd * (profitTargetPct / 100);
   const realizedUsd = bot.realizedUsd || 0;
-  const remainingUsd = Math.max(0, targetUsd - realizedUsd);
+  // The bar tracks what the card's Total P/L shows: closed cycles PLUS the floating P&L of open legs. It used to count
+  // closed cycles only, so a bot sitting on open legs (0 trades, +$3.73 floating) showed 0% and looked frozen.
+  // Only a live bot has a floating figure; stopped bots have none, so theirs stays realized-only.
+  const live = bot.status === 'active' || bot.status === 'deploying';
+  const floatingUsd = live && Number.isFinite(bot.runtime?.unrealizedUsd) ? bot.runtime.unrealizedUsd : 0;
+  const totalUsd = realizedUsd + floatingUsd;
+  const remainingUsd = Math.max(0, targetUsd - totalUsd);
+  const totalPct = (totalUsd / bot.investmentUsd) * 100;
   const realizedPct = (realizedUsd / bot.investmentUsd) * 100;
-  const remainingPct = Math.max(0, profitTargetPct - realizedPct);
-  const progressPct = Math.max(0, Math.min(100, (realizedUsd / targetUsd) * 100));
-  return { profitTargetPct, targetUsd, realizedUsd, remainingUsd, realizedPct, remainingPct, progressPct, reached: realizedUsd >= targetUsd };
+  const remainingPct = Math.max(0, profitTargetPct - totalPct);
+  const progressPct = Math.max(0, Math.min(100, (totalUsd / targetUsd) * 100));
+  // `reached` uses the same total the engine checks before flattening the bot (realized + floating).
+  return { profitTargetPct, targetUsd, realizedUsd, floatingUsd, totalUsd, remainingUsd, realizedPct, totalPct, remainingPct, progressPct, reached: totalUsd >= targetUsd };
 }
 
 function tbDirBadgeLabel(bot){ return `${bot.direction === 'NEUTRAL' ? 'Neutral' : bot.direction === 'LONG' ? 'Long' : 'Short'} ${bot.leverage}x`; }
@@ -6103,7 +6114,7 @@ function renderSmartBotDetail(id, force){
     <div class="tb-params-head">${tgt.kind === 'dca' ? 'Take-Profit Progress' : 'Profit Target'}</div>
     <div class="progress-wrap" style="margin-bottom:14px;">
       <div class="progress-track progress-track--tall" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(tgt.progressPct)}"><div class="progress-bar progress-bar--green${tgt.reached ? ' done' : ''}" style="width:${tgt.progressPct.toFixed(1)}%;"></div><span class="progress-pct">${Number(tgt.progressPct.toFixed(1))}%</span></div>
-      <div class="progress-label">${tgt.kind === 'dca' ? `<strong class="progress-left">${tgt.movePct.toFixed(2)}%</strong> price move toward the <strong class="progress-left">${tgt.profitTargetPct}%</strong> take-profit${tgt.reached ? ' — take-profit reached' : ` — <strong class="progress-left">${tgt.remainingPct.toFixed(2)}%</strong> to go`}` : `<strong class="progress-left">${fmtUsd(tgt.realizedUsd)} of ${fmtMoney(tgt.targetUsd)}</strong> (${tgt.realizedPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}`}</div>
+      <div class="progress-label">${tgt.kind === 'dca' ? `<strong class="progress-left">${tgt.movePct.toFixed(2)}%</strong> price move toward the <strong class="progress-left">${tgt.profitTargetPct}%</strong> take-profit${tgt.reached ? ' — take-profit reached' : ` — <strong class="progress-left">${tgt.remainingPct.toFixed(2)}%</strong> to go`}` : `<strong class="progress-left">${fmtUsd(tgt.totalUsd)} of ${fmtMoney(tgt.targetUsd)}</strong> (${tgt.totalPct.toFixed(2)}% of ${tgt.profitTargetPct}%)${tgt.floatingUsd ? ` · ${fmtUsd(tgt.realizedUsd)} realized + ${fmtUsd(tgt.floatingUsd)} floating` : ''}${tgt.reached ? ' — target reached' : ` — <strong class="progress-left">${fmtMoney(tgt.remainingUsd)} (${tgt.remainingPct.toFixed(2)}%)</strong> left`}`}</div>
     </div>` : '';
   const editHtml = bot.status === 'active' ? sbEditTargetsHtml(bot, f) : '';
   // ---- Open trades: what the bot is holding RIGHT NOW (the table below only lists closed cycles) ----

@@ -521,14 +521,17 @@ export function createBotEngine({ store, callProxy, fetchSnapshot, log = console
       const profitTargetPct = bot.config?.profitTargetPct;
       const lossFloorUsd = maxLossPct ? -bot.investmentUsd * (maxLossPct / 100) : null;
       const profitCeilUsd = profitTargetPct ? bot.investmentUsd * (profitTargetPct / 100) : null;
+      // Profit Target counts closed profit PLUS the floating P&L of open legs (same figure as Total P/L and the progress bar).
+      // Max Loss below deliberately stays realized-only.
+      const targetPnlUsd = bot.realizedUsd + (Number.isFinite(bot.runtime?.unrealizedUsd) ? bot.runtime.unrealizedUsd : 0);
       if(lossFloorUsd != null && bot.realizedUsd <= lossFloorUsd){
         tradingBotLog(bot, `This bot's Max Loss (${maxLossPct}%) reached — flattening.`, true);
         const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_MAX_LOSS');
         if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
         else logGridFlattenResult(bot, flat);
         bot.status = 'closed'; bot.stoppedAtMs = Date.now();
-      } else if(profitCeilUsd != null && bot.realizedUsd >= profitCeilUsd){
-        tradingBotLog(bot, `This bot's Profit Target (${profitTargetPct}%) reached — flattening.`, false);
+      } else if(profitCeilUsd != null && targetPnlUsd >= profitCeilUsd){
+        tradingBotLog(bot, `This bot's Profit Target (${profitTargetPct}%) reached (${fmtUsd(targetPnlUsd)} incl. floating) — flattening.`, false);
         const flat = await flattenGridBot(bot, proxyArgs, 'GRID_FLATTEN_TARGET');
         if(!flat.ok) tradingBotLog(bot, `Flatten call failed: ${flat.message} — check ${bot.symbol} on ${bot.exchange} directly.`, true);
         else logGridFlattenResult(bot, flat);
