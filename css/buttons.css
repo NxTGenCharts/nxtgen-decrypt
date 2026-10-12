@@ -1,0 +1,163 @@
+/* =====================================================================
+   NxTGen DeCrypt — button system (loaded last on every page)
+   Replaces the flat grey/gold buttons with a "terminal hardware" look:
+   machined dark-glass surfaces, a hairline amber edge, a coloured icon
+   that lights up on hover, and a soft glow instead of a hard border change.
+     PRIMARY   (.primary)               gold, lit from above, sheen sweep on hover
+     SECONDARY (.primary.ghost)         dark glass, amber icon, amber glow on hover
+     DANGER    (.primary.danger, [data-bi=danger])   red icon + red glow
+     GO        ([data-bi=go])           green icon + green glow (start / arm / create)
+   Icons are injected by /js/button-icons.js (class .bi). Everything here is
+   self-contained (no dependency on main.css) so the landing pages use it too.
+   ===================================================================== */
+:root{
+  --bt-r:10px;
+  --bt-gold-hi:#f9d36a; --bt-gold:#f0b429; --bt-gold-lo:#d99a1b;
+  --bt-glass-top:#1d241f; --bt-glass-bot:#131814;
+  --bt-edge:rgba(240,180,41,.26); --bt-edge-hi:rgba(240,180,41,.72);
+  --bt-ease:cubic-bezier(.2,.7,.2,1);
+}
+
+/* ---------- the icon ---------- */
+.bi{
+  width:1.18em; height:1.18em; flex:none; display:inline-block;
+  fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round;
+  transition:transform .22s var(--bt-ease), color .18s ease, filter .18s ease;
+}
+
+/* ---------- shared geometry ---------- */
+:is(button, a).primary:not(.sb-pill-btn):not(.tertiary),
+a.primary-link, .btn, button.ac-btn{
+  border-radius:var(--bt-r);
+  font-weight:700; letter-spacing:.015em;
+  gap:9px; padding-inline:18px;
+  -webkit-tap-highlight-color:transparent;
+  transition:transform .18s var(--bt-ease), box-shadow .22s ease, border-color .2s ease,
+             background-color .2s ease, background-position .55s var(--bt-ease), color .18s ease, filter .18s ease;
+}
+
+/* ---------- PRIMARY — gold ---------- */
+:is(button, a).primary:not(.ghost):not(.danger):not(.success):not(.sb-pill-btn):not(.tertiary),
+a.primary-link, .btn-primary{
+  color:var(--amber-ink,#1a1305);
+  border:1px solid rgba(255,221,128,.55);
+  background:
+    linear-gradient(115deg, transparent 38%, rgba(255,255,255,.42) 50%, transparent 62%) no-repeat -160% 0 / 260% 100%,
+    linear-gradient(180deg, var(--bt-gold-hi) 0%, var(--bt-gold) 54%, var(--bt-gold-lo) 100%);
+  box-shadow:
+    0 0 0 1px rgba(150,98,10,.55),
+    0 8px 20px -8px rgba(240,180,41,.55),
+    inset 0 1px 0 rgba(255,255,255,.45), inset 0 -1px 0 rgba(120,76,6,.28);
+  text-shadow:0 1px 0 rgba(255,236,170,.4);
+}
+:is(button, a).primary:not(.ghost):not(.danger):not(.success):not(.sb-pill-btn):not(.tertiary):hover:not(:disabled),
+a.primary-link:hover, .btn-primary:hover{
+  background-position:160% 0, 0 0;
+  transform:translateY(-1px);
+  box-shadow:
+    0 0 0 1px rgba(150,98,10,.6),
+    0 12px 26px -8px rgba(240,180,41,.7), 0 0 0 4px rgba(240,180,41,.12),
+    inset 0 1px 0 rgba(255,255,255,.55), inset 0 -1px 0 rgba(120,76,6,.3);
+  filter:none;
+}
+:is(button, a).primary:not(.ghost):not(.danger):not(.success):not(.sb-pill-btn):not(.tertiary):hover:not(:disabled) .bi{ transform:translateX(1px) scale(1.08); }
+:is(button, a).primary:not(.ghost):not(.danger):not(.success):not(.sb-pill-btn):not(.tertiary):active:not(:disabled),
+a.primary-link:active, .btn-primary:active{
+  transform:translateY(1px) scale(.985);
+  box-shadow:0 0 0 1px rgba(150,98,10,.6), 0 2px 8px -4px rgba(240,180,41,.5), inset 0 2px 4px rgba(120,76,6,.4);
+}
+
+/* ---------- SECONDARY — dark glass ---------- */
+:is(button, a).primary.ghost:not(.tertiary), .btn:not(.btn-primary), button.ac-btn{
+  color:var(--ink,#eef1ee);
+  border:1px solid var(--bt-edge);
+  background:
+    radial-gradient(120% 140% at 50% -40%, rgba(240,180,41,.10), transparent 60%),
+    linear-gradient(180deg, var(--bt-glass-top), var(--bt-glass-bot));
+  box-shadow:0 1px 2px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.07), inset 0 0 0 1px rgba(255,255,255,.015);
+}
+:is(button, a).primary.ghost:not(.tertiary) .bi, .btn:not(.btn-primary) .bi, button.ac-btn .bi{ color:var(--bt-gold); }
+:is(button, a).primary.ghost:not(.tertiary):hover:not(:disabled), .btn:not(.btn-primary):hover, button.ac-btn:hover:not(:disabled){
+  color:#fff; transform:translateY(-1px);
+  border-color:var(--bt-edge-hi);
+  background:
+    radial-gradient(120% 140% at 50% -40%, rgba(240,180,41,.20), transparent 62%),
+    linear-gradient(180deg, #232c25, #161c17);
+  box-shadow:0 8px 20px -10px rgba(240,180,41,.55), 0 0 0 3px rgba(240,180,41,.10), inset 0 1px 0 rgba(255,255,255,.09);
+}
+:is(button, a).primary.ghost:not(.tertiary):hover:not(:disabled) .bi, .btn:not(.btn-primary):hover .bi, button.ac-btn:hover:not(:disabled) .bi{
+  transform:scale(1.12); filter:drop-shadow(0 0 6px rgba(240,180,41,.55));
+}
+:is(button, a).primary.ghost:not(.tertiary):active:not(:disabled), .btn:not(.btn-primary):active{
+  transform:translateY(1px) scale(.985); box-shadow:inset 0 2px 5px rgba(0,0,0,.5);
+}
+
+/* ---------- DANGER (class or auto-detected by the script) ---------- */
+:is(button, a).primary.danger, :is(button, a).primary.ghost[data-bi="danger"]{
+  color:#ffd9df; border-color:rgba(242,99,122,.38);
+  background:
+    radial-gradient(120% 140% at 50% -40%, rgba(242,99,122,.14), transparent 60%),
+    linear-gradient(180deg, #241519, #170e11);
+}
+:is(button, a).primary.danger .bi, :is(button, a).primary.ghost[data-bi="danger"] .bi{ color:var(--red,#f2637a); }
+:is(button, a).primary.danger:hover:not(:disabled), :is(button, a).primary.ghost[data-bi="danger"]:hover:not(:disabled){
+  color:#fff; border-color:rgba(242,99,122,.85);
+  background:
+    radial-gradient(120% 140% at 50% -40%, rgba(242,99,122,.26), transparent 62%),
+    linear-gradient(180deg, #2c181d, #1a1013);
+  box-shadow:0 8px 20px -10px rgba(242,99,122,.7), 0 0 0 3px rgba(242,99,122,.12), inset 0 1px 0 rgba(255,255,255,.07);
+}
+:is(button, a).primary.danger:hover:not(:disabled) .bi, :is(button, a).primary.ghost[data-bi="danger"]:hover:not(:disabled) .bi{ filter:drop-shadow(0 0 6px rgba(242,99,122,.6)); }
+
+/* ---------- GO (start / arm / create) ---------- */
+:is(button, a).primary.success, :is(button, a).primary.ghost[data-bi="go"]{
+  border-color:rgba(61,220,151,.34);
+  background:
+    radial-gradient(120% 140% at 50% -40%, rgba(61,220,151,.12), transparent 60%),
+    linear-gradient(180deg, #15231a, #0f1812);
+}
+:is(button, a).primary.success .bi, :is(button, a).primary.ghost[data-bi="go"] .bi{ color:var(--green,#3ddc97); }
+:is(button, a).primary.success:hover:not(:disabled), :is(button, a).primary.ghost[data-bi="go"]:hover:not(:disabled){
+  border-color:rgba(61,220,151,.8);
+  background:
+    radial-gradient(120% 140% at 50% -40%, rgba(61,220,151,.24), transparent 62%),
+    linear-gradient(180deg, #19291f, #111c15);
+  box-shadow:0 8px 20px -10px rgba(61,220,151,.65), 0 0 0 3px rgba(61,220,151,.11), inset 0 1px 0 rgba(255,255,255,.07);
+}
+:is(button, a).primary.success:hover:not(:disabled) .bi, :is(button, a).primary.ghost[data-bi="go"]:hover:not(:disabled) .bi{ filter:drop-shadow(0 0 6px rgba(61,220,151,.6)); }
+
+/* ---------- focus + disabled ---------- */
+:is(button, a).primary:focus-visible, a.primary-link:focus-visible, .btn:focus-visible, button.ac-btn:focus-visible{
+  outline:2px solid rgba(240,180,41,.85); outline-offset:2px;
+}
+:is(button, a).primary:disabled, button.ac-btn:disabled, :is(button, a).primary[aria-disabled="true"]{
+  opacity:.5; filter:saturate(.55); cursor:not-allowed; transform:none !important;
+  box-shadow:none !important; text-shadow:none;
+}
+:is(button, a).primary.is-busy .bi, :is(button, a).primary[aria-busy="true"] .bi{ animation:biSpin .9s linear infinite; }
+@keyframes biSpin{ to{ transform:rotate(360deg); } }
+
+/* ---------- account icon buttons (Refresh, per-row Test) ---------- */
+.ac-iconbtn{
+  border-radius:var(--bt-r); border:1px solid var(--bt-edge);
+  background:radial-gradient(120% 140% at 50% -40%, rgba(240,180,41,.10), transparent 60%), linear-gradient(180deg, var(--bt-glass-top), var(--bt-glass-bot));
+  box-shadow:0 1px 2px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.07);
+  transition:transform .18s var(--bt-ease), box-shadow .22s ease, border-color .2s ease, color .18s ease;
+}
+.ac-iconbtn:hover:not(:disabled){
+  color:var(--bt-gold); transform:translateY(-1px); border-color:var(--bt-edge-hi);
+  box-shadow:0 8px 20px -10px rgba(240,180,41,.55), 0 0 0 3px rgba(240,180,41,.10), inset 0 1px 0 rgba(255,255,255,.09);
+}
+.ac-iconbtn:active:not(:disabled){ transform:translateY(1px) scale(.97); }
+
+/* ---------- layout niceties ---------- */
+:is(button, a).primary.has-bi{ white-space:nowrap; }
+.btn .bi{ width:1.1em; height:1.1em; }
+@media (max-width:640px){
+  :is(button, a).primary:not(.sb-pill-btn):not(.tertiary){ padding-inline:16px; }
+}
+@media (prefers-reduced-motion: reduce){
+  :is(button, a).primary, .btn, button.ac-btn, .ac-iconbtn, .bi{ transition:none !important; }
+  :is(button, a).primary:hover, .btn:hover, .ac-iconbtn:hover{ transform:none !important; }
+  :is(button, a).primary.is-busy .bi{ animation:none; }
+}
